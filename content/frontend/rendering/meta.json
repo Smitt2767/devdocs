@@ -1,5 +1,5 @@
 {
-  "title": "Rendering",
+  "title": "Rendering & Browser Pipeline",
   "pages": [
     "hydration",
     "partial-hydration",
