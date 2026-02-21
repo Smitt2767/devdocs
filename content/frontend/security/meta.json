@@ -1,4 +1,11 @@
 {
   "title": "Security",
-  "pages": []
+  "pages": [
+    "csrf-vs-xss-mitigation",
+    "content-security-policy",
+    "trusted-types",
+    "prototype-pollution",
+    "dependency-supply-chain-risks",
+    "secrets-management"
+  ]
 }

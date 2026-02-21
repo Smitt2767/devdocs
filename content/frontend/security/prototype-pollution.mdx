@@ -1,0 +1,226 @@
+---
+title: Prototype Pollution
+description: A guide to understanding prototype pollution vulnerabilities in JavaScript, how attackers exploit them, and how to defend against them in modern Node.js and frontend applications.
+---
+
+## Overview
+
+Prototype pollution is a JavaScript vulnerability where an attacker can inject properties into `Object.prototype` — the base object that almost every JavaScript object inherits from. Once a property is added to `Object.prototype`, it becomes accessible on **every** object in the runtime, including ones your application code creates and trusts.
+
+This is dangerous because it can:
+
+- Silently change application behavior by overriding expected default values
+- Bypass authorization or validation logic
+- In some environments, lead to Remote Code Execution (RCE)
+
+It's especially common in Node.js backends that accept and process arbitrary user-supplied JSON, but it affects frontend JavaScript too.
+
+---
+
+## How It Works
+
+Every JavaScript object has an internal `[[Prototype]]` link. When you access a property on an object, JavaScript walks up the prototype chain until it finds it or reaches `null`.
+
+```js
+const user = {};
+console.log(user.toString); // Found on Object.prototype
+```
+
+The problem: you can write to `Object.prototype` through certain patterns, most commonly via:
+
+- Recursive merge functions
+- `JSON.parse` combined with key assignment
+- Property access using user-controlled keys like `__proto__`, `constructor`, or `prototype`
+
+```js
+const payload = JSON.parse('{"__proto__": {"isAdmin": true}}');
+
+const victim = {};
+console.log(victim.isAdmin); // true — Object.prototype was polluted
+```
+
+After the merge, `isAdmin` exists on `Object.prototype`, so **every plain object** in the process inherits it — including ones that gate admin actions.
+
+Think of `Object.prototype` as a shared whiteboard in a room. Prototype pollution lets an attacker write on that whiteboard, and everyone in the room reads from it without knowing the attacker was there.
+
+---
+
+## Code Examples
+
+### Vulnerable: Naive recursive merge
+
+This is the most common real-world source of prototype pollution.
+
+```ts
+// ❌ VULNERABLE — do not use this pattern
+function merge(target: Record<string, any>, source: Record<string, any>) {
+  for (const key of Object.keys(source)) {
+    if (typeof source[key] === "object" && source[key] !== null) {
+      // Recursing without checking for dangerous keys
+      target[key] = target[key] ?? {};
+      merge(target[key], source[key]);
+    } else {
+      target[key] = source[key];
+    }
+  }
+  return target;
+}
+
+const userInput = JSON.parse('{"__proto__": {"canDelete": true}}');
+const config = merge({}, userInput);
+
+const record = {};
+console.log(record.canDelete); // true — Object.prototype is polluted
+```
+
+### Safe: Guarded merge with key denylist
+
+```ts
+// ✅ SAFE — explicitly block dangerous keys
+const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function safeMerge(
+  target: Record<string, any>,
+  source: Record<string, any>,
+): Record<string, any> {
+  for (const key of Object.keys(source)) {
+    // Reject any key that could walk up the prototype chain
+    if (DANGEROUS_KEYS.has(key)) continue;
+
+    if (
+      typeof source[key] === "object" &&
+      source[key] !== null &&
+      !Array.isArray(source[key])
+    ) {
+      target[key] =
+        target[key] && typeof target[key] === "object" ? target[key] : {};
+      safeMerge(target[key], source[key]);
+    } else {
+      target[key] = source[key];
+    }
+  }
+  return target;
+}
+```
+
+### Safe: Use `Object.create(null)` for data bags
+
+When you need a plain key-value store with no prototype at all:
+
+```ts
+// ✅ Object.create(null) has no prototype — nothing to pollute
+const store = Object.create(null) as Record<string, string>;
+
+store["userRole"] = "viewer";
+
+// No __proto__, no toString, no hasOwnProperty — it's a pure dictionary
+console.log(Object.getPrototypeOf(store)); // null
+```
+
+### Safe: Validate with a schema before merging (Zod example)
+
+```ts
+import { z } from "zod";
+
+const UpdateSchema = z.object({
+  displayName: z.string().max(100),
+  bio: z.string().max(500).optional(),
+});
+
+// In a Next.js Route Handler (app/api/profile/route.ts)
+export async function PATCH(request: Request) {
+  const body = await request.json();
+
+  // Parse and strip any keys not in the schema — __proto__ never makes it through
+  const result = UpdateSchema.safeParse(body);
+
+  if (!result.success) {
+    return Response.json({ error: result.error.flatten() }, { status: 400 });
+  }
+
+  // result.data is now a typed, safe object with only known keys
+  await updateUserProfile(result.data);
+
+  return Response.json({ success: true });
+}
+```
+
+<Callout type="tip">
+  Schema validation with Zod or Valibot is the most ergonomic defense. It strips
+  unknown keys by default, so attacker-controlled keys like `__proto__` are
+  silently discarded before they reach any merge logic.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+You're building a Node.js API that accepts a JSON body to update user preferences:
+
+```
+PATCH /api/preferences
+{ "theme": "dark", "__proto__": { "isAdmin": true } }
+```
+
+If your handler does something like `Object.assign(userPrefs, body)` or passes `body` into a naive deep-merge utility, `Object.prototype.isAdmin` is now `true` for every object in your server process for the lifetime of that request — and potentially beyond if the property persists.
+
+Later in the same request cycle, a middleware checks:
+
+```ts
+if (req.user.isAdmin) {
+  // grant elevated access
+}
+```
+
+`req.user` is a plain object. It has no `isAdmin` property of its own — but it now inherits one from `Object.prototype`. The attacker just escalated their privileges without a valid account.
+
+This exact class of vulnerability has been found in widely-used npm packages including `lodash` (pre-4.17.5), `jQuery`, `hoek`, and `minimist`.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Trusting `Object.keys()` to be safe**
+
+`Object.keys()` only returns own enumerable properties — it won't yield `__proto__`. This makes people think iterating with it is safe. It's not, because `__proto__` as a **string key** is handled specially by the JavaScript engine during property assignment and can still pollute the prototype.
+
+```ts
+const obj: any = {};
+obj["__proto__"]["polluted"] = true; // Engine intercepts this
+
+const test = {};
+console.log(test.polluted); // true
+```
+
+**2. Using `JSON.parse` output directly without sanitization**
+
+`JSON.parse` does not filter `__proto__` keys. It produces a plain object, and if you then assign properties from it without checks, you're exposed. Always validate with a schema or use a safe clone utility.
+
+**3. Assuming the problem only affects deep merge**
+
+Prototype pollution can also occur through:
+
+- `Object.assign` with nested objects that were already polluted
+- Array methods that reconstruct objects from user data
+- Query string parsers (`qs`, `querystring`) that parse nested keys like `?__proto__[admin]=1`
+
+<Callout type="warn">
+  The `qs` library parses `?__proto__[isAdmin]=true` into `{ __proto__: { isAdmin: 'true' } }` by default in older versions. Always set `{ allowPrototypes: false }` or upgrade to a version that disables this by default.
+</Callout>
+
+**4. Not freezing `Object.prototype` in high-risk contexts**
+
+In environments where you control the runtime (e.g., a sandboxed worker), you can freeze the prototype chain entirely:
+
+```ts
+// Freeze early — before any user input is processed
+Object.freeze(Object.prototype);
+```
+
+This makes prototype pollution a no-op. However, it can break third-party libraries that legitimately extend `Object.prototype`, so test thoroughly before using this in production.
+
+---
+
+## Summary
+
+Prototype pollution exploits JavaScript's prototype chain to inject properties onto `Object.prototype`, making them appear on every plain object in the runtime. It most commonly enters through deep-merge functions, query string parsers, or any code that assigns user-controlled keys without validation. The strongest defenses are schema validation (Zod, Valibot) to strip unknown keys before any merge, explicit denylist checks for `__proto__`, `constructor`, and `prototype`, and using `Object.create(null)` for pure data containers. Several major npm packages have had prototype pollution CVEs, so auditing dependencies with `npm audit` is a necessary part of any security posture. Treating all user-supplied JSON as untrusted and validating its shape before processing is the single most effective habit to develop.

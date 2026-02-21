@@ -1,0 +1,196 @@
+---
+title: Supply Chain Risks
+description: How to protect your Node.js project from dependency supply chain attacks using lockfile hygiene and audit tooling.
+---
+
+## Overview
+
+Every `npm install` you run pulls in code written by strangers. A single compromised or malicious package anywhere in your dependency tree can exfiltrate secrets, inject malicious scripts, or silently corrupt your build output. This is called a **supply chain attack** — targeting the software you depend on, not your code directly.
+
+Supply chain hygiene is the set of practices that reduce the blast radius of these risks: keeping lockfiles trustworthy, auditing known vulnerabilities, and limiting what packages can do at install time.
+
+---
+
+## How It Works
+
+When you install a package, npm/pnpm/yarn resolves a full tree of transitive dependencies. Each node in that tree is a potential attack surface. Threats come in several forms:
+
+- **Typosquatting** — A package named `lodahs` mimicking `lodash`.
+- **Dependency confusion** — A public package with the same name as your private internal package, which the registry resolves first.
+- **Compromised maintainer accounts** — A legitimate package's npm token is stolen and a malicious version is published.
+- **Malicious install scripts** — `preinstall`/`postinstall` hooks that execute arbitrary shell commands the moment you run `npm install`.
+
+Your lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`) is the primary defense. It pins every package to an exact version **and** an integrity hash. If a package is tampered with after being published, the hash won't match and the install will fail — but only if your lockfile is treated as a source-of-truth artifact, not a throwaway file.
+
+---
+
+## Code Examples
+
+### 1. Auditing with `npm audit` and failing CI on high-severity issues
+
+```bash
+# Run a full audit and print a JSON report
+npm audit --json > audit-report.json
+
+# Fail the process with a non-zero exit code if any high/critical issues exist
+npm audit --audit-level=high
+```
+
+Add this to your CI pipeline as a required step before building or deploying:
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies with frozen lockfile
+        run: npm ci # Uses package-lock.json exactly; fails if it's out of sync
+
+      - name: Run security audit
+        run: npm audit --audit-level=high
+```
+
+<Callout type="warn">
+  Always use `npm ci` in CI/CD pipelines, never `npm install`. `npm ci` enforces
+  the lockfile and fails loudly if `package.json` and `package-lock.json` are
+  out of sync. `npm install` will silently update the lockfile.
+</Callout>
+
+---
+
+### 2. Using `socket` for proactive supply chain analysis
+
+`npm audit` only catches known CVEs. [Socket](https://socket.dev/) detects **behavioral** red flags — new install scripts, suspicious network calls, obfuscated code — before a CVE is ever filed.
+
+```bash
+# Install the Socket CLI globally
+npm install -g @socketsecurity/cli
+
+# Scan your project's dependencies
+socket scan .
+```
+
+Integrate it in CI:
+
+```yaml
+- name: Socket Security Scan
+  run: npx @socketsecurity/cli scan --strict .
+  # --strict exits with a non-zero code if any high-risk issues are found
+```
+
+---
+
+### 3. Enforcing lockfile integrity with `pnpm`
+
+If your project uses pnpm, `--frozen-lockfile` is the equivalent of `npm ci`:
+
+```bash
+pnpm install --frozen-lockfile
+```
+
+You can also enforce this permanently in `.npmrc` so no developer accidentally installs without it locally:
+
+```ini
+# .npmrc
+frozen-lockfile=true
+```
+
+---
+
+### 4. Disabling lifecycle scripts for untrusted packages
+
+Not every package needs to run shell commands at install time. You can disable all install scripts globally and whitelist only packages you trust:
+
+```ini
+# .npmrc — disables postinstall/preinstall for all packages
+ignore-scripts=true
+```
+
+For packages that legitimately need scripts (e.g., `esbuild`, `sharp`), re-enable them explicitly:
+
+```bash
+# Re-run scripts for a specific trusted package after install
+npm rebuild sharp
+```
+
+<Callout type="info">
+  `ignore-scripts=true` is aggressive but effective in high-security
+  environments like internal tooling monorepos or server-side-only packages. It
+  will break packages that rely on native bindings unless you rebuild them
+  manually.
+</Callout>
+
+---
+
+### 5. Checking for dependency confusion vulnerabilities
+
+If you publish private packages to an internal registry, ensure your `.npmrc` scopes them correctly so the public registry is never consulted:
+
+```ini
+# .npmrc
+@mycompany:registry=https://npm.your-internal-registry.com
+//npm.your-internal-registry.com/:_authToken=${NPM_INTERNAL_TOKEN}
+```
+
+Without this, `npm install @mycompany/auth-utils` will fall back to the public npm registry if your internal one fails — and an attacker can publish a malicious `@mycompany/auth-utils` there.
+
+---
+
+## Real-World Use Case
+
+You're maintaining a Next.js SaaS application with 400+ direct and transitive dependencies. A widely used utility package (`event-stream` style incident) is compromised by a new maintainer who injects a postinstall script that reads environment variables and sends them to an external server.
+
+Your defense layers:
+
+1. **`npm ci` in CI** ensures no one manually ran `npm install` and committed a subtly modified lockfile.
+2. **`npm audit --audit-level=high`** in CI catches it once a CVE is published.
+3. **Socket scan** may catch the behavioral anomaly (unexpected network egress in a postinstall script) _before_ a CVE exists.
+4. **`ignore-scripts=true`** in your server environment means the malicious postinstall script never executes, even if the package lands in your lockfile.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Committing `node_modules` or gitignoring the lockfile**
+
+The lockfile is security infrastructure. It must be committed to source control and reviewed in PRs like any other code change. Deleting or gitignoring it means every fresh install resolves to whatever the latest version is — bypassing all integrity guarantees.
+
+**2. Running `npm install` instead of `npm ci` in pipelines**
+
+`npm install` will update the lockfile if any range in `package.json` resolves to a newer version. This silently defeats the purpose of having a lockfile. Use `npm ci` exclusively in automated environments.
+
+**3. Ignoring audit results as noise**
+
+Teams often run `npm audit` once, see dozens of low-severity findings, and add `--audit-level=critical` to suppress them. Over time, "low" vulnerabilities chain together or are upgraded. Triage audit results on a schedule and track suppressions explicitly using `npm audit fix` or `.nsprc`/`overrides` with documented justification.
+
+<Callout type="warn">
+  `npm audit fix --force` can silently upgrade packages to semver-incompatible
+  major versions, breaking your application. Always review what it changes
+  before committing.
+</Callout>
+
+**4. Trusting `npm audit` alone as a complete security posture**
+
+`npm audit` is reactive — it only reports vulnerabilities already in the National Vulnerability Database. It has zero visibility into newly published malicious packages, suspicious behavioral changes, or packages that aren't yet CVE-tracked. Pair it with proactive tools like Socket or Snyk.
+
+**5. Not pinning versions in `package.json` for production dependencies**
+
+Using `^1.2.3` in `package.json` means any patch or minor release can be resolved. While the lockfile prevents this in existing environments, a fresh install after deleting the lockfile (or a new developer cloning the repo before the lockfile was committed) will get the latest resolving version. For production apps, consider exact versions (`"lodash": "4.17.21"`) or `save-exact=true` in `.npmrc`.
+
+---
+
+## Summary
+
+Dependency supply chain risk is one of the highest-leverage attack surfaces in modern web applications because it's largely invisible. Your lockfile is your first and most important line of defense — treat it as a security artifact, commit it, and always install from it using `npm ci`. Layer in `npm audit` to catch known CVEs and tools like Socket to detect behavioral anomalies before CVEs exist. Disable install scripts where possible and always scope private package registries explicitly in `.npmrc`. Establishing these habits in CI makes supply chain hygiene automatic rather than manual.
