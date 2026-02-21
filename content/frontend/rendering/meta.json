@@ -11,6 +11,9 @@
     "virtual-dom-diffing-complexity",
     "critical-rendering-path",
     "render-blocking-resources",
-    "browser-compositing-layers"
+    "browser-compositing-layers",
+    "paint-vs-composite-vs-layout",
+    "gpu-acceleration-in-css",
+    "render-waterfalls"
   ]
 }

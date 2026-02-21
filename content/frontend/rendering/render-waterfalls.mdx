@@ -1,0 +1,318 @@
+---
+title: Render Waterfalls
+description: A guide to understanding, identifying, and eliminating render waterfalls in React and Next.js applications.
+---
+
+## Overview
+
+A render waterfall happens when data fetching or rendering is chained sequentially — each step waiting for the previous one to finish before starting. The result is compounding latency: instead of fetching three things in 200ms total, you wait 600ms because each request blocks the next.
+
+In React applications, waterfalls most commonly appear when child components trigger their own fetches only after their parent has finished fetching and rendered them. The browser (or server) ends up making requests one at a time, down a "waterfall" of dependent steps.
+
+Eliminating waterfalls is one of the highest-impact performance improvements you can make in a data-driven app.
+
+---
+
+## How It Works
+
+Consider a simple page that loads a user profile, then loads that user's orders, then loads the items in each order. If each component fetches its own data on mount, the timeline looks like this:
+
+```
+[Fetch user]        → 120ms
+  [Fetch orders]    → 150ms
+    [Fetch items]   → 180ms
+Total: 450ms
+```
+
+Each request only starts after the previous component renders with its data. The requests are sequential even though they could have been parallel.
+
+The root cause is **co-location without coordination** — data fetching is scoped to individual components, so React can't know to start a child's fetch before the parent has resolved.
+
+The fix is to **hoist and parallelize**: fetch all required data at the highest shared level, fire requests concurrently, and pass results down as props or share them via context/cache.
+
+In Next.js App Router, React Server Components give you a natural place to do this at the route segment level, and `fetch` with automatic request deduplication means you can call the same endpoint in multiple components without duplicate network requests.
+
+---
+
+## Code Examples
+
+### ❌ Waterfall Pattern (avoid this)
+
+```tsx
+// app/dashboard/page.tsx
+
+// This triggers a waterfall: UserProfile fetches the user,
+// then renders OrderList, which fetches orders, and so on.
+
+async function OrderList({ userId }: { userId: string }) {
+  const orders = await fetch(`/api/orders?userId=${userId}`).then((r) =>
+    r.json(),
+  );
+
+  return (
+    <ul>
+      {orders.map((order: { id: string; label: string }) => (
+        <li key={order.id}>{order.label}</li>
+      ))}
+    </ul>
+  );
+}
+
+async function UserProfile() {
+  // Step 1: fetch user
+  const user = await fetch("/api/me").then((r) => r.json());
+
+  // Step 2: only now does OrderList start fetching orders
+  return (
+    <div>
+      <h1>{user.name}</h1>
+      <OrderList userId={user.id} />
+    </div>
+  );
+}
+
+export default function DashboardPage() {
+  return <UserProfile />;
+}
+```
+
+### ✅ Parallel Fetch Pattern (correct approach)
+
+```tsx
+// app/dashboard/page.tsx
+
+// Fetch all data at the route level using Promise.all.
+// Both requests fire simultaneously — no waterfall.
+
+async function getUser() {
+  const res = await fetch("/api/me", { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to fetch user");
+  return res.json();
+}
+
+async function getOrders(userId: string) {
+  const res = await fetch(`/api/orders?userId=${userId}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Failed to fetch orders");
+  return res.json();
+}
+
+export default async function DashboardPage() {
+  // Fire both requests in parallel
+  const user = await getUser();
+  const [orders] = await Promise.all([
+    getOrders(user.id),
+    // add more parallel fetches here as needed
+  ]);
+
+  // If user.id is truly needed before orders can be fetched,
+  // that's an inherent dependency — minimize it where possible.
+
+  return (
+    <div>
+      <h1>{user.name}</h1>
+      <ul>
+        {orders.map((order: { id: string; label: string }) => (
+          <li key={order.id}>{order.label}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+### ✅ Breaking True Dependencies with `Promise.all` and Parallel Segments
+
+When some data genuinely depends on other data, minimize the chain and parallelize everything that's independent:
+
+```tsx
+// app/dashboard/page.tsx
+
+async function getUserId(): Promise<string> {
+  const res = await fetch("/api/me/id", { cache: "no-store" });
+  return res.json(); // returns just the ID — fast, minimal payload
+}
+
+async function getUserProfile(userId: string) {
+  return fetch(`/api/users/${userId}`).then((r) => r.json());
+}
+
+async function getUserOrders(userId: string) {
+  return fetch(`/api/orders?userId=${userId}`).then((r) => r.json());
+}
+
+async function getRecommendations(userId: string) {
+  return fetch(`/api/recommendations?userId=${userId}`).then((r) => r.json());
+}
+
+export default async function DashboardPage() {
+  // Step 1: only the ID is a hard dependency
+  const userId = await getUserId();
+
+  // Step 2: everything that depends only on userId fires in parallel
+  const [profile, orders, recommendations] = await Promise.all([
+    getUserProfile(userId),
+    getUserOrders(userId),
+    getRecommendations(userId),
+  ]);
+
+  return (
+    <div>
+      <h1>{profile.name}</h1>
+      <section>
+        <h2>Orders</h2>
+        <ul>
+          {orders.map((o: { id: string; label: string }) => (
+            <li key={o.id}>{o.label}</li>
+          ))}
+        </ul>
+      </section>
+      <section>
+        <h2>Recommended for You</h2>
+        <ul>
+          {recommendations.map((r: { id: string; title: string }) => (
+            <li key={r.id}>{r.title}</li>
+          ))}
+        </ul>
+      </section>
+    </div>
+  );
+}
+```
+
+### ✅ Using Next.js Parallel Routes to Isolate Waterfalls
+
+For large pages, use [Parallel Routes](https://nextjs.org/docs/app/building-your-application/routing/parallel-routes) so independent segments stream independently without blocking each other:
+
+```
+app/dashboard/
+├── layout.tsx
+├── @orders/
+│   └── page.tsx   ← fetches orders independently
+├── @profile/
+│   └── page.tsx   ← fetches profile independently
+└── page.tsx
+```
+
+```tsx
+// app/dashboard/layout.tsx
+export default function DashboardLayout({
+  children,
+  orders,
+  profile,
+}: {
+  children: React.ReactNode;
+  orders: React.ReactNode;
+  profile: React.ReactNode;
+}) {
+  return (
+    <div className="dashboard">
+      {profile}
+      {orders}
+      {children}
+    </div>
+  );
+}
+```
+
+Each slot fetches its own data in parallel at the segment level — no shared waterfall.
+
+---
+
+## Real-World Use Case
+
+In an **e-commerce dashboard**, a seller's overview page needs to show their store profile, recent orders, pending payouts, and product analytics. If each section is a component that fetches independently on mount, the page takes the sum of all those requests to load.
+
+By hoisting the fetches into `Promise.all` at the page level (or using parallel routes for truly independent segments), all four API calls fire at once. Total load time drops to the duration of the slowest single request rather than the sum of all requests.
+
+<Callout type="info">
+  Next.js automatically deduplicates `fetch` calls with the same URL and options
+  within a single render pass. You can safely call the same fetch helper in
+  multiple components without triggering duplicate network requests.
+</Callout>
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Fetching inside `useEffect` in Client Components**
+
+```tsx
+// ❌ Classic client-side waterfall
+"use client";
+
+function OrderList({ userId }: { userId: string }) {
+  const [orders, setOrders] = useState([]);
+
+  useEffect(() => {
+    // This only runs after the component mounts,
+    // which is after the parent already finished its own fetch
+    fetch(`/api/orders?userId=${userId}`)
+      .then((r) => r.json())
+      .then(setOrders);
+  }, [userId]);
+
+  return (
+    <ul>
+      {orders.map((o) => (
+        <li key={o.id}>{o.label}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+Prefer Server Components with `async/await` and pass data as props to Client Components that need interactivity.
+
+**2. Assuming `async` Server Components run in parallel by default**
+
+Two sibling `async` Server Components do **not** automatically run in parallel. Each `await` in sequence is still sequential. You must explicitly use `Promise.all` to parallelize.
+
+```tsx
+// ❌ Still sequential — two awaits in sequence
+const user = await getUser();
+const orders = await getOrders(user.id); // waits for user first, even if not needed
+
+// ✅ Parallel where there's no dependency
+const [user, siteConfig] = await Promise.all([getUser(), getSiteConfig()]);
+```
+
+**3. Over-fetching at the top level "just to be safe"**
+
+Hoisting fetches doesn't mean fetching everything at the root layout. That creates a different problem: the entire page blocks on a slow request that only one section needs. Use [Suspense boundaries](https://react.dev/reference/react/Suspense) and streaming to let fast sections render immediately while slow sections load.
+
+```tsx
+// app/dashboard/page.tsx
+import { Suspense } from "react";
+
+export default function DashboardPage() {
+  return (
+    <div>
+      <Suspense fallback={<p>Loading profile…</p>}>
+        <UserProfile />
+      </Suspense>
+      {/* Renders immediately even if UserProfile is slow */}
+      <Suspense fallback={<p>Loading orders…</p>}>
+        <OrderList />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+<Callout type="warn">
+  Avoid putting all your data fetching in `app/layout.tsx`. Layout-level fetches
+  block every page under that layout. Only fetch what every page genuinely needs
+  (e.g., session data).
+</Callout>
+
+**4. Not accounting for inherent sequential dependencies**
+
+Some waterfalls are unavoidable — if you truly need a user ID before you can fetch their orders, that's a real dependency. The goal isn't to eliminate all sequential fetching; it's to ensure that only genuinely dependent requests are sequential, and everything else is parallel.
+
+---
+
+## Summary
+
+Render waterfalls occur when data fetches are chained sequentially due to component-level fetch co-location, causing total load time to equal the sum of all request durations. The primary fix is to hoist fetches to a shared parent and use `Promise.all` to fire independent requests concurrently. In Next.js App Router, Server Components make this straightforward — fetch at the page or layout level and pass data down as props. Use Suspense boundaries and streaming to prevent a single slow fetch from blocking the entire page. Reserve sequential fetching only for requests with genuine data dependencies, and keep those chains as short as possible.

@@ -1,0 +1,232 @@
+---
+title: Paint vs Layout vs Composite
+description: A breakdown of the three browser rendering phases — layout, paint, and composite — and how understanding them helps you write more performant CSS and JavaScript animations.
+---
+
+## Overview
+
+Every time the browser renders something on screen, it runs through a pipeline of steps to figure out what to draw and where. Three of the most important steps in this pipeline are **layout**, **paint**, and **composite**.
+
+- **Layout** (also called "reflow") — the browser calculates the size and position of every element.
+- **Paint** — the browser fills in pixels: colors, borders, shadows, text.
+- **Composite** — the browser combines painted layers and sends the final image to the screen.
+
+Understanding which CSS properties and JavaScript operations trigger which phase is one of the highest-leverage performance skills a frontend developer can have. Triggering layout unnecessarily is expensive. Triggering only composite is cheap.
+
+---
+
+## How It Works
+
+The browser rendering pipeline runs roughly in this order:
+
+```
+JavaScript → Style → Layout → Paint → Composite
+```
+
+Each phase feeds into the next, but you can skip phases depending on what changed.
+
+### Layout
+
+When you change something that affects the geometry of the page — width, height, margin, padding, font-size, top, left — the browser must recalculate the position and size of all affected elements (and potentially their neighbors). This is the most expensive phase.
+
+### Paint
+
+Once layout is complete, the browser works out what each pixel should look like. This includes background colors, borders, box shadows, text rendering, and images. Paint happens on CPU by default and is moderately expensive.
+
+### Composite
+
+Modern browsers split the page into layers (think: Photoshop layers). In the composite phase, the GPU combines those layers into the final frame. This is the cheapest phase and happens off the main thread on the GPU — which is why GPU-accelerated properties are so fast.
+
+### Which Properties Trigger Which Phase
+
+| Property Change                     | Layout | Paint | Composite |
+| ----------------------------------- | ------ | ----- | --------- |
+| `width`, `height`, `padding`        | ✅     | ✅    | ✅        |
+| `color`, `background`, `box-shadow` | ❌     | ✅    | ✅        |
+| `transform`, `opacity`              | ❌     | ❌    | ✅        |
+
+<Callout type="tip">
+  Animate only `transform` and `opacity` whenever possible. They skip layout and
+  paint entirely and run on the GPU — making them the smoothest, most performant
+  animation properties available.
+</Callout>
+
+---
+
+## Code Examples
+
+### ❌ Expensive: Animating a property that triggers layout
+
+```css
+/* Triggers layout + paint + composite on every frame */
+.box {
+  transition: width 300ms ease;
+}
+
+.box:hover {
+  width: 200px;
+}
+```
+
+```tsx
+// app/components/BadAnimation.tsx
+export default function BadAnimation() {
+  return <div className="box">Hover me</div>;
+}
+```
+
+Every frame of this animation causes the browser to recalculate layout for the element and potentially its siblings. On complex pages this causes jank.
+
+---
+
+### ✅ Performant: Animating with `transform`
+
+```css
+/* Skips layout and paint — GPU composite only */
+.box {
+  width: 100px;
+  height: 100px;
+  background: steelblue;
+  transition: transform 300ms ease;
+}
+
+.box:hover {
+  transform: scaleX(2); /* visually doubles width without triggering layout */
+}
+```
+
+```tsx
+// app/components/GoodAnimation.tsx
+export default function GoodAnimation() {
+  return <div className="box">Hover me</div>;
+}
+```
+
+---
+
+### Forcing a Layer with `will-change`
+
+```css
+.animated-card {
+  will-change: transform; /* hints to the browser to promote this element to its own layer */
+  transition: transform 400ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+.animated-card:hover {
+  transform: translateY(-8px);
+}
+```
+
+<Callout type="warn">
+  Don't apply `will-change` to every element. Promoting too many elements to
+  their own layers increases GPU memory usage and can hurt performance. Use it
+  only for elements you know will animate.
+</Callout>
+
+---
+
+### Measuring in DevTools
+
+You can verify which phase a property triggers in Chrome DevTools:
+
+1. Open DevTools → **Performance** tab
+2. Record while triggering the animation
+3. Look for **Layout**, **Paint**, and **Composite Layers** entries in the flame chart
+
+```bash
+# You can also audit CSS properties at:
+# https://csstriggers.com
+```
+
+---
+
+### Reading Layout Properties Causes Forced Reflow
+
+```ts
+// ❌ Forces a layout reflow mid-loop (layout thrashing)
+const boxes = document.querySelectorAll<HTMLElement>(".box");
+
+boxes.forEach((box) => {
+  const width = box.offsetWidth; // reads layout — forces browser to flush pending styles
+  box.style.width = `${width * 2}px`; // writes layout — triggers another reflow next read
+});
+```
+
+```ts
+// ✅ Batch reads before writes
+const boxes = document.querySelectorAll<HTMLElement>(".box");
+
+// Read all layout values first
+const widths = Array.from(boxes).map((box) => box.offsetWidth);
+
+// Then write — only one reflow total
+boxes.forEach((box, i) => {
+  box.style.transform = `scaleX(${(widths[i] * 2) / widths[i]})`; // better: use transform
+});
+```
+
+---
+
+## Real-World Use Case
+
+You're building a product card grid for an e-commerce storefront. Each card lifts on hover with a shadow effect. Your initial implementation animates `box-shadow` and `margin-top` — both of which trigger paint and layout respectively, causing the page to stutter on low-end Android devices.
+
+Refactoring to use `transform: translateY()` and `filter: drop-shadow()` (or keeping the shadow static and only animating transform) moves the animation entirely to the composite phase. The cards now animate at a locked 60fps even on mid-range hardware, with no main thread involvement.
+
+---
+
+## Common Mistakes / Gotchas
+
+### 1. Animating `top`/`left` instead of `transform: translate()`
+
+`top` and `left` are layout properties. They trigger the full pipeline on every frame. `transform: translate()` achieves the same visual result while only triggering composite.
+
+```css
+/* ❌ */
+.menu {
+  transition: top 200ms;
+}
+
+/* ✅ */
+.menu {
+  transition: transform 200ms;
+}
+.menu.open {
+  transform: translateY(0);
+}
+.menu.closed {
+  transform: translateY(-100%);
+}
+```
+
+### 2. Overusing `will-change`
+
+Developers sometimes add `will-change: transform` to dozens of elements "just in case." Each promoted layer consumes GPU memory. Too many layers causes the GPU to swap memory, which is worse than just painting on the CPU.
+
+### 3. Layout Thrashing in JavaScript
+
+Reading a layout property (like `offsetHeight`, `getBoundingClientRect()`, `scrollTop`) immediately after a write forces the browser to synchronously flush all pending style changes and recompute layout. In a loop, this creates a thrash that blocks the main thread.
+
+```ts
+// ❌ Thrash: alternating read/write in a loop
+elements.forEach((el) => {
+  const h = el.offsetHeight; // forces sync layout
+  el.style.height = `${h + 10}px`; // invalidates layout
+});
+
+// ✅ Separate all reads, then all writes
+const heights = elements.map((el) => el.offsetHeight); // read phase
+elements.forEach((el, i) => {
+  el.style.height = `${heights[i] + 10}px`; // write phase
+});
+```
+
+### 4. Assuming `opacity: 0` is free
+
+`opacity` is a composite-only property and is GPU-accelerated, so animating it is cheap. However, setting `opacity: 0` does **not** remove the element from layout — it still takes up space. Use `display: none` or `visibility: hidden` if you need to remove it from the flow (knowing those do trigger layout).
+
+---
+
+## Summary
+
+The browser renders through three key phases: **layout** (geometry), **paint** (pixels), and **composite** (layer merging). Each phase is progressively cheaper — composite is handled by the GPU and is by far the least expensive. To write performant animations and interactions, favor CSS properties that only trigger composite (`transform`, `opacity`), avoid reading layout properties inside write loops, and use `will-change` sparingly to promote only genuinely animated elements to their own GPU layer. Profiling in DevTools is the fastest way to confirm which phase your changes are actually triggering.
