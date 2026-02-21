@@ -1,0 +1,312 @@
+---
+title: CSS Architecture Tradeoffs
+description: A practical comparison of CSS Modules, CSS-in-JS, Tailwind CSS, and BEM — covering when to use each and what to watch out for.
+---
+
+## Overview
+
+Choosing how to write and organize CSS is one of the most consequential frontend architecture decisions you'll make. It affects developer experience, runtime performance, bundle size, and how well your styles scale across a large codebase or team.
+
+The four dominant approaches today are:
+
+- **CSS Modules** — scoped CSS files colocated with components
+- **CSS-in-JS** — styles written in JavaScript/TypeScript (e.g., styled-components, Emotion)
+- **Tailwind CSS** — utility-first atomic CSS framework
+- **BEM** — a naming convention layered on top of plain CSS or Sass
+
+None of these is universally best. Each involves real tradeoffs around performance, colocation, maintainability, and tooling.
+
+---
+
+## How It Works
+
+### CSS Modules
+
+CSS Modules are processed at build time. Each `.module.css` file gets its class names hashed into unique identifiers, guaranteeing local scope without any runtime overhead.
+
+```tsx
+// app/components/Card/Card.module.css is transformed so that
+// `.title` becomes something like `Card_title__x7Kp2` at build time
+import styles from "./Card.module.css";
+
+export default function Card({ heading }: { heading: string }) {
+  return (
+    <div className={styles.card}>
+      <h2 className={styles.title}>{heading}</h2>
+    </div>
+  );
+}
+```
+
+```css
+/* Card.module.css */
+.card {
+  border-radius: 8px;
+  padding: 1.5rem;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.1);
+}
+
+.title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #111;
+}
+```
+
+**Tradeoffs:**
+
+- ✅ Zero runtime cost — styles are extracted to static CSS at build time
+- ✅ True local scope with no naming collisions
+- ✅ Works natively with Next.js App Router and React Server Components
+- ❌ Dynamic styles based on props require inline styles or CSS custom properties — you can't interpolate JavaScript values directly
+- ❌ Sharing styles across components requires a dedicated shared stylesheet or CSS custom properties
+
+---
+
+### CSS-in-JS (styled-components / Emotion)
+
+CSS-in-JS libraries let you write styles directly in JavaScript, colocated with component logic. They support dynamic styling through props natively.
+
+<Callout type="warn">
+  Most runtime CSS-in-JS libraries (styled-components, Emotion) have **limited
+  or broken support for React Server Components**. They inject styles at runtime
+  via JavaScript, which is incompatible with the RSC model. If you're using
+  Next.js App Router, avoid runtime CSS-in-JS unless you're confining it
+  entirely to Client Components.
+</Callout>
+
+The exception is **zero-runtime CSS-in-JS** tools like [Panda CSS](https://panda-css.com/) or [vanilla-extract](https://vanilla-extract.style/), which extract static CSS at build time.
+
+```tsx
+// vanilla-extract: zero-runtime CSS-in-JS, fully RSC-compatible
+// styles.css.ts
+import { style } from "@vanilla-extract/css";
+
+export const card = style({
+  borderRadius: "8px",
+  padding: "1.5rem",
+  background: "#fff",
+  boxShadow: "0 1px 4px rgb(0 0 0 / 0.1)",
+});
+
+export const title = style({
+  fontSize: "1.25rem",
+  fontWeight: 600,
+  color: "#111",
+});
+```
+
+```tsx
+// Card.tsx (Server Component — no 'use client' needed)
+import { card, title } from "./styles.css";
+
+export default function Card({ heading }: { heading: string }) {
+  return (
+    <div className={card}>
+      <h2 className={title}>{heading}</h2>
+    </div>
+  );
+}
+```
+
+**Tradeoffs (runtime CSS-in-JS):**
+
+- ✅ Co-located styles and logic
+- ✅ First-class dynamic styling via props
+- ❌ Adds JavaScript weight to the bundle
+- ❌ Styles are injected at runtime — causes flash of unstyled content risks and breaks RSC
+- ❌ Harder to cache and optimize
+
+**Tradeoffs (zero-runtime CSS-in-JS like vanilla-extract):**
+
+- ✅ Type-safe styles with full TypeScript support
+- ✅ RSC-compatible — no runtime injection
+- ✅ Extracted to static CSS at build time
+- ❌ No truly dynamic runtime styles (only build-time variants)
+- ❌ More complex setup than plain CSS Modules
+
+---
+
+### Tailwind CSS
+
+Tailwind generates a utility class for nearly every CSS property value. You compose styles directly in your JSX using class names like `text-lg`, `rounded-md`, and `bg-white`.
+
+```tsx
+// No separate CSS file needed — styles live in className
+export default function Card({ heading }: { heading: string }) {
+  return (
+    <div className="rounded-lg p-6 bg-white shadow-sm border border-gray-100">
+      <h2 className="text-xl font-semibold text-gray-900">{heading}</h2>
+    </div>
+  );
+}
+```
+
+For dynamic variants, use `clsx` or `cva` (Class Variance Authority) to manage conditional class logic:
+
+```tsx
+import { cva } from "class-variance-authority";
+
+const button = cva(
+  // base styles applied always
+  "inline-flex items-center justify-center rounded-md font-medium transition-colors",
+  {
+    variants: {
+      intent: {
+        primary: "bg-blue-600 text-white hover:bg-blue-700",
+        secondary: "bg-gray-100 text-gray-900 hover:bg-gray-200",
+      },
+      size: {
+        sm: "h-8 px-3 text-sm",
+        md: "h-10 px-4 text-base",
+      },
+    },
+    defaultVariants: {
+      intent: "primary",
+      size: "md",
+    },
+  },
+);
+
+interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  intent?: "primary" | "secondary";
+  size?: "sm" | "md";
+}
+
+export default function Button({ intent, size, ...props }: ButtonProps) {
+  return <button className={button({ intent, size })} {...props} />;
+}
+```
+
+**Tradeoffs:**
+
+- ✅ No context-switching between files — styles and markup in one place
+- ✅ Tiny production CSS bundle (only used utilities are included via tree-shaking)
+- ✅ Highly consistent design system via design tokens in `tailwind.config.ts`
+- ✅ Fully RSC-compatible — purely static class names
+- ❌ JSX becomes visually noisy with many utility classes
+- ❌ Requires learning Tailwind's utility naming convention
+- ❌ Customizing components beyond Tailwind's scale often requires `[]` arbitrary values, which can become messy
+
+---
+
+### BEM (Block Element Modifier)
+
+BEM is a naming convention, not a technology. It gives structure to plain CSS or Sass class names to prevent collisions and communicate component relationships.
+
+```css
+/* card.css */
+.card {
+  /* Block */
+  border-radius: 8px;
+  padding: 1.5rem;
+  background: #fff;
+}
+
+.card__title {
+  /* Element */
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.card--featured {
+  /* Modifier */
+  border: 2px solid #2563eb;
+}
+```
+
+```tsx
+export default function Card({
+  heading,
+  featured = false,
+}: {
+  heading: string;
+  featured?: boolean;
+}) {
+  return (
+    <div className={`card${featured ? " card--featured" : ""}`}>
+      <h2 className="card__title">{heading}</h2>
+    </div>
+  );
+}
+```
+
+**Tradeoffs:**
+
+- ✅ No build tooling required — works with plain CSS
+- ✅ Self-documenting class names that describe structure
+- ✅ Easy to read in browser DevTools
+- ❌ Relies entirely on naming discipline — nothing enforces it at compile time
+- ❌ Names get verbose quickly (`.nav__item--active--highlighted`)
+- ❌ No actual scoping — naming collisions are still possible if conventions aren't followed consistently
+
+---
+
+## Real-World Use Case
+
+**E-commerce product page — choosing an approach:**
+
+- A **small team** building a marketing site with a tight deadline benefits most from **Tailwind** — fast iteration, consistent design tokens, no context switching.
+- A **design-system library** where components need to expose style overrides safely is better served by **CSS Modules or vanilla-extract** — enforced scoping, no runtime cost, predictable output.
+- A **legacy codebase** using Sass and plain HTML templates may already follow **BEM** — incrementally migrating to BEM conventions is lower friction than adopting a new tool.
+- An **application with heavy dynamic styling** (themes, user-controlled colors) and no Server Components in the affected area might reach for **runtime CSS-in-JS** (Emotion) — but only within Client Component subtrees.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Using runtime CSS-in-JS in Server Components**
+
+styled-components and Emotion rely on React's rendering context to inject `<style>` tags. Server Components don't run in a browser context, so this silently breaks. Always check if a CSS-in-JS library is zero-runtime before using it with RSC.
+
+**2. Mixing Tailwind arbitrary values everywhere**
+
+Using `text-[13px]` or `mt-[17px]` throughout your codebase defeats Tailwind's design system consistency. Reach for arbitrary values only when your design token scale genuinely doesn't cover the requirement — and consider extending your `tailwind.config.ts` instead.
+
+```ts
+// tailwind.config.ts
+import type { Config } from "tailwindcss";
+
+const config: Config = {
+  theme: {
+    extend: {
+      fontSize: {
+        "13": "0.8125rem", // add to scale instead of using [13px] everywhere
+      },
+    },
+  },
+};
+
+export default config;
+```
+
+**3. Global CSS leaking in CSS Modules**
+
+CSS Modules scope class names, but element selectors and `:global()` escapes are not scoped. Accidentally writing bare element rules inside a module file will apply globally.
+
+```css
+/* ❌ This applies to ALL h2 elements globally */
+h2 {
+  font-size: 1.5rem;
+}
+
+/* ✅ Scope it with a class */
+.heading {
+  font-size: 1.5rem;
+}
+```
+
+**4. Treating BEM as sufficient for large codebases**
+
+In a large team, BEM without tooling enforcement degrades over time. Developers forget conventions, names get inconsistent, and you end up with a mix of BEM and ad-hoc classes. CSS Modules or Tailwind provide structural guarantees that naming conventions alone cannot.
+
+**5. Importing CSS Modules conditionally based on runtime logic**
+
+CSS Modules are statically analyzed at build time. Dynamic `import()` of a `.module.css` file based on runtime data will not work as expected and is not a supported pattern.
+
+---
+
+## Summary
+
+CSS Modules offer zero-runtime scoped styles and are the safest default for Next.js App Router projects. CSS-in-JS is powerful for dynamic styling but requires a zero-runtime library (like vanilla-extract) to remain RSC-compatible. Tailwind excels at design consistency and iteration speed, especially for product UIs. BEM is a low-tech convention that works well in simpler setups but doesn't scale without strict team discipline. The right choice depends on your team size, design system maturity, Server Component usage, and tolerance for build tooling complexity.

@@ -1,0 +1,336 @@
+---
+title: Theming & Design Tokens
+description: A practical guide to structuring and applying design tokens for scalable, themeable UI systems in modern web apps.
+---
+
+## Overview
+
+Design tokens are the named, platform-agnostic values that define your UI's visual language — colors, spacing, typography, shadows, border radii, and more. Instead of scattering `#1a1a2e` or `16px` throughout your codebase, you define them once and reference them everywhere.
+
+Theming builds on top of tokens by allowing those values to swap at runtime — enabling dark mode, brand variants, or user-customized interfaces — without touching component logic.
+
+Together, tokens and theming create a single source of truth for your design system, reduce visual inconsistency, and make large-scale UI changes a one-line diff instead of a cross-repo hunt.
+
+---
+
+## How It Works
+
+Design tokens are typically defined as CSS custom properties (variables) scoped to a root selector or a data attribute. When a theme changes, you swap which set of variables is active — the component itself never needs to know which theme it's rendering in.
+
+```
+[data-theme="light"] --color-bg: #ffffff
+[data-theme="dark"]  --color-bg: #0f0f0f
+
+Button background: var(--color-bg)  ← always the same reference
+```
+
+At the implementation level, tokens live in a structured layer:
+
+- **Primitive tokens** — raw values (`--color-blue-500: #3b82f6`)
+- **Semantic tokens** — purpose-mapped aliases (`--color-action-primary: var(--color-blue-500)`)
+- **Component tokens** — component-scoped overrides (`--button-bg: var(--color-action-primary)`)
+
+Components only consume semantic or component tokens, never primitives directly. This allows you to retheme by only changing semantic mappings.
+
+---
+
+## Code Examples
+
+### 1. Defining tokens in CSS
+
+```css
+/* tokens/base.css */
+
+/* Primitive tokens */
+:root {
+  --color-blue-500: #3b82f6;
+  --color-blue-700: #1d4ed8;
+  --color-neutral-900: #0f172a;
+  --color-neutral-50: #f8fafc;
+  --color-white: #ffffff;
+
+  --spacing-1: 0.25rem;
+  --spacing-2: 0.5rem;
+  --spacing-4: 1rem;
+  --spacing-8: 2rem;
+
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-full: 9999px;
+
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.125rem;
+
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+}
+
+/* Semantic tokens — light theme (default) */
+:root,
+[data-theme="light"] {
+  --color-bg-base: var(--color-neutral-50);
+  --color-bg-surface: var(--color-white);
+  --color-text-primary: var(--color-neutral-900);
+  --color-action-primary: var(--color-blue-500);
+  --color-action-primary-hover: var(--color-blue-700);
+}
+
+/* Semantic tokens — dark theme */
+[data-theme="dark"] {
+  --color-bg-base: var(--color-neutral-900);
+  --color-bg-surface: #1e293b;
+  --color-text-primary: var(--color-neutral-50);
+  --color-action-primary: var(--color-blue-500);
+  --color-action-primary-hover: var(--color-blue-700);
+}
+```
+
+### 2. Consuming tokens in a component
+
+```tsx
+/* components/Button.tsx */
+/* No 'use client' needed — this is a Server Component by default */
+
+interface ButtonProps {
+  children: React.ReactNode;
+  variant?: "primary" | "ghost";
+}
+
+export function Button({ children, variant = "primary" }: ButtonProps) {
+  return (
+    <button className={variant === "primary" ? "btn-primary" : "btn-ghost"}>
+      {children}
+    </button>
+  );
+}
+```
+
+```css
+/* styles/button.css */
+
+.btn-primary {
+  background-color: var(--color-action-primary); /* semantic token */
+  color: var(--color-white);
+  padding: var(--spacing-2) var(--spacing-4);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  border: none;
+  cursor: pointer;
+  transition: background-color 150ms ease;
+}
+
+.btn-primary:hover {
+  background-color: var(--color-action-primary-hover);
+}
+
+.btn-ghost {
+  background-color: transparent;
+  color: var(--color-action-primary);
+  padding: var(--spacing-2) var(--spacing-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-action-primary);
+  cursor: pointer;
+}
+```
+
+### 3. Theme switcher in Next.js App Router
+
+```tsx
+/* components/ThemeToggle.tsx */
+"use client";
+
+import { useEffect, useState } from "react";
+
+type Theme = "light" | "dark";
+
+export function ThemeToggle() {
+  const [theme, setTheme] = useState<Theme>("light");
+
+  useEffect(() => {
+    // Read persisted preference on mount
+    const stored = localStorage.getItem("theme") as Theme | null;
+    const preferred =
+      stored ??
+      (window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light");
+    applyTheme(preferred);
+    setTheme(preferred);
+  }, []);
+
+  function applyTheme(next: Theme) {
+    // Swap the data-theme attribute on <html> — CSS picks up the change instantly
+    document.documentElement.setAttribute("data-theme", next);
+    localStorage.setItem("theme", next);
+  }
+
+  function toggle() {
+    const next: Theme = theme === "light" ? "dark" : "light";
+    applyTheme(next);
+    setTheme(next);
+  }
+
+  return (
+    <button onClick={toggle} aria-label="Toggle theme">
+      {theme === "light" ? "🌙 Dark" : "☀️ Light"}
+    </button>
+  );
+}
+```
+
+```tsx
+/* app/layout.tsx */
+import "./globals.css"; /* imports tokens/base.css */
+import { ThemeToggle } from "@/components/ThemeToggle";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    /* No data-theme here — ThemeToggle sets it client-side on mount */
+    <html lang="en">
+      <body>
+        <header>
+          <ThemeToggle />
+        </header>
+        <main>{children}</main>
+      </body>
+    </html>
+  );
+}
+```
+
+<Callout type="info">
+  If you need SSR-safe theming without a flash of unstyled content (FOUC), inject a blocking `<script>` in `<head>` that reads `localStorage` and sets `data-theme` before the page renders. Libraries like `next-themes` handle this automatically.
+</Callout>
+
+### 4. Token definitions as a JS/TS object (for CSS-in-JS or Tailwind integration)
+
+```ts
+/* tokens/tokens.ts */
+
+export const tokens = {
+  color: {
+    blue500: "#3b82f6",
+    blue700: "#1d4ed8",
+    neutral900: "#0f172a",
+    neutral50: "#f8fafc",
+  },
+  spacing: {
+    1: "0.25rem",
+    2: "0.5rem",
+    4: "1rem",
+    8: "2rem",
+  },
+  radius: {
+    sm: "0.25rem",
+    md: "0.5rem",
+    full: "9999px",
+  },
+} as const;
+```
+
+```ts
+/* tailwind.config.ts */
+import type { Config } from "tailwindcss";
+import { tokens } from "./tokens/tokens";
+
+const config: Config = {
+  content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
+  theme: {
+    extend: {
+      colors: {
+        primary: tokens.color.blue500,
+        "primary-hover": tokens.color.blue700,
+      },
+      borderRadius: tokens.radius,
+      spacing: tokens.spacing,
+    },
+  },
+};
+
+export default config;
+```
+
+<Callout type="tip">
+  Keeping tokens in a `.ts` file and deriving both your CSS variables and
+  Tailwind config from the same source eliminates drift between your stylesheet
+  and utility classes.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+You're building a SaaS dashboard that supports white-labeling. Each client has a primary brand color and wants their own look. By mapping everything through semantic tokens (`--color-action-primary`, `--color-bg-surface`), you can inject a single `<style>` block per tenant that overrides only the semantic layer:
+
+```tsx
+/* app/layout.tsx */
+import { getTenantTheme } from "@/lib/tenant";
+
+export default async function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const tenant = await getTenantTheme(); // fetches from DB/config based on subdomain
+
+  const tenantOverrides = `
+    :root {
+      --color-action-primary: ${tenant.primaryColor};
+      --color-action-primary-hover: ${tenant.primaryColorDark};
+      --color-bg-surface: ${tenant.surfaceColor};
+    }
+  `;
+
+  return (
+    <html lang="en">
+      <head>
+        {/* Injected as a blocking style — no flash, no client JS needed */}
+        <style dangerouslySetInnerHTML={{ __html: tenantOverrides }} />
+      </head>
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+No component changes required. The entire UI re-themes because every visual property flows through tokens.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Using primitive tokens directly in components**
+
+Referencing `var(--color-blue-500)` directly in a button means that button will not respond to theme changes. Always map through a semantic token like `var(--color-action-primary)`. Primitives should only appear in token definition files.
+
+**2. Skipping the semantic layer**
+
+Jumping straight from primitives to components removes the indirection that makes theming possible. Without `--color-text-primary: var(--color-neutral-900)`, switching to a dark theme requires changing every component instead of one variable.
+
+**3. Scoping tokens too narrowly too early**
+
+Creating component tokens like `--card-title-font-size` before you know you need them bloats your token system. Start with a solid semantic layer and only add component tokens when a specific override pattern becomes clear.
+
+**4. No FOUC prevention for persisted themes**
+
+If a user last visited in dark mode and you only apply the theme in a `useEffect`, there will be a flash of the light theme on page load. Inject a small blocking script in `<head>` that reads `localStorage` and sets `data-theme` synchronously — or use a library like `next-themes` that handles this.
+
+**5. Mixing token sources**
+
+Using CSS custom properties for some tokens and Tailwind hardcoded values for others creates two sources of truth. Pick one strategy and be consistent — either generate Tailwind values from your token file, or use CSS variables and reference them in Tailwind via `theme: { extend: { colors: { primary: 'var(--color-action-primary)' } } }`.
+
+<Callout type="warn">
+  Never hardcode color hex values or spacing numbers directly in component
+  files. If you find yourself writing `color: #3b82f6` in a component
+  stylesheet, that's a missing token.
+</Callout>
+
+---
+
+## Summary
+
+Design tokens are named variables that store every visual decision in your UI — colors, spacing, typography, and more. They're organized in three layers: primitives (raw values), semantic tokens (purpose-driven aliases), and optional component tokens. Theming works by swapping which semantic values are active, typically via a `data-theme` attribute on `<html>` that maps to different CSS custom property definitions. Components remain completely unaware of the active theme because they only reference semantic tokens. This separation of concerns lets you add new themes, support white-labeling, or overhaul your visual design without touching a single component.

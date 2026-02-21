@@ -1,0 +1,367 @@
+---
+title: Responsive Design Strategies
+description: A practical guide to modern responsive design using container queries and fluid typography in production web applications.
+---
+
+## Overview
+
+Responsive design has evolved well beyond media queries and fixed breakpoints. Two of the most powerful modern tools are **container queries** and **fluid typography**.
+
+- **Container queries** let components respond to the size of their _parent container_, not the viewport. This makes components genuinely reusable across layouts without needing context-specific overrides.
+- **Fluid typography** uses `clamp()` to scale font sizes (and spacing) smoothly between a minimum and maximum value across a range of viewport widths — no stepped breakpoints required.
+
+Together, these strategies let you build interfaces that adapt gracefully at every scale, without a growing pile of `@media` overrides.
+
+---
+
+## How It Works
+
+### Container Queries
+
+Before container queries, a card component had to use global viewport breakpoints:
+
+```css
+/* Old approach — tied to the viewport, not the component's context */
+@media (min-width: 768px) {
+  .card {
+    flex-direction: row;
+  }
+}
+```
+
+This breaks down when the same card is used in a narrow sidebar _and_ a wide main column on the same page at the same viewport width.
+
+Container queries solve this by creating a **containment context** on a parent element. Child elements can then query _that container's width_ using `@container`.
+
+```css
+.card-wrapper {
+  container-type: inline-size; /* establishes a containment context */
+  container-name: card; /* optional name for targeting */
+}
+
+@container card (min-width: 480px) {
+  .card {
+    flex-direction: row;
+  }
+}
+```
+
+The browser measures the `.card-wrapper` element, not the window. The card adapts based on how much space it actually has.
+
+### Fluid Typography with `clamp()`
+
+`clamp(min, preferred, max)` defines a value that scales between a floor and ceiling. For typography:
+
+```css
+font-size: clamp(1rem, 2.5vw, 1.5rem);
+```
+
+- Below a certain viewport width → font is capped at `1rem`
+- Above a certain viewport width → font is capped at `1.5rem`
+- In between → the font scales linearly with the viewport
+
+The `preferred` value (`2.5vw`) drives the fluid scaling. You can calculate exact transition points using the formula:
+
+```
+viewport width at which clamp kicks in = (target size / vw coefficient) * 100
+```
+
+For predictable scaling between two specific breakpoints, use this CSS custom property pattern:
+
+```css
+:root {
+  --fluid-min-width: 320;
+  --fluid-max-width: 1240;
+  --fluid-min-size: 16;
+  --fluid-max-size: 24;
+
+  --fluid-slope: calc(
+    (var(--fluid-max-size) - var(--fluid-min-size)) /
+      (var(--fluid-max-width) - var(--fluid-min-width))
+  );
+  --fluid-intercept: calc(
+    var(--fluid-min-size) - var(--fluid-slope) * var(--fluid-min-width)
+  );
+
+  --fluid-body: clamp(
+    calc(var(--fluid-min-size) * 1px),
+    calc(var(--fluid-intercept) * 1px + var(--fluid-slope) * 100vw),
+    calc(var(--fluid-max-size) * 1px)
+  );
+}
+```
+
+---
+
+## Code Examples
+
+### Container Query — Responsive Card Component
+
+A product card that switches from a stacked layout to a side-by-side layout based on its container width.
+
+```tsx
+// app/components/ProductCard.tsx
+// This is a Server Component — no 'use client' needed for layout
+
+type Product = {
+  name: string;
+  price: string;
+  imageUrl: string;
+  description: string;
+};
+
+export function ProductCard({ product }: { product: Product }) {
+  return (
+    // The wrapper establishes the containment context via CSS class
+    <div className="product-card-wrapper">
+      <div className="product-card">
+        <img
+          src={product.imageUrl}
+          alt={product.name}
+          className="product-card__image"
+        />
+        <div className="product-card__body">
+          <h2 className="product-card__name">{product.name}</h2>
+          <p className="product-card__description">{product.description}</p>
+          <span className="product-card__price">{product.price}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+```css
+/* styles/product-card.css */
+
+.product-card-wrapper {
+  container-type: inline-size;
+  container-name: product-card;
+}
+
+/* Default: stacked layout for narrow containers */
+.product-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.product-card__image {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
+/* Side-by-side layout when the container is wide enough */
+@container product-card (min-width: 500px) {
+  .product-card {
+    flex-direction: row;
+  }
+
+  .product-card__image {
+    width: 200px;
+    aspect-ratio: 1 / 1;
+    flex-shrink: 0;
+  }
+}
+```
+
+Now this card works correctly whether it's placed in a full-width grid, a narrow sidebar, or a modal — each instance responds to its own container.
+
+---
+
+### Fluid Typography — Global Type Scale
+
+```css
+/* styles/typography.css */
+
+:root {
+  /* Body: scales from 16px at 320px viewport to 18px at 1280px viewport */
+  --text-body: clamp(1rem, 0.9565rem + 0.2174vw, 1.125rem);
+
+  /* Heading MD: scales from 20px to 28px */
+  --text-heading-md: clamp(1.25rem, 1.0326rem + 1.087vw, 1.75rem);
+
+  /* Heading LG: scales from 28px to 48px */
+  --text-heading-lg: clamp(1.75rem, 1.3152rem + 2.1739vw, 3rem);
+
+  /* Display: scales from 36px to 72px */
+  --text-display: clamp(2.25rem, 1.4674rem + 3.913vw, 4.5rem);
+}
+
+body {
+  font-size: var(--text-body);
+  line-height: 1.6;
+}
+
+h1 {
+  font-size: var(--text-display);
+}
+h2 {
+  font-size: var(--text-heading-lg);
+}
+h3 {
+  font-size: var(--text-heading-md);
+}
+```
+
+```tsx
+// app/layout.tsx
+import "./styles/typography.css";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+---
+
+### Fluid Spacing with Tailwind CSS (Optional Integration)
+
+If you use Tailwind, extend the theme to include fluid values via a plugin or CSS variables:
+
+```ts
+// tailwind.config.ts
+import type { Config } from "tailwindcss";
+
+const config: Config = {
+  content: ["./app/**/*.{ts,tsx}"],
+  theme: {
+    extend: {
+      fontSize: {
+        // Use CSS custom properties defined in your global CSS
+        "fluid-body": "var(--text-body)",
+        "fluid-heading-md": "var(--text-heading-md)",
+        "fluid-heading-lg": "var(--text-heading-lg)",
+        "fluid-display": "var(--text-display)",
+      },
+    },
+  },
+};
+
+export default config;
+```
+
+```tsx
+// Usage in a component
+export function HeroSection() {
+  return (
+    <section>
+      <h1 className="text-fluid-display font-bold">Build without limits</h1>
+      <p className="text-fluid-body text-gray-600">
+        Your product, at every screen size.
+      </p>
+    </section>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+**E-commerce product grid with a collapsible filter sidebar.**
+
+The same `<ProductCard>` component renders in:
+
+- A 3-column grid on desktop (each card ~350px wide)
+- A 1-column list when the sidebar is open (each card ~500px wide)
+- A full-width single column on mobile
+
+Without container queries, you'd need separate component variants or viewport-based media queries that break when the sidebar state changes. With container queries, the card simply responds to however much width its grid cell actually provides — no JavaScript, no class toggling.
+
+Fluid typography ensures the card's product name and price labels scale naturally across all three states without hard-coded `text-sm`/`text-lg` overrides per breakpoint.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Forgetting `container-type` on the parent**
+
+`@container` rules are silently ignored if the queried ancestor doesn't have `container-type` set. If your container queries don't seem to work, this is almost always the cause.
+
+```css
+/* ❌ Missing — @container rules won't fire */
+.wrapper {
+  width: 100%;
+}
+
+/* ✅ Correct */
+.wrapper {
+  container-type: inline-size;
+}
+```
+
+**2. Querying a container that is also the styled element**
+
+You cannot style an element based on its _own_ size. The `@container` query must reference an _ancestor_ element, not the element itself. Always wrap the component in a containing parent.
+
+```css
+/* ❌ This does nothing — .card cannot query itself */
+.card {
+  container-type: inline-size;
+}
+@container (min-width: 400px) {
+  .card {
+    flex-direction: row;
+  } /* .card is the container AND the target */
+}
+
+/* ✅ Wrap it */
+.card-wrapper {
+  container-type: inline-size;
+}
+@container (min-width: 400px) {
+  .card {
+    flex-direction: row;
+  }
+}
+```
+
+**3. Using arbitrary `vw` units in `clamp()` without calculating breakpoints**
+
+`clamp(1rem, 4vw, 2rem)` — what does `4vw` actually mean here? At what viewport width does the clamp kick in? Guessing the `vw` coefficient leads to type that's either too small on mobile or too large on large monitors. Use the slope-intercept formula or a tool like [Utopia.fyi](https://utopia.fyi) to calculate precise, intentional values.
+
+**4. Nesting container queries without named containers**
+
+When you have nested containment contexts, unnamed `@container` queries target the _nearest_ ancestor with `container-type` set — which may not be what you expect. Name your containers explicitly to avoid ambiguity.
+
+```css
+/* ✅ Named containers are unambiguous */
+.sidebar { container-type: inline-size; container-name: sidebar; }
+.main    { container-type: inline-size; container-name: main; }
+
+@container main (min-width: 600px) { ... }
+@container sidebar (min-width: 200px) { ... }
+```
+
+<Callout type="warn">
+  Container queries have broad browser support (Chrome 105+, Safari 16+, Firefox
+  110+) but check [caniuse.com](https://caniuse.com/css-container-queries) if
+  you need to support older environments. A `container-type: size` query (both
+  axes) has a performance cost — prefer `inline-size` unless you genuinely need
+  height-based queries.
+</Callout>
+
+<Callout type="info">
+  Use [Utopia.fyi](https://utopia.fyi) to generate mathematically precise
+  `clamp()` values for your type and space scales. It outputs both plain CSS and
+  Tailwind-compatible config.
+</Callout>
+
+---
+
+## Summary
+
+Container queries decouple component layout from global viewport state, making UI components truly portable and context-aware. Fluid typography replaces stepped breakpoint overrides with smooth, continuous scaling using `clamp()`. Both techniques require minimal JavaScript and work entirely in CSS. The key to using container queries correctly is always establishing `container-type` on a _parent_ wrapper, not the element being styled. For fluid type, calculate your `clamp()` values mathematically or use a generator tool — guessed values lead to inconsistent scaling at the edges of your viewport range.

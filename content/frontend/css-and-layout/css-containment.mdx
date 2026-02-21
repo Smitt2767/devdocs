@@ -1,0 +1,194 @@
+---
+title: CSS Containment
+description: A guide to the CSS `contain` and `content-visibility` properties and how they improve rendering performance by isolating DOM subtrees.
+---
+
+## Overview
+
+CSS Containment lets you tell the browser that a specific element is independent from the rest of the page. When the browser knows a subtree is self-contained, it can skip recalculating layout, paint, or style for the rest of the document when something changes inside that element — and vice versa.
+
+This matters because browsers normally treat the entire DOM as interconnected. A size change deep in a component can trigger a full-page layout recalculation. Containment breaks that chain.
+
+The two main tools are:
+
+- **`contain`** — explicitly declares which types of containment apply to an element.
+- **`content-visibility`** — a higher-level property that combines containment with rendering skip logic for off-screen content.
+
+---
+
+## How It Works
+
+The browser rendering pipeline has several phases: style calculation, layout, paint, and compositing. Without containment, a change to one element can invalidate any of these phases for ancestor and sibling elements across the entire tree.
+
+`contain` accepts one or more of these values:
+
+| Value     | What it isolates                                                                                     |
+| --------- | ---------------------------------------------------------------------------------------------------- |
+| `layout`  | The element's layout is independent — internal changes don't affect external layout, and vice versa. |
+| `paint`   | The element's children won't visually overflow it; the browser won't paint outside the box.          |
+| `style`   | CSS counters and `quotes` inside the element don't affect the rest of the document.                  |
+| `size`    | The element's size doesn't depend on its children (you must specify explicit dimensions).            |
+| `strict`  | Shorthand for `size layout paint style`.                                                             |
+| `content` | Shorthand for `layout paint style` (the most practical default).                                     |
+
+`content-visibility: auto` goes further — it skips rendering entirely for elements that are outside the viewport. The browser still reserves space (using the `contain-intrinsic-size` hint), but painting and layout for off-screen content is deferred until scroll brings it into view.
+
+---
+
+## Code Examples
+
+### Basic `contain` on a reusable card component
+
+```css
+/* Each card is visually and layout-isolated from siblings.
+   A change inside .card won't trigger layout recalc on the page. */
+.card {
+  contain: content; /* layout + paint + style */
+  border-radius: 8px;
+  padding: 1.5rem;
+  background: white;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.08);
+}
+```
+
+### `content-visibility: auto` for a long article feed
+
+```css
+/* Each article is only fully rendered when it enters the viewport.
+   Off-screen articles skip layout + paint, cutting initial render time. */
+.article-preview {
+  content-visibility: auto;
+
+  /* Give the browser a size hint so scrollbar height stays accurate
+     even before off-screen items are rendered. */
+  contain-intrinsic-size: auto 320px;
+}
+```
+
+```html
+<main>
+  <!-- 200 of these — only the visible ones are fully rendered -->
+  <article class="article-preview">
+    <h2>How WebSockets Work</h2>
+    <p>WebSockets provide a persistent, full-duplex connection...</p>
+  </article>
+  <article class="article-preview">
+    <h2>Understanding the Event Loop</h2>
+    <p>JavaScript is single-threaded, but the event loop...</p>
+  </article>
+  <!-- ... -->
+</main>
+```
+
+### Using `contain` in a React/Next.js component (App Router)
+
+```tsx
+// app/components/ProductCard.tsx
+// Server Component — no 'use client' needed
+
+type Product = {
+  id: string;
+  name: string;
+  price: number;
+  imageUrl: string;
+};
+
+export function ProductCard({ product }: { product: Product }) {
+  return (
+    <article className="product-card">
+      <img src={product.imageUrl} alt={product.name} width={300} height={300} />
+      <h2>{product.name}</h2>
+      <p>${product.price.toFixed(2)}</p>
+    </article>
+  );
+}
+```
+
+```css
+/* globals.css or a CSS module */
+.product-card {
+  /* Isolate layout and paint per card.
+     Animating or updating one card won't reflow the grid. */
+  contain: content;
+  contain-intrinsic-size: auto 380px;
+  content-visibility: auto;
+}
+```
+
+---
+
+## Real-World Use Case
+
+**E-commerce product listing page**
+
+A category page renders 150+ product cards. Without containment, scrolling or filtering causes the browser to recalculate layout for all 150+ cards on every interaction.
+
+With `content-visibility: auto` on each card:
+
+- Initial page load paint time drops because off-screen cards are skipped entirely.
+- Filtering a visible subset is faster because contained cards are isolated layout subtrees.
+- `contain-intrinsic-size` keeps the scrollbar accurate, avoiding the jarring jump you'd get if off-screen items had no reserved height.
+
+This is also common in:
+
+- Dashboard widgets where each widget is independently interactive.
+- Comment threads with deeply nested replies.
+- Virtualization alternatives when full virtual list libraries feel like overkill.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Using `contain: strict` without explicit dimensions**
+
+`strict` includes `size` containment, which means the element must have an explicit width and height. If you don't set them, the element collapses to zero size.
+
+```css
+/* ❌ Collapses to 0x0 — size containment requires explicit sizing */
+.widget {
+  contain: strict;
+}
+
+/* ✅ Safe */
+.widget {
+  contain: strict;
+  width: 400px;
+  height: 300px;
+}
+```
+
+**2. Expecting `content-visibility: auto` to be a drop-in for all elements**
+
+`content-visibility: auto` establishes a containing block with `contain: strict` under the hood. Elements that rely on percentage heights, sticky positioning, or overflow from ancestors may behave unexpectedly. Test layout-sensitive components carefully.
+
+**3. Forgetting `contain-intrinsic-size`**
+
+Without this hint, the browser assigns zero reserved height to off-screen `content-visibility: auto` elements. As you scroll down, elements get rendered and the page height grows, causing the scrollbar to jump. Always pair `content-visibility: auto` with a size estimate:
+
+```css
+/* Use `auto` prefix so the browser remembers the real size after first render */
+.feed-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px; /* rough estimated height */
+}
+```
+
+**4. Applying `contain: paint` and expecting `overflow: visible` to work**
+
+`paint` containment creates a new stacking context and clips content to the border box. Tooltips, dropdowns, or absolutely positioned children that need to visually overflow the element will be clipped.
+
+<Callout type="warn">
+  Don't apply `contain: paint` or `contain: content` to elements that have
+  children with intentional visual overflow (e.g., dropdown menus, tooltips).
+  Use `contain: layout` alone in those cases.
+</Callout>
+
+**5. Using `contain: style` expecting it to isolate CSS custom properties**
+
+`style` containment only affects CSS counters and `quotes`. It does **not** scope CSS custom properties (`--my-var`). Custom properties still inherit normally through the tree.
+
+---
+
+## Summary
+
+CSS Containment (`contain`) lets you mark elements as independent rendering subtrees, preventing internal changes from triggering expensive reflows or repaints across the rest of the page. `content-visibility: auto` extends this by skipping rendering of off-screen content entirely, which can dramatically reduce initial page load cost on content-heavy pages. Always pair `content-visibility: auto` with `contain-intrinsic-size` to avoid scrollbar instability. Be cautious with `contain: strict` and `contain: paint` on elements that rely on overflow or require flexible sizing — `contain: content` is the safest general-purpose starting point.

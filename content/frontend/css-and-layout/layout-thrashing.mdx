@@ -1,0 +1,197 @@
+---
+title: Layout Thrashing
+description: What layout thrashing is, why it destroys rendering performance, and how to eliminate it with modern browser APIs and patterns.
+---
+
+## Overview
+
+Layout thrashing happens when JavaScript repeatedly forces the browser to recalculate the layout of a page within a single frame. Each time you read a geometric property (like `offsetHeight` or `getBoundingClientRect()`) after writing to the DOM, the browser must pause and perform a synchronous reflow to give you an accurate value. Do this in a loop and you've created a thrashing pattern — the browser spends the entire frame recalculating layout instead of actually rendering anything useful.
+
+The result is dropped frames, jank, and sluggish UI — even on fast hardware.
+
+## How It Works
+
+Browsers batch DOM writes and perform layout lazily. If you only write to the DOM, the browser can queue those changes and apply them efficiently at the end of the frame.
+
+The problem starts when you **read** a layout property after a **write**. The browser can't give you a stale value, so it flushes the pending changes and recalculates layout immediately — synchronously, on your thread, blocking everything else.
+
+This read → write → read → write cycle in a loop is layout thrashing.
+
+Think of it like editing a spreadsheet where every time you look at a cell's computed value, the entire sheet recalculates. One lookup is fine. Ten thousand in a loop is catastrophic.
+
+**Thrashing pattern (the bad cycle):**
+
+1. Write: `element.style.width = '100px'`
+2. Read: `element.offsetWidth` → browser forces reflow
+3. Write: `element.style.width = computedValue + 'px'`
+4. Read: `element.offsetWidth` → browser forces reflow again
+5. Repeat 100 times per frame…
+
+## Code Examples
+
+### ❌ The Thrashing Pattern
+
+```ts
+const items = document.querySelectorAll<HTMLElement>(".card");
+
+// This triggers a reflow on every iteration
+items.forEach((item) => {
+  const height = item.offsetHeight; // READ — forces reflow because we just wrote above
+  item.style.height = `${height * 1.5}px`; // WRITE
+});
+```
+
+Even though this looks like a simple loop, the browser reflows the entire document on each iteration because each read follows a write.
+
+### ✅ Batch Reads First, Then Batch Writes
+
+```ts
+const items = document.querySelectorAll<HTMLElement>(".card");
+
+// Phase 1: Read all values up front (one reflow at most)
+const heights = Array.from(items).map((item) => item.offsetHeight);
+
+// Phase 2: Write all values (no reads, so no forced reflows)
+items.forEach((item, index) => {
+  item.style.height = `${heights[index] * 1.5}px`;
+});
+```
+
+By separating the read and write phases, the browser only needs to reflow once.
+
+### ✅ Using `requestAnimationFrame` to Schedule Writes
+
+```ts
+const card = document.querySelector<HTMLElement>(".hero-card");
+
+function resizeCard() {
+  // Read outside rAF — capture current layout state
+  const currentHeight = card!.offsetHeight;
+
+  // Schedule the write for the next frame
+  requestAnimationFrame(() => {
+    card!.style.height = `${currentHeight + 20}px`;
+  });
+}
+
+resizeCard();
+```
+
+`requestAnimationFrame` ensures your writes land at the start of a new frame, after the browser has already done its layout work for the current one.
+
+### ✅ Using `ResizeObserver` Instead of Polling
+
+```ts
+const card = document.querySelector<HTMLElement>(".responsive-panel")!;
+
+// ResizeObserver is layout-safe — it fires after layout, not during
+const observer = new ResizeObserver((entries) => {
+  for (const entry of entries) {
+    const { width } = entry.contentRect; // Safe read — no forced reflow
+    card.style.setProperty("--panel-width", `${width}px`);
+  }
+});
+
+observer.observe(card);
+```
+
+`ResizeObserver` callbacks fire after the browser has committed layout, making them a safe place to read and react to size changes without triggering thrashing.
+
+### ✅ Using the `fastdom` Pattern (Manual Batching Utility)
+
+If you're working in a codebase with complex, interleaved DOM reads and writes across multiple modules, a batching scheduler helps:
+
+```ts
+type Task = () => void;
+
+const reads: Task[] = [];
+const writes: Task[] = [];
+let scheduled = false;
+
+function scheduleFlush() {
+  if (!scheduled) {
+    scheduled = true;
+    requestAnimationFrame(flush);
+  }
+}
+
+function flush() {
+  // Execute all reads first
+  reads.splice(0).forEach((task) => task());
+  // Then all writes
+  writes.splice(0).forEach((task) => task());
+  scheduled = false;
+}
+
+export function scheduleRead(task: Task) {
+  reads.push(task);
+  scheduleFlush();
+}
+
+export function scheduleWrite(task: Task) {
+  writes.push(task);
+  scheduleFlush();
+}
+```
+
+```ts
+import { scheduleRead, scheduleWrite } from "./domScheduler";
+
+const panel = document.querySelector<HTMLElement>(".side-panel")!;
+
+scheduleRead(() => {
+  const height = panel.offsetHeight;
+
+  scheduleWrite(() => {
+    panel.style.minHeight = `${height}px`;
+  });
+});
+```
+
+## Real-World Use Case
+
+In a data-dense dashboard — think analytics tables, Kanban boards, or financial charts — you might need to equalize the heights of cards in each row so they align visually. A naive implementation loops over all cards, reads their height, and sets a uniform value. With 50+ cards re-rendered on every filter interaction, this causes severe jank.
+
+The fix: collect all height measurements in one pass, compute the max per row, then apply all writes in a second pass. Combined with `requestAnimationFrame`, the dashboard stays smooth even with complex layouts.
+
+The same applies to drag-and-drop reordering: reading `getBoundingClientRect()` during a `mousemove` handler that also updates element positions is a classic thrashing scenario. Separate the read (capture rects on `mousedown`) from the write (update positions in `rAF`).
+
+## Common Mistakes / Gotchas
+
+**1. Reading layout properties inside animation loops without batching**
+
+Any property that requires up-to-date geometry — `offsetWidth`, `offsetHeight`, `offsetTop`, `offsetLeft`, `scrollTop`, `clientWidth`, `getBoundingClientRect()`, `getComputedStyle()` — will force a reflow if the DOM has been written to since the last layout. Reading these inside a `setInterval` or `requestAnimationFrame` callback that also writes is the most common source of thrashing.
+
+**2. CSS-in-JS libraries can hide the problem**
+
+When you set styles via a library that batches class updates (like Tailwind or CSS Modules), you might think you're safe. But if your JavaScript then reads a layout property expecting the new style to be applied, you still trigger a forced reflow. The DOM write doesn't have to be explicit `element.style` assignment — any pending style change causes the same issue.
+
+**3. Forgetting that `getComputedStyle` is a layout read**
+
+Developers often assume `getComputedStyle` is cheap because it "just reads the stylesheet." It isn't. If the styles depend on layout (e.g., `width: 50%`), the browser must reflow to resolve the value accurately.
+
+```ts
+// This forces a reflow if any pending writes exist
+const styles = window.getComputedStyle(element);
+const width = styles.width; // triggered layout recalculation
+```
+
+**4. Not profiling before optimizing**
+
+Not every DOM read/write in a loop causes visible jank. Profile first using Chrome DevTools → Performance tab, look for "Forced reflow" warnings in the flame chart. Fix the worst offenders, not everything.
+
+<Callout type="warn">
+  Avoid reading `offsetWidth`, `offsetHeight`, `scrollTop`,
+  `getBoundingClientRect()`, or `getComputedStyle()` inside loops that also
+  perform writes. This is the single most common cause of layout thrashing.
+</Callout>
+
+<Callout type="info">
+  The browser DevTools will flag forced synchronous layouts in the Performance
+  panel with a red warning icon. Use this to identify thrashing before you start
+  refactoring.
+</Callout>
+
+## Summary
+
+Layout thrashing occurs when JavaScript alternates between reading and writing layout-affecting DOM properties, forcing the browser into repeated synchronous reflows within a single frame. The fix is always the same principle: batch all reads together, then batch all writes — never interleave them. Modern APIs like `ResizeObserver` and `requestAnimationFrame` are designed to work with the browser's rendering pipeline rather than against it. Profile your app with DevTools before optimizing, since not all DOM access causes visible problems. Keeping reads and writes in separate phases is one of the highest-impact performance habits you can build as a frontend developer.

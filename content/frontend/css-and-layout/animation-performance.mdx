@@ -1,0 +1,268 @@
+---
+title: Animation Performance
+description: How to build smooth, jank-free CSS and JavaScript animations using compositor-only properties and the will-change hint.
+---
+
+## Overview
+
+Browser animations can stutter if they trigger expensive rendering work on every frame. The browser rendering pipeline has three main stages: **Layout** (calculating element geometry), **Paint** (filling in pixels), and **Composite** (assembling layers onto the screen). Animations that only affect the Composite stage run entirely on the GPU compositor thread — separate from the main JavaScript thread — which means they stay smooth even when JS is busy.
+
+The two CSS properties that are compositor-only are `transform` and `opacity`. Everything else — `width`, `height`, `top`, `left`, `background-color`, `box-shadow` — triggers Layout or Paint, which is significantly more expensive.
+
+`will-change` is a hint to the browser that an element is about to be animated, giving it a chance to promote that element to its own compositor layer in advance.
+
+---
+
+## How It Works
+
+Think of the browser like a film projector. Layout is writing the script, Paint is printing the frames, and Composite is running the projector. If you only change how a frame is positioned or how transparent it is, you can swap frames in the projector without reprinting anything. That's compositing.
+
+When you animate `transform: translateX()` instead of `left`, the browser:
+
+1. Promotes the element to its own GPU layer (if not already done).
+2. Moves that layer on the GPU without touching the main thread.
+3. Composites the result to the screen.
+
+No layout recalculation. No repaint. Just fast GPU texture operations.
+
+**`will-change` promotes the element ahead of time** so there's no promotion delay at animation start. Without it, the browser may need to do a one-time expensive promotion mid-animation, causing a visible first-frame stutter.
+
+<Callout type="info">
+  You can visualize layer promotion in Chrome DevTools → Rendering → Layer
+  borders. Green borders indicate GPU-promoted layers.
+</Callout>
+
+---
+
+## Code Examples
+
+### ❌ Expensive — animating layout-triggering properties
+
+```css
+/* Triggers Layout + Paint on every frame */
+.card {
+  position: absolute;
+  left: 0;
+  transition:
+    left 300ms ease,
+    width 300ms ease;
+}
+
+.card:hover {
+  left: 20px;
+  width: 320px;
+}
+```
+
+### ✅ Compositor-only — animate transform and opacity instead
+
+```css
+/* Runs entirely on the GPU compositor thread */
+.card {
+  transition:
+    transform 300ms ease,
+    opacity 300ms ease;
+  will-change: transform, opacity; /* hint: promote this layer now */
+}
+
+.card:hover {
+  transform: translateX(20px) scale(1.02);
+  opacity: 0.95;
+}
+```
+
+### JavaScript animation with the Web Animations API
+
+```ts
+// animate-modal.ts
+
+const modal = document.querySelector<HTMLElement>("#modal");
+
+if (modal) {
+  modal.animate(
+    [
+      // Keyframes — compositor-only properties only
+      { transform: "translateY(24px)", opacity: 0 },
+      { transform: "translateY(0px)", opacity: 1 },
+    ],
+    {
+      duration: 250,
+      easing: "cubic-bezier(0.16, 1, 0.3, 1)", // spring-like ease-out
+      fill: "forwards", // retain end state after animation completes
+    },
+  );
+}
+```
+
+### React component using compositor-only transitions
+
+```tsx
+// components/FadeSlideIn.tsx
+"use client";
+
+import { useEffect, useRef } from "react";
+
+interface FadeSlideInProps {
+  children: React.ReactNode;
+  delay?: number;
+}
+
+export function FadeSlideIn({ children, delay = 0 }: FadeSlideInProps) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    // Start from invisible + shifted down
+    el.style.opacity = "0";
+    el.style.transform = "translateY(16px)";
+
+    const animation = el.animate(
+      [
+        { transform: "translateY(16px)", opacity: 0 },
+        { transform: "translateY(0px)", opacity: 1 },
+      ],
+      {
+        delay,
+        duration: 300,
+        easing: "ease-out",
+        fill: "forwards",
+      },
+    );
+
+    // Clean up if component unmounts before animation ends
+    return () => animation.cancel();
+  }, [delay]);
+
+  return (
+    // will-change set inline so it's scoped to animated elements only
+    <div ref={ref} style={{ willChange: "transform, opacity" }}>
+      {children}
+    </div>
+  );
+}
+```
+
+```tsx
+// app/products/page.tsx
+import { FadeSlideIn } from "@/components/FadeSlideIn";
+import { getProducts } from "@/lib/products";
+
+export default async function ProductsPage() {
+  const products = await getProducts();
+
+  return (
+    <ul className="grid grid-cols-3 gap-4">
+      {products.map((product, index) => (
+        <FadeSlideIn key={product.id} delay={index * 60}>
+          <li className="rounded-xl border p-4">
+            <h2>{product.name}</h2>
+            <p>{product.price}</p>
+          </li>
+        </FadeSlideIn>
+      ))}
+    </ul>
+  );
+}
+```
+
+### Applying `will-change` only during interaction (advanced)
+
+```ts
+// For elements not animated on page load, apply will-change
+// only when interaction is imminent to avoid wasting GPU memory.
+
+const button = document.querySelector<HTMLButtonElement>("#cta-button");
+
+button?.addEventListener("mouseenter", () => {
+  button.style.willChange = "transform";
+});
+
+button?.addEventListener("mouseleave", () => {
+  // Remove after transition ends to free the GPU layer
+  button.addEventListener(
+    "transitionend",
+    () => {
+      button.style.willChange = "auto";
+    },
+    { once: true },
+  );
+});
+```
+
+---
+
+## Real-World Use Case
+
+In an e-commerce storefront, product cards animate on hover (scale + shadow effect) and a cart drawer slides in from the right. Without compositor-only properties, every hover on a page with 48 cards would trigger repaints across the entire page, causing visible frame drops on mid-range devices.
+
+By using `transform: scale(1.03)` instead of changing `width`/`height`, and `transform: translateX(0)` instead of `right: 0` for the drawer, every animation stays on the GPU. The `will-change: transform` hint on the drawer ensures the first open is instant, since the layer is already promoted when the page loads.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Applying `will-change` to everything**
+
+`will-change` promotes elements to separate GPU layers. Each layer consumes GPU memory. Slapping `will-change: transform` on every `div` in your app can exhaust GPU memory on mobile devices and actually hurt performance.
+
+<Callout type="warn">
+  Only apply `will-change` to elements that are actually about to animate.
+  Remove it afterward with `will-change: auto` if the animation is infrequent.
+</Callout>
+
+**2. Animating `width`/`height` instead of `transform: scale()`**
+
+Changing `width` or `height` recalculates layout for the element _and_ all its siblings. This can cascade into a full-page reflow. Use `transform: scale()` for visual resizing effects — it doesn't affect layout at all.
+
+```css
+/* ❌ Causes layout recalculation */
+.panel {
+  transition: height 300ms;
+}
+
+/* ✅ No layout impact */
+.panel {
+  transition: transform 300ms;
+  transform-origin: top;
+}
+.panel.collapsed {
+  transform: scaleY(0);
+}
+```
+
+**3. Animating `box-shadow` directly**
+
+`box-shadow` triggers Paint on every frame. A common workaround is to animate the `opacity` of a pseudo-element that holds the shadow.
+
+```css
+.card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  opacity: 0;
+  /* Only opacity transitions — compositor-only */
+  transition: opacity 300ms ease;
+  border-radius: inherit;
+}
+
+.card:hover::after {
+  opacity: 1;
+}
+```
+
+**4. Forgetting `transform-style` on 3D animations**
+
+If you're compositing 3D child elements and they appear flat, you likely need `transform-style: preserve-3d` on the parent. Without it, child `transform: translateZ()` values are flattened.
+
+**5. Using `left`/`top` with `position: absolute` for movement**
+
+This is the single most common animation performance mistake. Always reach for `transform: translate()` first.
+
+---
+
+## Summary
+
+Compositor-only properties — `transform` and `opacity` — are the foundation of performant animation because they bypass Layout and Paint entirely and execute on the GPU. Use them exclusively for movement, scaling, rotation, and fading. The `will-change` property is a surgical optimization hint: apply it only to elements with imminent animations and remove it afterward to avoid unnecessary GPU layer promotion. Animating properties like `width`, `height`, `top`, `left`, or `box-shadow` will cause layout thrashing or repaints and should be avoided or replaced with transform-based equivalents. Profiling in Chrome DevTools under the Performance and Rendering panels is the fastest way to confirm whether your animations are staying on the compositor thread.

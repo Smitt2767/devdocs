@@ -1,4 +1,11 @@
 {
   "title": "CSS & Layout",
-  "pages": []
+  "pages": [
+    "css-containment",
+    "layout-thrashing",
+    "css-architecture-tradeoffs",
+    "animation-performance",
+    "theming-and-design-tokens",
+    "responsive-design-strategies"
+  ]
 }
