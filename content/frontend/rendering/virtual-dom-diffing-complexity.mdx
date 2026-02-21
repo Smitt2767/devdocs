@@ -1,0 +1,217 @@
+---
+title: Virtual DOM Diffing
+description: How React's reconciler compares virtual DOM trees to compute the minimal set of real DOM updates, and the complexity trade-offs involved.
+---
+
+## Overview
+
+When your React component re-renders, React doesn't immediately touch the real DOM. Instead, it builds a lightweight JavaScript representation of the UI — the **virtual DOM** — and compares the new tree against the previous one. This comparison is called **diffing** (or reconciliation).
+
+The goal: figure out the _minimum_ number of real DOM operations needed to reflect the new state. Real DOM mutations are expensive; virtual DOM comparisons are cheap.
+
+The catch: comparing two arbitrary trees is an O(n³) problem in computer science. React sidesteps this with a set of heuristics that bring it down to **O(n)** — but those heuristics come with rules you must follow.
+
+## How It Works
+
+React's diffing algorithm (the **reconciler**, currently "Fiber") makes two core assumptions:
+
+1. **Elements of different types produce entirely different trees.** If a `<div>` becomes a `<section>`, React tears down the old subtree and builds a new one from scratch — it won't try to reuse children.
+
+2. **The `key` prop is the developer's hint for list stability.** When diffing arrays of children, React uses `key` to match old elements to new ones. Without stable keys, React falls back to index-based matching, which breaks in predictable ways.
+
+### The Diffing Steps
+
+**Same element type → update in place.** React keeps the DOM node and only updates changed attributes/props.
+
+```tsx
+// Before
+<button className="primary" disabled={false}>Save</button>
+
+// After
+<button className="primary" disabled={true}>Save</button>
+// React updates only the `disabled` attribute — no node is destroyed.
+```
+
+**Different element type → full subtree replacement.**
+
+```tsx
+// Before
+<div>
+  <UserCard user={user} />
+</div>
+
+// After
+<section>        {/* type changed: div → section */}
+  <UserCard user={user} />
+</section>
+// React unmounts UserCard, destroys the div, creates a section, remounts UserCard.
+// All state inside UserCard is lost.
+```
+
+**List diffing with and without keys.**
+
+```tsx
+// ❌ No keys — React diffs by index
+// Adding to the front causes every item to appear "changed"
+const items = ["Alice", "Bob", "Charlie"];
+return (
+  <ul>
+    {items.map((name) => (
+      <li>{name}</li> // React has no stable identity to match against
+    ))}
+  </ul>
+);
+
+// ✅ Stable keys — React matches by identity
+return (
+  <ul>
+    {users.map((user) => (
+      <li key={user.id}>{user.name}</li> // user.id survives reorders and inserts
+    ))}
+  </ul>
+);
+```
+
+### Fiber and Priority
+
+React 18's Fiber architecture adds a scheduling layer on top of diffing. Each unit of work (a fiber node) can be paused, resumed, or abandoned. This allows React to prioritize urgent updates (like typing in an input) over less urgent ones (like a data-heavy list re-render), without blocking the main thread.
+
+`useTransition` and `useDeferredValue` expose this priority system directly to you.
+
+## Code Example: Stable Keys and Avoiding Unnecessary Subtree Teardowns
+
+```tsx
+// app/dashboard/page.tsx  (Server Component)
+import { getOrders } from "@/lib/data";
+import OrderList from "./order-list";
+
+export default async function DashboardPage() {
+  const orders = await getOrders();
+  return <OrderList orders={orders} />;
+}
+```
+
+```tsx
+// app/dashboard/order-list.tsx
+"use client";
+
+import { useState, useTransition } from "react";
+
+type Order = { id: string; customer: string; total: number; status: string };
+
+export default function OrderList({ orders }: { orders: Order[] }) {
+  const [filter, setFilter] = useState<string>("all");
+  const [isPending, startTransition] = useTransition();
+
+  const filtered =
+    filter === "all" ? orders : orders.filter((o) => o.status === filter);
+
+  return (
+    <div>
+      <select
+        value={filter}
+        onChange={(e) => {
+          // Mark filter update as non-urgent so the current list stays
+          // interactive while React re-renders in the background
+          startTransition(() => setFilter(e.target.value));
+        }}
+      >
+        <option value="all">All</option>
+        <option value="pending">Pending</option>
+        <option value="shipped">Shipped</option>
+      </select>
+
+      <ul style={{ opacity: isPending ? 0.6 : 1 }}>
+        {filtered.map((order) => (
+          // ✅ Stable, unique key — React reuses DOM nodes on reorder/filter
+          <li key={order.id}>
+            {order.customer} — ${order.total} ({order.status})
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+## Real-World Use Case
+
+In a project management tool, you render a board of task cards that users can filter, reorder, and drag between columns. Without stable `key` props, every filter change causes React to unmount and remount cards, destroying any locally-held state (e.g., an open inline editor or a partially typed comment). With `key={task.id}`, React reuses the existing DOM nodes and preserves component state across re-renders.
+
+The same principle applies when animating list transitions: CSS animations only trigger on _new_ DOM nodes. If React incorrectly thinks a node is new because it lacks a stable key, your "update" animation fires instead of your "enter" animation.
+
+## Common Mistakes / Gotchas
+
+### 1. Using array index as a key for mutable lists
+
+```tsx
+// ❌ Index keys break when items are inserted, removed, or reordered
+{
+  tasks.map((task, index) => <TaskCard key={index} task={task} />);
+}
+
+// ✅ Use a stable, unique identifier
+{
+  tasks.map((task) => <TaskCard key={task.id} task={task} />);
+}
+```
+
+Index keys are only safe for _static_ lists that never change order and never have items added or removed.
+
+### 2. Defining components inside render, causing full subtree teardowns on every render
+
+```tsx
+// ❌ A new component type is created on every render of Parent.
+// React sees a different type each time and unmounts/remounts the subtree.
+export default function Parent() {
+  const InlineChild = () => <p>Hello</p>; // new reference every render
+  return <InlineChild />;
+}
+
+// ✅ Define it outside
+const Child = () => <p>Hello</p>;
+
+export default function Parent() {
+  return <Child />;
+}
+```
+
+### 3. Wrapping elements in a container just to conditionally render, forcing sibling re-keying
+
+```tsx
+// ❌ Toggling the wrapper changes element types at a position,
+// causing the sibling <UserProfile> to remount
+{
+  isAdmin ? (
+    <div>
+      <AdminBadge />
+      <UserProfile user={user} />
+    </div>
+  ) : (
+    <UserProfile user={user} /> // different tree shape
+  );
+}
+
+// ✅ Keep tree shape consistent; conditionally render only the varying part
+<>
+  {isAdmin && <AdminBadge />}
+  <UserProfile user={user} />
+</>;
+```
+
+<Callout type="warn">
+  Reconciliation is synchronous within a render pass. A massive flat list of
+  complex components in a single render can still cause jank. Consider windowing
+  libraries like `react-window` or `TanStack Virtual` for large lists,
+  regardless of key correctness.
+</Callout>
+
+<Callout type="info">
+  React DevTools' **Profiler** tab visualizes exactly which components
+  re-rendered and why. Use it to verify your keys are working and to spot
+  unexpected subtree teardowns.
+</Callout>
+
+## Summary
+
+React's diffing algorithm achieves O(n) complexity through two heuristics: different element types always produce new subtrees, and `key` props provide stable identity for list children. Violating these heuristics — by defining components inline, using index keys on mutable lists, or changing element types conditionally — forces React to do unnecessary unmount/remount work and destroys local component state. React 18's Fiber scheduler layers priority on top of diffing, letting you defer expensive re-renders with `useTransition` and `useDeferredValue` so urgent interactions stay responsive. Understanding where React's O(n) shortcuts apply, and where they break down, is the foundation of writing performant component trees.

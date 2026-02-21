@@ -7,6 +7,7 @@
     "concurrent-rendering",
     "time-slicing",
     "reconciliation-algorithm",
-    "fiber-architecture"
+    "fiber-architecture",
+    "virtual-dom-diffing-complexity"
   ]
 }
