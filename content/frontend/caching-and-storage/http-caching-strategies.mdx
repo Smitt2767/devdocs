@@ -1,0 +1,270 @@
+---
+title: HTTP Caching Strategies
+description: A practical guide to stale-while-revalidate, ETags, and Cache-Control headers — how they work, when to use each, and common pitfalls.
+---
+
+## Overview
+
+HTTP caching is one of the highest-leverage performance tools available to web developers. Used correctly, it eliminates redundant network requests, reduces server load, and dramatically improves perceived performance for users.
+
+Three mechanisms sit at the core of modern HTTP caching:
+
+- **`Cache-Control`** — instructs browsers and CDNs on _how long_ and _how_ to cache a response.
+- **`ETag`** — a fingerprint for a resource that lets clients ask "has this changed?" before downloading it again.
+- **`stale-while-revalidate`** — a `Cache-Control` directive that serves a cached (possibly stale) response immediately while refreshing it in the background.
+
+Understanding the difference between these — and how they compose — is essential for building fast, correct web applications.
+
+---
+
+## How It Works
+
+### Cache-Control
+
+`Cache-Control` is a response header that defines caching behavior via directives. The most important ones:
+
+| Directive    | Meaning                                                     |
+| ------------ | ----------------------------------------------------------- |
+| `max-age=N`  | Cache the response for N seconds                            |
+| `s-maxage=N` | Like `max-age`, but only for shared caches (CDNs)           |
+| `no-cache`   | Must revalidate with the server before serving from cache   |
+| `no-store`   | Never cache this response at all                            |
+| `private`    | Only the browser may cache it (not CDNs)                    |
+| `public`     | Any cache (browser, CDN, proxy) may store it                |
+| `immutable`  | The resource will never change — skip revalidation entirely |
+
+```http
+Cache-Control: public, max-age=3600, s-maxage=86400
+```
+
+This tells browsers to cache for 1 hour, and CDNs to cache for 24 hours.
+
+### ETag
+
+An `ETag` is a unique identifier (usually a hash) that represents the current version of a resource. The server sends it with the response:
+
+```http
+ETag: "a3f2c9d1e"
+```
+
+On subsequent requests, the browser sends the ETag back via `If-None-Match`:
+
+```http
+If-None-Match: "a3f2c9d1e"
+```
+
+If the resource hasn't changed, the server returns `304 Not Modified` with no body — saving bandwidth. If it _has_ changed, the server returns the full `200` response with a new ETag.
+
+ETags implement **conditional revalidation** — the client still makes a network request, but avoids re-downloading the full payload when nothing has changed.
+
+### stale-while-revalidate
+
+`stale-while-revalidate` is a `Cache-Control` extension directive:
+
+```http
+Cache-Control: max-age=60, stale-while-revalidate=300
+```
+
+This means:
+
+- Serve the cached response immediately for up to 60 seconds (fresh window).
+- Between 60–360 seconds old: serve the stale cached response _immediately_, but trigger a background revalidation request to refresh the cache.
+- After 360 seconds: the cache is expired and must revalidate before serving.
+
+The key insight: the user never waits for the revalidation. They get a fast response every time, while the cache silently stays up-to-date.
+
+---
+
+## Code Examples
+
+### Setting Cache-Control in Next.js App Router
+
+```ts
+// app/products/route.ts
+import { NextResponse } from "next/server";
+
+export async function GET() {
+  const products = await fetchProductsFromDatabase();
+
+  return NextResponse.json(products, {
+    headers: {
+      // Fresh for 60s, serve stale for up to 5 minutes while revalidating in background
+      "Cache-Control": "public, max-age=60, stale-while-revalidate=300",
+    },
+  });
+}
+
+async function fetchProductsFromDatabase() {
+  // Replace with your actual DB query
+  return [
+    { id: 1, name: "Wireless Keyboard", price: 79.99 },
+    { id: 2, name: "USB-C Hub", price: 49.99 },
+  ];
+}
+```
+
+### ETag-based Conditional Response in Next.js
+
+```ts
+// app/api/article/[slug]/route.ts
+import { createHash } from "crypto";
+import { NextRequest, NextResponse } from "next/server";
+
+export async function GET(
+  request: NextRequest,
+  { params }: { params: { slug: string } },
+) {
+  const article = await fetchArticle(params.slug);
+
+  if (!article) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  // Generate a deterministic ETag from the article content
+  const etag = `"${createHash("md5").update(JSON.stringify(article)).digest("hex")}"`;
+
+  const ifNoneMatch = request.headers.get("if-none-match");
+
+  // If the client's cached version matches, return 304 with no body
+  if (ifNoneMatch === etag) {
+    return new NextResponse(null, {
+      status: 304,
+      headers: {
+        ETag: etag,
+        "Cache-Control": "public, max-age=0, must-revalidate",
+      },
+    });
+  }
+
+  return NextResponse.json(article, {
+    headers: {
+      ETag: etag,
+      "Cache-Control": "public, max-age=0, must-revalidate",
+    },
+  });
+}
+
+async function fetchArticle(slug: string) {
+  // Replace with your actual data source
+  return { slug, title: "Understanding HTTP Caching", updatedAt: "2025-01-15" };
+}
+```
+
+### Next.js `fetch()` with `next.revalidate` (App Router)
+
+Next.js extends the native `fetch` API to support ISR-style caching using the same stale-while-revalidate model under the hood.
+
+```tsx
+// app/blog/page.tsx — Server Component (no 'use client' needed)
+interface Post {
+  id: number;
+  title: string;
+  excerpt: string;
+}
+
+async function getPosts(): Promise<Post[]> {
+  const res = await fetch("https://api.example.com/posts", {
+    // Revalidate the cache at most every 60 seconds
+    next: { revalidate: 60 },
+  });
+
+  if (!res.ok) throw new Error("Failed to fetch posts");
+  return res.json();
+}
+
+export default async function BlogPage() {
+  const posts = await getPosts();
+
+  return (
+    <main>
+      <h1>Latest Posts</h1>
+      <ul>
+        {posts.map((post) => (
+          <li key={post.id}>
+            <h2>{post.title}</h2>
+            <p>{post.excerpt}</p>
+          </li>
+        ))}
+      </ul>
+    </main>
+  );
+}
+```
+
+### Immutable Cache for Hashed Assets
+
+For static assets with content-hashed filenames (e.g., `main.a3f2c9d1.js`), use `immutable` to skip all revalidation:
+
+```http
+Cache-Control: public, max-age=31536000, immutable
+```
+
+Next.js does this automatically for files in `/_next/static/`. You should replicate this pattern for any asset where the filename changes when content changes.
+
+---
+
+## Real-World Use Case
+
+**E-commerce product listing page**
+
+A product catalog page is read frequently but changes infrequently — maybe inventory or pricing updates every few minutes. You want:
+
+1. Blazing fast page loads (serve from cache immediately).
+2. Reasonably fresh data (not serving prices from 2 hours ago).
+3. No visible latency spike when the cache expires.
+
+The right setup:
+
+```http
+Cache-Control: public, max-age=30, stale-while-revalidate=120
+```
+
+Users always get an instant response. The cache refreshes in the background every 30 seconds. Even if the cache is up to 2 minutes old, it's still served without delay while a refresh happens. A user never stares at a loading spinner just because the CDN cache expired.
+
+For the product _detail_ page where price accuracy is critical, pair `stale-while-revalidate` with a shorter window, or use `ETag`-based revalidation to minimize payload size while still confirming freshness.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Confusing `no-cache` with `no-store`**
+
+`no-cache` does **not** mean "don't cache." It means "cache it, but revalidate before every use." `no-store` means "never cache this under any circumstances." Using `no-cache` on sensitive data (session info, payment details) still allows the response to be stored — use `no-store` instead.
+
+<Callout type="warn">
+  For authenticated or sensitive API responses, always use `Cache-Control:
+  no-store, private`. Using `no-cache` alone is not sufficient to prevent
+  storage.
+</Callout>
+
+**2. Not generating stable ETags**
+
+If your server generates ETags based on timestamps or random values, every request will get a new ETag — defeating the purpose entirely. ETags must be deterministic: the same resource content must always produce the same ETag. A hash of the response body (MD5, SHA-1) is the standard approach.
+
+**3. Setting `max-age` without considering CDN vs browser behavior**
+
+`max-age` applies to _all_ caches — browser and CDN. If you want the CDN to cache a response longer than the browser, use `s-maxage` for the CDN and `max-age` for the browser:
+
+```http
+Cache-Control: public, max-age=60, s-maxage=3600
+```
+
+Many developers set a single `max-age` and are surprised when their CDN serves stale content 24 hours later.
+
+**4. Ignoring `Vary` headers with CDN caching**
+
+If your responses differ by `Accept-Encoding`, `Accept-Language`, or `Authorization`, you must set the `Vary` header accordingly. Without it, a CDN may serve a gzip-compressed response to a client that sent `Accept-Encoding: identity`, or serve a cached authenticated response to an unauthenticated user.
+
+```http
+Vary: Accept-Encoding, Accept-Language
+```
+
+**5. Using `stale-while-revalidate` for highly time-sensitive data**
+
+`stale-while-revalidate` is ideal for content where "slightly stale" is acceptable — blog posts, product listings, navigation menus. It's wrong for stock prices, live scores, or anything where serving data that's even 30 seconds old causes user-facing correctness issues.
+
+---
+
+## Summary
+
+`Cache-Control` defines the core caching policy — how long a response stays fresh, who can cache it, and what happens when it expires. `ETag` enables efficient conditional revalidation by letting clients check whether content has changed before re-downloading it. `stale-while-revalidate` extends `Cache-Control` to eliminate revalidation latency by serving stale content immediately while refreshing in the background. These three mechanisms are composable: you can use `Cache-Control` with `stale-while-revalidate` on the cache policy, and `ETag` on the revalidation request to minimize payload size. Choosing the right combination depends on how frequently your data changes and how tolerant your users are of stale content.

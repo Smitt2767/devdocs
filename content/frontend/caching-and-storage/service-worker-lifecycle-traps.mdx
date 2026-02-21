@@ -1,0 +1,195 @@
+---
+title: Service Worker Lifecycle Traps
+description: A deep dive into the Service Worker lifecycle phases, common pitfalls that cause stale caches, failed activations, and missed fetches.
+---
+
+## Overview
+
+Service Workers are a browser-managed proxy layer between your web app and the network. They enable offline support, background sync, and push notifications — but their lifecycle is notoriously tricky. Misunderstanding the install → waiting → activate → fetch flow is the root cause of most caching bugs, stale deployments, and "why isn't my update showing up?" issues.
+
+This doc covers the exact lifecycle sequence, where developers get burned, and how to handle each phase correctly.
+
+---
+
+## How It Works
+
+When a browser registers a Service Worker, it goes through three lifecycle phases:
+
+1. **Installing** — The browser downloads and parses the SW script. Your `install` event fires here. This is where you pre-cache assets.
+2. **Waiting** — If an older SW is already controlling the page, the new one waits. It will not activate until all tabs using the old SW are closed.
+3. **Activating** — The new SW takes control. Your `activate` event fires. This is where you clean up old caches.
+4. **Controlling** — The SW intercepts `fetch` events for all pages it controls.
+
+The key trap: **a newly installed SW does not immediately take control of the page that registered it.** It waits until the old SW is no longer in use.
+
+```
+Browser registers SW
+        │
+        ▼
+   [installing]  ← install event fires (cache assets here)
+        │
+        ▼
+   [waiting]     ← blocked if old SW controls open tabs
+        │
+        ▼
+   [activating]  ← activate event fires (clean old caches here)
+        │
+        ▼
+   [controlling] ← fetch events intercepted
+```
+
+---
+
+## Code Examples
+
+### Registration with Update Detection
+
+```ts
+// src/registerSW.ts
+
+export async function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+
+  const registration = await navigator.serviceWorker.register("/sw.js", {
+    // Scope limits which URLs the SW controls
+    scope: "/",
+  });
+
+  // Detect when a new SW has installed and is waiting
+  registration.addEventListener("updatefound", () => {
+    const newWorker = registration.installing;
+
+    newWorker?.addEventListener("statechange", () => {
+      if (
+        newWorker.state === "installed" &&
+        navigator.serviceWorker.controller
+      ) {
+        // A new version is waiting — notify the user
+        notifyUserOfUpdate();
+      }
+    });
+  });
+}
+
+function notifyUserOfUpdate() {
+  const confirmed = window.confirm("New version available. Reload to update?");
+  if (confirmed) {
+    navigator.serviceWorker.controller?.postMessage({ type: "SKIP_WAITING" });
+    window.location.reload();
+  }
+}
+```
+
+### The Service Worker Script
+
+```ts
+// public/sw.js
+
+const CACHE_NAME = "app-cache-v2";
+const PRECACHE_URLS = ["/", "/index.html", "/styles/main.css", "/app.js"];
+
+// TRAP: forgetting waitUntil() causes the SW to be killed mid-operation
+self.addEventListener("install", (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE_URLS)),
+  );
+});
+
+// Listen for SKIP_WAITING message from the page
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    // Forces the waiting SW to become active immediately
+    self.skipWaiting();
+  }
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches
+      .keys()
+      .then((cacheNames) =>
+        Promise.all(
+          cacheNames
+            // Delete any cache that is not the current version
+            .filter((name) => name !== CACHE_NAME)
+            .map((name) => caches.delete(name)),
+        ),
+      )
+      .then(() => {
+        // TRAP: without this, the SW won't control already-open pages
+        return self.clients.claim();
+      }),
+  );
+});
+
+self.addEventListener("fetch", (event) => {
+  // TRAP: SWs intercept ALL fetches including analytics, third-party — be selective
+  if (!event.request.url.startsWith(self.location.origin)) return;
+
+  event.respondWith(
+    caches
+      .match(event.request)
+      .then((cached) => cached ?? fetch(event.request)),
+  );
+});
+```
+
+---
+
+## Real-World Use Case
+
+You deploy a new version of a React app. Users already have the old SW installed. Without `skipWaiting()` + `clients.claim()`, users who don't close all their tabs will keep running the old SW — even after refreshing. They'll see cached HTML referencing old JS filenames that no longer exist on the server, resulting in broken app loads. Implementing the prompt-to-reload pattern above gives you controlled, safe updates without users seeing a broken state.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Not calling `event.waitUntil()` around async operations**
+
+The browser can terminate a SW at any time. If you open a cache inside `install` without wrapping it in `waitUntil()`, the SW might be killed before caching finishes, leaving you with a partially cached app and no error.
+
+```ts
+// ❌ Wrong — browser may kill the SW before this resolves
+self.addEventListener("install", () => {
+  caches.open("v1").then((cache) => cache.addAll(["/"]));
+});
+
+// ✅ Correct
+self.addEventListener("install", (event) => {
+  event.waitUntil(caches.open("v1").then((cache) => cache.addAll(["/"])));
+});
+```
+
+**2. Forgetting `self.clients.claim()` after activation**
+
+After a new SW activates, it doesn't automatically control pages that loaded under the old SW. Without `clients.claim()` in the `activate` handler, your fetch interceptor won't run for already-open tabs until the user navigates again.
+
+**3. Using `skipWaiting()` unconditionally in the install event**
+
+Calling `self.skipWaiting()` blindly in `install` forces the new SW to activate immediately — but this can cause the new SW to intercept fetches for a page that loaded its HTML under the old SW, leading to version mismatches between cached assets. Only call it when the user explicitly consents to the update.
+
+```ts
+// ❌ Dangerous — can cause asset version mismatch mid-session
+self.addEventListener("install", (event) => {
+  self.skipWaiting();
+});
+```
+
+**4. Intercepting third-party requests**
+
+Service Workers intercept every `fetch` within their scope. If you apply cache logic to all requests unconditionally, you'll accidentally cache analytics pings, OAuth redirects, and CDN assets — often in broken or unauthorized states.
+
+<Callout type="warn">
+  Always guard your `fetch` handler with an origin check: `if
+  (!event.request.url.startsWith(self.location.origin)) return;`
+</Callout>
+
+**5. Not versioning cache names**
+
+If you update your cached assets but don't change the cache name (e.g., always using `'app-cache'`), the `activate` cleanup logic won't delete the old cache and users will keep getting stale files.
+
+---
+
+## Summary
+
+The Service Worker lifecycle has four phases — installing, waiting, activating, and controlling — and each one has failure modes that are easy to miss. Always wrap async work in `event.waitUntil()`, clean up old caches in `activate`, and call `clients.claim()` so the new SW controls open pages immediately. Use `skipWaiting()` only in response to an explicit user action to avoid version mismatches. Version your cache names with every release so stale caches are reliably purged.

@@ -1,0 +1,274 @@
+---
+title: Cache Invalidation Strategies
+description: A practical guide to the main strategies for invalidating cached data in modern web applications, with Next.js App Router examples.
+---
+
+## Overview
+
+Caching speeds up your app by storing the result of expensive operations — database queries, API calls, computed data — so you don't repeat them on every request. But cached data goes stale. **Cache invalidation** is how you decide when to throw away old data and fetch fresh data.
+
+There are four core strategies:
+
+- **Time-based (TTL)** — expire cache after a fixed duration
+- **On-demand (purge/tag-based)** — invalidate specific entries when data changes
+- **Event-driven** — invalidate in response to a system event (webhook, DB trigger, message queue)
+- **Stale-while-revalidate** — serve stale data immediately, refresh in the background
+
+Choosing the wrong strategy leads to users seeing outdated data, or worse — hammering your origin on every request.
+
+---
+
+## How It Works
+
+Every cache entry has a **key** and optionally a **tag** or **TTL**. Invalidation removes or marks entries as stale so the next read triggers a fresh fetch.
+
+Think of a cache like a whiteboard. TTL puts an eraser on a timer. Tag-based invalidation lets you wipe only the section labeled "products". Stale-while-revalidate lets you keep reading the whiteboard while someone rewrites it in the background.
+
+In Next.js App Router, caching is built into `fetch()` and the `unstable_cache` / `revalidateTag` / `revalidatePath` APIs. The data cache persists across requests and deployments unless explicitly invalidated.
+
+---
+
+## Code Examples
+
+### 1. Time-Based Invalidation (TTL)
+
+Set a `revalidate` value to expire cached data after N seconds.
+
+```tsx
+// app/products/page.tsx
+// This page re-fetches product data at most once every 60 seconds.
+
+export const revalidate = 60; // seconds
+
+async function getProducts() {
+  const res = await fetch("https://api.example.com/products", {
+    next: { revalidate: 60 }, // per-fetch TTL
+  });
+
+  if (!res.ok) throw new Error("Failed to fetch products");
+  return res.json();
+}
+
+export default async function ProductsPage() {
+  const products = await getProducts();
+
+  return (
+    <ul>
+      {products.map((product: { id: string; name: string }) => (
+        <li key={product.id}>{product.name}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+<Callout type="info">
+  Setting `revalidate` at the `fetch()` level takes precedence over the
+  segment-level `export const revalidate`. Use fetch-level when different data
+  on the same page has different freshness requirements.
+</Callout>
+
+---
+
+### 2. On-Demand Invalidation (Tag-Based)
+
+Tag your fetch calls, then purge those tags from a Server Action or Route Handler when data changes.
+
+```tsx
+// lib/data.ts
+// Fetch and tag product data so it can be purged by tag later.
+
+export async function getProducts() {
+  const res = await fetch("https://api.example.com/products", {
+    next: { tags: ["products"] }, // assign a cache tag
+  });
+
+  if (!res.ok) throw new Error("Failed to fetch products");
+  return res.json();
+}
+
+export async function getProduct(id: string) {
+  const res = await fetch(`https://api.example.com/products/${id}`, {
+    next: { tags: ["products", `product-${id}`] }, // multiple tags
+  });
+
+  if (!res.ok) throw new Error("Failed to fetch product");
+  return res.json();
+}
+```
+
+```tsx
+// app/actions/invalidate.ts
+"use server";
+
+import { revalidateTag } from "next/cache";
+
+// Call this after a product is updated in your database.
+export async function invalidateProducts() {
+  revalidateTag("products"); // purges all entries tagged 'products'
+}
+
+// Call this after a specific product is updated.
+export async function invalidateProduct(id: string) {
+  revalidateTag(`product-${id}`);
+}
+```
+
+```tsx
+// app/admin/products/edit-form.tsx
+"use client";
+
+import { invalidateProduct } from "@/app/actions/invalidate";
+
+export function EditProductForm({ productId }: { productId: string }) {
+  async function handleSave(formData: FormData) {
+    const name = formData.get("name") as string;
+
+    await fetch(`/api/products/${productId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    });
+
+    // Bust the cache for this specific product after saving.
+    await invalidateProduct(productId);
+  }
+
+  return (
+    <form action={handleSave}>
+      <input name="name" placeholder="Product name" />
+      <button type="submit">Save</button>
+    </form>
+  );
+}
+```
+
+---
+
+### 3. Event-Driven Invalidation (Webhook)
+
+Invalidate from a Route Handler triggered by an external event, such as a CMS publish webhook.
+
+```ts
+// app/api/revalidate/route.ts
+import { revalidateTag } from "next/cache";
+import { NextRequest, NextResponse } from "next/server";
+
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET!;
+
+export async function POST(req: NextRequest) {
+  const secret = req.headers.get("x-webhook-secret");
+
+  // Always verify the webhook caller is legitimate.
+  if (secret !== WEBHOOK_SECRET) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const body = await req.json();
+  const { type, slug } = body; // e.g. { type: 'post.published', slug: 'my-post' }
+
+  if (type === "post.published" || type === "post.updated") {
+    revalidateTag(`post-${slug}`);
+    revalidateTag("posts"); // also bust the listing page
+  }
+
+  return NextResponse.json({ revalidated: true });
+}
+```
+
+<Callout type="warn">
+  Always validate webhook secrets or signatures before calling `revalidateTag`
+  or `revalidatePath`. An unprotected revalidation endpoint lets anyone flush
+  your cache, effectively creating a denial-of-cache attack.
+</Callout>
+
+---
+
+### 4. Path-Based Invalidation
+
+When you don't use fetch-level tags, use `revalidatePath` to invalidate all cache for a specific URL.
+
+```ts
+// app/actions/posts.ts
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { db } from "@/lib/db";
+
+export async function publishPost(postId: string, slug: string) {
+  await db.post.update({
+    where: { id: postId },
+    data: { published: true },
+  });
+
+  revalidatePath("/blog"); // bust the blog index
+  revalidatePath(`/blog/${slug}`); // bust the individual post page
+}
+```
+
+<Callout type="info">
+  Prefer tag-based invalidation over path-based when possible. Tags are more
+  surgical — `revalidatePath` busts everything cached for that URL, including
+  unrelated data fetched on that page.
+</Callout>
+
+---
+
+### 5. Stale-While-Revalidate with `unstable_cache`
+
+Cache arbitrary async functions (not just `fetch`) with TTL and tags.
+
+```ts
+// lib/data.ts
+import { unstable_cache } from "next/cache";
+import { db } from "@/lib/db";
+
+// Cache the result of this DB query for 30 seconds.
+// The tag lets us purge it on demand too.
+export const getCachedFeaturedProducts = unstable_cache(
+  async () => {
+    return db.product.findMany({
+      where: { featured: true },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+    });
+  },
+  ["featured-products"], // cache key parts
+  {
+    revalidate: 30,
+    tags: ["products", "featured-products"],
+  },
+);
+```
+
+---
+
+## Real-World Use Case
+
+**E-commerce product catalog with an admin dashboard.**
+
+Product listings are read far more than they're written. You cache them aggressively with a 5-minute TTL to handle traffic spikes. When a merchant updates a product price or marks something out of stock, the admin dashboard calls a Server Action that fires `revalidateTag('products')` and `revalidateTag(`product-${id}`)`. Customers see the correct price within seconds, not minutes. The CMS that manages marketing banners uses a webhook to call your `/api/revalidate` endpoint on every publish, so the homepage banner updates instantly without a full deploy.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Over-relying on `revalidatePath` instead of tags.**
+`revalidatePath` is a blunt instrument — it busts all cached data for a route. If that route fetches from five different data sources, all five get invalidated even if only one changed. Use tags to scope invalidation to only what changed.
+
+**2. Forgetting that `unstable_cache` doesn't use `fetch` caching.**
+If you're caching a database query with `unstable_cache`, calling `revalidateTag` on a tag you only assigned to a `fetch()` call won't affect it. Make sure the same tags are assigned in `unstable_cache`'s options object.
+
+**3. Not protecting revalidation endpoints.**
+A POST to `/api/revalidate` without auth verification means anyone can drain your cache on demand. Always check a secret header or HMAC signature.
+
+**4. Setting TTL too long and forgetting on-demand invalidation.**
+A 1-hour TTL is fine until a product goes out of stock and customers spend an hour trying to buy something that's gone. Design your invalidation strategy around the worst-case consequence of stale data, not the average case.
+
+**5. Invalidating too eagerly in development.**
+Next.js development mode bypasses most caching. Strategies that seem to work perfectly in dev (because nothing is cached) can expose bugs when you deploy to production and caches actually persist between requests. Always test cache behavior in a production build locally: `next build && next start`.
+
+---
+
+## Summary
+
+Cache invalidation is the decision of _when_ to throw away cached data and fetch fresh data. The four main strategies — TTL, tag-based on-demand, event-driven (webhooks), and stale-while-revalidate — each suit different freshness requirements. In Next.js App Router, `revalidateTag` and `revalidatePath` are your primary tools for on-demand invalidation, while `next: { revalidate }` handles time-based expiry. Always protect your invalidation endpoints and prefer tag-based invalidation over path-based for surgical cache purging. Design your strategy around the business cost of serving stale data, not just performance.

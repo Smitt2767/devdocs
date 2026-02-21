@@ -1,0 +1,273 @@
+---
+title: IndexedDB
+description: A guide to using IndexedDB for client-side structured data storage in modern web applications.
+---
+
+## Overview
+
+IndexedDB is a low-level, transactional database built into the browser. It lets you store large amounts of structured data — including files and blobs — directly on the client, far beyond what `localStorage` can handle.
+
+Unlike `localStorage`, IndexedDB is:
+
+- **Asynchronous** — reads and writes don't block the main thread
+- **Structured** — data is organized into object stores with optional indexes
+- **Capable** — supports storing complex objects, `ArrayBuffer`, `Blob`, and more
+- **Persistent** — data survives page refreshes and browser restarts (subject to storage quotas)
+
+Use it when you need offline support, local caching of large datasets, or a client-side data layer for a PWA.
+
+---
+
+## How It Works
+
+IndexedDB organizes data into a hierarchy:
+
+- **Database** — a named, versioned container (like a database instance)
+- **Object Store** — equivalent to a table; stores records as key-value pairs
+- **Index** — an optional secondary key on an object store for fast lookups
+- **Transaction** — all reads and writes happen inside transactions, which are either `readonly` or `readwrite`
+- **Request** — every operation returns an `IDBRequest` (or `IDBOpenDBRequest`), which resolves via event callbacks
+
+The database is opened with a version number. If the version is higher than what's stored, the `onupgradeneeded` event fires — this is the **only place** you can create or delete object stores.
+
+Because the native API is heavily callback-based, most real-world code wraps it in Promises or uses a library like [idb](https://github.com/jakearchibald/idb).
+
+<Callout type="info">
+  The `idb` library is a tiny (~1kb) Promise wrapper around the native IndexedDB
+  API. It's the recommended approach — it eliminates callback hell without
+  hiding the underlying concepts.
+</Callout>
+
+---
+
+## Code Examples
+
+### Installation
+
+```bash
+npm install idb
+```
+
+### Opening a Database and Defining a Schema
+
+```ts
+// lib/db.ts
+import { openDB, type DBSchema, type IDBPDatabase } from "idb";
+
+// Define the shape of your database using TypeScript
+interface AppDB extends DBSchema {
+  notes: {
+    key: string; // keyPath field
+    value: {
+      id: string;
+      title: string;
+      body: string;
+      updatedAt: number;
+    };
+    indexes: { "by-updatedAt": number }; // index name: indexed field type
+  };
+}
+
+let dbInstance: IDBPDatabase<AppDB> | null = null;
+
+export async function getDB(): Promise<IDBPDatabase<AppDB>> {
+  if (dbInstance) return dbInstance;
+
+  dbInstance = await openDB<AppDB>("app-db", 1, {
+    upgrade(db) {
+      // This block only runs when the DB is created or the version changes
+      const noteStore = db.createObjectStore("notes", {
+        keyPath: "id", // use the `id` field as the primary key
+      });
+
+      // Create an index so we can query notes sorted by last updated time
+      noteStore.createIndex("by-updatedAt", "updatedAt");
+    },
+  });
+
+  return dbInstance;
+}
+```
+
+### Writing and Reading Data
+
+```ts
+// lib/notes-store.ts
+import { getDB } from "./db";
+
+export type Note = {
+  id: string;
+  title: string;
+  body: string;
+  updatedAt: number;
+};
+
+// Save or update a note (put replaces if key exists)
+export async function saveNote(note: Note): Promise<void> {
+  const db = await getDB();
+  await db.put("notes", note);
+}
+
+// Get a single note by its ID
+export async function getNoteById(id: string): Promise<Note | undefined> {
+  const db = await getDB();
+  return db.get("notes", id);
+}
+
+// Get all notes sorted by most recently updated
+export async function getAllNotesSorted(): Promise<Note[]> {
+  const db = await getDB();
+  // Using the index returns records in ascending order of `updatedAt`
+  const notes = await db.getAllFromIndex("notes", "by-updatedAt");
+  return notes.reverse(); // most recent first
+}
+
+// Delete a note by ID
+export async function deleteNote(id: string): Promise<void> {
+  const db = await getDB();
+  await db.delete("notes", id);
+}
+```
+
+### Using it in a React Component
+
+```tsx
+// components/NotesList.tsx
+"use client";
+
+import { useEffect, useState } from "react";
+import {
+  getAllNotesSorted,
+  saveNote,
+  deleteNote,
+  type Note,
+} from "@/lib/notes-store";
+import { nanoid } from "nanoid";
+
+export function NotesList() {
+  const [notes, setNotes] = useState<Note[]>([]);
+
+  // Load notes from IndexedDB on mount
+  useEffect(() => {
+    getAllNotesSorted().then(setNotes);
+  }, []);
+
+  async function handleAddNote() {
+    const newNote: Note = {
+      id: nanoid(),
+      title: "Untitled Note",
+      body: "",
+      updatedAt: Date.now(),
+    };
+
+    await saveNote(newNote);
+    setNotes(await getAllNotesSorted()); // re-fetch to reflect sorted order
+  }
+
+  async function handleDelete(id: string) {
+    await deleteNote(id);
+    setNotes((prev) => prev.filter((n) => n.id !== id));
+  }
+
+  return (
+    <div>
+      <button onClick={handleAddNote}>Add Note</button>
+      <ul>
+        {notes.map((note) => (
+          <li key={note.id}>
+            <span>{note.title}</span>
+            <button onClick={() => handleDelete(note.id)}>Delete</button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+### Handling Schema Upgrades
+
+```ts
+// When you need to add a new object store in version 2:
+dbInstance = await openDB<AppDB>("app-db", 2, {
+  upgrade(db, oldVersion) {
+    if (oldVersion < 1) {
+      // Initial setup (same as before)
+      const noteStore = db.createObjectStore("notes", { keyPath: "id" });
+      noteStore.createIndex("by-updatedAt", "updatedAt");
+    }
+
+    if (oldVersion < 2) {
+      // New in version 2: add a tags store
+      db.createObjectStore("tags", { keyPath: "id" });
+    }
+  },
+});
+```
+
+<Callout type="warn">
+  Never create or modify object stores outside the `upgrade` callback.
+  Attempting to do so will throw an `InvalidStateError`.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+In a note-taking PWA (like Notion Lite or Bear), you want users to keep working even when offline. When they create or edit a note, it's saved immediately to IndexedDB. In the background, a sync layer (e.g., a Service Worker or a `useEffect`) pushes changes to your API when connectivity is restored.
+
+This pattern is sometimes called **optimistic local-first**: the UI updates instantly from the local store, and the server is treated as an eventual sync target rather than the source of truth for every interaction.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Blocking the `versionchange` event**
+
+If a user has your app open in two tabs and you deploy a new DB version, the existing tab will receive a `versionchange` event. If you don't handle it (by closing the connection), the new tab's upgrade will be blocked indefinitely. Handle it explicitly:
+
+```ts
+upgrade(db, oldVersion, newVersion, transaction, event) {
+  // ...
+},
+blocked(currentVersion, blockedVersion, event) {
+  alert('Please close other tabs to update the app.');
+},
+blocking(currentVersion, blockedVersion, event) {
+  // Close the connection so the waiting tab can upgrade
+  dbInstance?.close();
+  dbInstance = null;
+},
+```
+
+**2. Storing non-cloneable values**
+
+IndexedDB uses the [Structured Clone Algorithm](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm). This means you **cannot** store functions, DOM nodes, class instances with methods, or `undefined` as object values. Stick to plain objects, arrays, primitives, `Date`, `Blob`, and `ArrayBuffer`.
+
+**3. Treating it like a synchronous store**
+
+Developers often write code that reads from IndexedDB but forgets to `await` it, then wonders why the data is empty. Every operation — including `get`, `put`, and `delete` — is asynchronous. Always `await` or chain `.then()`.
+
+**4. Re-opening the database on every operation**
+
+Opening an IndexedDB connection is relatively expensive. Always reuse a single database connection (as shown in the `getDB()` singleton pattern above) rather than calling `openDB()` inside every function.
+
+**5. Not handling quota errors**
+
+Browsers enforce storage quotas. If the user's disk is nearly full or they're in a private/incognito window, writes can fail with a `QuotaExceededError`. Always wrap writes in try/catch in production code and degrade gracefully.
+
+```ts
+try {
+  await saveNote(note);
+} catch (err) {
+  if (err instanceof DOMException && err.name === "QuotaExceededError") {
+    console.error("Storage quota exceeded. Cannot save note.");
+  }
+}
+```
+
+---
+
+## Summary
+
+IndexedDB is the browser's built-in structured database, designed for storing large or complex client-side data asynchronously. The native API is verbose and callback-driven, so using the `idb` wrapper is strongly recommended in practice. You define your schema once in the `upgrade` callback and interact with it through object stores and transactions. It's the foundation of offline-capable, local-first web applications. Keep your database connection as a singleton, handle version upgrades carefully, and always account for quota limits in production.
