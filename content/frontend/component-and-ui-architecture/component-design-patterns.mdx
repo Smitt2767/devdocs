@@ -1,0 +1,397 @@
+---
+title: Component Design Patterns
+description: A practical guide to compound components, headless UI, and render props — advanced React patterns for building flexible, reusable component APIs.
+---
+
+## Overview
+
+As React applications grow, naive component design breaks down. You end up with components that accept 30 props, or brittle abstractions that are hard to customize without forking.
+
+Three patterns solve this at different levels:
+
+- **Compound Components** — split a single UI concept across cooperating components that share implicit state.
+- **Headless UI** — separate logic and state from markup entirely, letting consumers own the rendering.
+- **Render Props** — pass a function as a prop to delegate what gets rendered to the caller.
+
+These aren't academic exercises. They're the foundation of libraries like Radix UI, Headless UI, React Table, and Downshift.
+
+---
+
+## How It Works
+
+### Compound Components
+
+Think of a `<select>` and `<option>` in HTML — they only make sense together. Compound components replicate this for custom UI. A parent component holds shared state via React Context; child components read from that context without the consumer needing to wire anything up manually.
+
+The consumer gets a clean, declarative API:
+
+```tsx
+<Tabs defaultValue="profile">
+  <Tabs.List>
+    <Tabs.Trigger value="profile">Profile</Tabs.Trigger>
+    <Tabs.Trigger value="settings">Settings</Tabs.Trigger>
+  </Tabs.List>
+  <Tabs.Panel value="profile">
+    <ProfileForm />
+  </Tabs.Panel>
+  <Tabs.Panel value="settings">
+    <SettingsForm />
+  </Tabs.Panel>
+</Tabs>
+```
+
+### Headless UI
+
+A headless component owns all the logic (state, keyboard navigation, ARIA attributes) but renders nothing itself — or renders a bare wrapper you can replace. You bring your own markup and styles. This is ideal for design systems where logic is shared but visuals differ across products.
+
+### Render Props
+
+A component accepts a `children` (or any prop) that is a function. The component calls that function with internal state, letting the consumer decide what to render. This predates hooks but remains useful when a component needs to expose multiple values simultaneously, or when you're building highly generic utilities.
+
+---
+
+## Code Examples
+
+### 1. Compound Components with Context
+
+```tsx
+// components/tabs/index.tsx
+"use client";
+
+import { createContext, useContext, useState, type ReactNode } from "react";
+
+interface TabsContextValue {
+  activeTab: string;
+  setActiveTab: (value: string) => void;
+}
+
+const TabsContext = createContext<TabsContextValue | null>(null);
+
+function useTabs() {
+  const ctx = useContext(TabsContext);
+  if (!ctx) throw new Error("Tabs components must be used inside <Tabs>");
+  return ctx;
+}
+
+// Root provider — owns the state
+function Tabs({
+  defaultValue,
+  children,
+}: {
+  defaultValue: string;
+  children: ReactNode;
+}) {
+  const [activeTab, setActiveTab] = useState(defaultValue);
+
+  return (
+    <TabsContext.Provider value={{ activeTab, setActiveTab }}>
+      <div className="tabs">{children}</div>
+    </TabsContext.Provider>
+  );
+}
+
+// Child: renders the tab buttons row
+function List({ children }: { children: ReactNode }) {
+  return (
+    <div role="tablist" className="tabs__list">
+      {children}
+    </div>
+  );
+}
+
+// Child: individual tab button
+function Trigger({ value, children }: { value: string; children: ReactNode }) {
+  const { activeTab, setActiveTab } = useTabs();
+  const isActive = activeTab === value;
+
+  return (
+    <button
+      role="tab"
+      aria-selected={isActive}
+      onClick={() => setActiveTab(value)}
+      className={isActive ? "tab tab--active" : "tab"}
+    >
+      {children}
+    </button>
+  );
+}
+
+// Child: the panel shown when its tab is active
+function Panel({ value, children }: { value: string; children: ReactNode }) {
+  const { activeTab } = useTabs();
+  if (activeTab !== value) return null;
+
+  return (
+    <div role="tabpanel" className="tabs__panel">
+      {children}
+    </div>
+  );
+}
+
+// Attach children as static properties for the compound API
+Tabs.List = List;
+Tabs.Trigger = Trigger;
+Tabs.Panel = Panel;
+
+export { Tabs };
+```
+
+```tsx
+// app/account/page.tsx  (Server Component — Tabs itself is client)
+import { Tabs } from "@/components/tabs";
+
+export default function AccountPage() {
+  return (
+    <Tabs defaultValue="profile">
+      <Tabs.List>
+        <Tabs.Trigger value="profile">Profile</Tabs.Trigger>
+        <Tabs.Trigger value="billing">Billing</Tabs.Trigger>
+      </Tabs.List>
+      <Tabs.Panel value="profile">
+        <p>Edit your profile here.</p>
+      </Tabs.Panel>
+      <Tabs.Panel value="billing">
+        <p>Manage your billing details.</p>
+      </Tabs.Panel>
+    </Tabs>
+  );
+}
+```
+
+---
+
+### 2. Headless Component
+
+```tsx
+// components/disclosure/index.tsx
+"use client";
+
+import { useState, type ReactNode } from "react";
+
+interface DisclosureRenderArgs {
+  isOpen: boolean;
+  toggle: () => void;
+  // Spread these onto your trigger element for accessibility
+  triggerProps: {
+    onClick: () => void;
+    "aria-expanded": boolean;
+    "aria-controls": string;
+  };
+  panelProps: {
+    id: string;
+    hidden: boolean;
+  };
+}
+
+interface DisclosureProps {
+  id: string;
+  defaultOpen?: boolean;
+  children: (args: DisclosureRenderArgs) => ReactNode;
+}
+
+export function Disclosure({
+  id,
+  defaultOpen = false,
+  children,
+}: DisclosureProps) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+  const toggle = () => setIsOpen((prev) => !prev);
+
+  return (
+    <>
+      {children({
+        isOpen,
+        toggle,
+        triggerProps: {
+          onClick: toggle,
+          "aria-expanded": isOpen,
+          "aria-controls": `${id}-panel`,
+        },
+        panelProps: {
+          id: `${id}-panel`,
+          hidden: !isOpen,
+        },
+      })}
+    </>
+  );
+}
+```
+
+```tsx
+// Usage — the consumer owns all markup and styling
+import { Disclosure } from "@/components/disclosure";
+
+export function FAQ({
+  question,
+  answer,
+}: {
+  question: string;
+  answer: string;
+}) {
+  return (
+    <Disclosure id="faq-1">
+      {({ isOpen, triggerProps, panelProps }) => (
+        <div className="faq-item">
+          <button className="faq-question" {...triggerProps}>
+            {question}
+            <span>{isOpen ? "▲" : "▼"}</span>
+          </button>
+          <div className="faq-answer" {...panelProps}>
+            <p>{answer}</p>
+          </div>
+        </div>
+      )}
+    </Disclosure>
+  );
+}
+```
+
+---
+
+### 3. Render Props for Data Fetching Logic
+
+```tsx
+// components/async-state/index.tsx
+"use client";
+
+import { useState, useEffect, type ReactNode } from "react";
+
+interface AsyncStateProps<T> {
+  fetch: () => Promise<T>;
+  children: (state: {
+    data: T | null;
+    loading: boolean;
+    error: Error | null;
+  }) => ReactNode;
+}
+
+export function AsyncState<T>({ fetch, children }: AsyncStateProps<T>) {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+
+    fetch()
+      .then((result) => {
+        if (!cancelled) {
+          setData(result);
+          setLoading(false);
+        }
+      })
+      .catch((err: Error) => {
+        if (!cancelled) {
+          setError(err);
+          setLoading(false);
+        }
+      });
+
+    // Prevent state updates on unmounted component
+    return () => {
+      cancelled = true;
+    };
+  }, [fetch]);
+
+  return <>{children({ data, loading, error })}</>;
+}
+```
+
+```tsx
+// Usage
+import { AsyncState } from "@/components/async-state";
+
+async function fetchUserProfile(userId: string) {
+  const res = await fetch(`/api/users/${userId}`);
+  if (!res.ok) throw new Error("Failed to fetch user");
+  return res.json() as Promise<{ name: string; email: string }>;
+}
+
+export function UserCard({ userId }: { userId: string }) {
+  return (
+    <AsyncState fetch={() => fetchUserProfile(userId)}>
+      {({ data, loading, error }) => {
+        if (loading) return <p>Loading...</p>;
+        if (error) return <p>Error: {error.message}</p>;
+        return (
+          <div>
+            <h2>{data!.name}</h2>
+            <p>{data!.email}</p>
+          </div>
+        );
+      }}
+    </AsyncState>
+  );
+}
+```
+
+<Callout type="info">
+  In modern React, the render props pattern for data fetching is largely
+  superseded by custom hooks. But it's still valuable when you need to share
+  both state **and** derived JSX structure — or when building a component that
+  can't use hooks internally (e.g., a generic utility with no React dependency).
+</Callout>
+
+---
+
+## Real-World Use Case
+
+**Design system at scale:** Your company builds a component library used by three separate product teams. Each team has different brand guidelines — different colors, spacing, and markup structure — but needs the same dropdown behavior: keyboard navigation, focus trapping, ARIA roles, click-outside dismissal.
+
+You build a headless `<Dropdown>` that owns all that logic. Team A renders it as a minimal selector. Team B wraps it in their design tokens. Team C uses it inside a data table. None of them need to re-implement event handling or worry about accessibility — they just supply their markup.
+
+Meanwhile, the `Tabs` compound component in your shared UI kit gives product engineers a clean, readable API without a forest of props like `tabItems`, `onTabChange`, `activeTabIndex`, `renderTabLabel`, etc.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Context without a guard**
+If you don't throw inside the context hook when the context is `null`, child components silently receive `undefined` and produce cryptic errors. Always validate:
+
+```tsx
+function useTabs() {
+  const ctx = useContext(TabsContext);
+  if (!ctx) throw new Error("<Tabs.Trigger> must be used inside <Tabs>");
+  return ctx;
+}
+```
+
+**2. Overusing render props when a hook suffices**
+If your render prop component doesn't need to render anything itself — it only tracks state — extract a custom hook instead. Render props that return `<>{children(state)}</>` with no DOM output are almost always better as hooks.
+
+```tsx
+// Prefer this:
+const { isOpen, toggle } = useDisclosure();
+
+// Over this, when there's no structural reason for a wrapper:
+<Disclosure>{({ isOpen, toggle }) => ...}</Disclosure>
+```
+
+**3. Re-creating context value on every render**
+Passing an inline object to `Provider` value creates a new reference each render, causing all consumers to re-render unnecessarily. Memoize it:
+
+```tsx
+// ❌ New object reference every render
+<TabsContext.Provider value={{ activeTab, setActiveTab }}>
+
+// ✅ Stable reference
+const contextValue = useMemo(() => ({ activeTab, setActiveTab }), [activeTab]);
+<TabsContext.Provider value={contextValue}>
+```
+
+**4. Forgetting `'use client'` boundaries**
+Compound components that use `useState`, `useContext`, or event handlers must be Client Components. If the root component is a Client Component, all its stateful children are automatically client-side — but if you try to render a Server Component _inside_ a Client Component subtree, you must pass it as `children` from a parent Server Component, not import it directly.
+
+<Callout type="warn">
+  Don't mark every compound child `'use client'` individually. Mark the root
+  context provider client-side and pass Server Components in as `children` props
+  when you need them mixed in.
+</Callout>
+
+---
+
+## Summary
+
+Compound components use Context to let a set of cooperating components share state without threading props manually — ideal for stateful UI kits like tabs, accordions, and menus. Headless components push the pattern further by owning zero markup, making them the right choice when visual rendering must vary across consumers. Render props remain a sharp tool for sharing both state and render logic in a single self-contained component, though custom hooks often serve the same purpose with less ceremony. All three patterns trade some implementation complexity for dramatically more flexible consumer APIs. Choosing between them comes down to whether you need to share DOM structure (compound), abstract it entirely (headless), or inline the decision at the call site (render props).

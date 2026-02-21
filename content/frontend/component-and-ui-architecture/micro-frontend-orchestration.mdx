@@ -1,0 +1,291 @@
+---
+title: Micro-frontend Orchestration
+description: A practical guide to composing independently deployed frontend applications into a cohesive user experience using modern orchestration patterns.
+---
+
+## Overview
+
+Micro-frontends extend the microservices philosophy to the browser. Instead of a single monolithic frontend application, you split the UI into independently owned, developed, and deployed pieces — each owned by a different team — and stitch them together at runtime or build time into one coherent product.
+
+Orchestration is the layer that manages _how_ these pieces come together: routing between them, sharing dependencies, handling communication, and ensuring a consistent shell around them.
+
+The payoff is organizational as much as technical. Teams can ship independently without coordinating a single deploy pipeline. But the tradeoff is real complexity — orchestration done poorly produces a slow, fragmented, or brittle UX.
+
+<Callout type="info">
+  Micro-frontends are not always the right choice. For small teams or
+  single-product orgs, a well-structured monorepo monolith is simpler and
+  faster. Reach for micro-frontends when independent deployment velocity across
+  multiple teams is a concrete, felt need.
+</Callout>
+
+---
+
+## How It Works
+
+There are three primary orchestration strategies:
+
+### 1. Build-time Composition
+
+Remote packages (each micro-frontend) are published to a registry and consumed as dependencies by a host app. Everything is bundled together at build time.
+
+- **Pros:** Simple mental model, no runtime network overhead.
+- **Cons:** Teams are no longer independently deployable — any update requires a host rebuild.
+
+### 2. Server-side Composition
+
+The server assembles fragments from multiple upstream services (via SSI, Edge middleware, or a dedicated composition server) before sending HTML to the browser.
+
+- **Pros:** Fast initial render, SEO-friendly, no client-side coordination complexity.
+- **Cons:** Requires server infrastructure per fragment; harder to manage shared state.
+
+### 3. Client-side Composition via Module Federation (most common)
+
+Webpack 5's Module Federation (or the Vite-compatible `@originjs/vite-plugin-federation`) lets a **host** app load **remote** modules dynamically at runtime — without those remotes being part of the host's build.
+
+This is the dominant pattern for true independent deployability.
+
+```
+Host App (Shell)
+  ├── loads → Remote A (Team Checkout)   [deployed independently]
+  ├── loads → Remote B (Team Catalog)    [deployed independently]
+  └── loads → Remote C (Team Account)   [deployed independently]
+```
+
+Each remote exposes components or pages. The host fetches them at runtime from their own CDN URLs. Shared libraries (React, design system) can be declared as singletons to avoid loading them multiple times.
+
+---
+
+## Code Examples
+
+### Host App — `vite.config.ts` (Shell)
+
+```ts
+// host/vite.config.ts
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import federation from "@originjs/vite-plugin-federation";
+
+export default defineConfig({
+  plugins: [
+    react(),
+    federation({
+      name: "host",
+      remotes: {
+        // Key: the import alias you'll use in code
+        // Value: URL to the remote's manifest, set at deploy time via env
+        catalogApp: "https://catalog.acme.com/assets/remoteEntry.js",
+        checkoutApp: "https://checkout.acme.com/assets/remoteEntry.js",
+      },
+      shared: {
+        react: { singleton: true, requiredVersion: "^18.0.0" },
+        "react-dom": { singleton: true, requiredVersion: "^18.0.0" },
+      },
+    }),
+  ],
+  build: {
+    target: "esnext", // required for top-level await used by federation
+  },
+});
+```
+
+### Remote App — `vite.config.ts` (Catalog Team)
+
+```ts
+// catalog/vite.config.ts
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import federation from "@originjs/vite-plugin-federation";
+
+export default defineConfig({
+  plugins: [
+    react(),
+    federation({
+      name: "catalogApp",
+      filename: "remoteEntry.js",
+      exposes: {
+        // './ProductGrid' becomes the import path in the host
+        "./ProductGrid": "./src/components/ProductGrid",
+        "./ProductPage": "./src/pages/ProductPage",
+      },
+      shared: {
+        react: { singleton: true, requiredVersion: "^18.0.0" },
+        "react-dom": { singleton: true, requiredVersion: "^18.0.0" },
+      },
+    }),
+  ],
+  build: {
+    target: "esnext",
+  },
+});
+```
+
+### Host App — Lazy-loading a Remote Component
+
+```tsx
+// host/src/pages/CatalogRoute.tsx
+import { lazy, Suspense } from "react";
+
+// This import resolves at runtime to catalog.acme.com — not bundled locally
+const ProductGrid = lazy(() => import("catalogApp/ProductGrid"));
+
+export default function CatalogRoute() {
+  return (
+    <Suspense fallback={<div>Loading catalog…</div>}>
+      {/* ProductGrid is owned and deployed by the Catalog team */}
+      <ProductGrid category="electronics" />
+    </Suspense>
+  );
+}
+```
+
+### Shell Layout with Routing
+
+```tsx
+// host/src/App.tsx
+import { lazy, Suspense } from "react";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import GlobalNav from "./components/GlobalNav";
+import PageLoader from "./components/PageLoader";
+
+// Each route points to a remotely-owned page component
+const ProductPage = lazy(() => import("catalogApp/ProductPage"));
+const CheckoutPage = lazy(() => import("checkoutApp/CheckoutPage"));
+const AccountPage = lazy(() => import("accountApp/AccountPage"));
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      {/* Shell owns the nav — consistent across all remotes */}
+      <GlobalNav />
+      <Suspense fallback={<PageLoader />}>
+        <Routes>
+          <Route path="/products/*" element={<ProductPage />} />
+          <Route path="/checkout/*" element={<CheckoutPage />} />
+          <Route path="/account/*" element={<AccountPage />} />
+        </Routes>
+      </Suspense>
+    </BrowserRouter>
+  );
+}
+```
+
+### Cross-Micro-Frontend Communication via a Shared Event Bus
+
+Remotes should not import each other directly — that creates coupling. Use a lightweight event bus exposed through the shell or a shared singleton.
+
+```ts
+// shared/src/eventBus.ts  — published as an npm package or exposed via federation
+type Handler<T> = (payload: T) => void;
+
+class EventBus {
+  private listeners = new Map<string, Set<Handler<unknown>>>();
+
+  on<T>(event: string, handler: Handler<T>) {
+    if (!this.listeners.has(event)) this.listeners.set(event, new Set());
+    this.listeners.get(event)!.add(handler as Handler<unknown>);
+    return () => this.off(event, handler); // returns unsubscribe fn
+  }
+
+  off<T>(event: string, handler: Handler<T>) {
+    this.listeners.get(event)?.delete(handler as Handler<unknown>);
+  }
+
+  emit<T>(event: string, payload: T) {
+    this.listeners.get(event)?.forEach((handler) => handler(payload));
+  }
+}
+
+// Attach to window so all remotes share the same instance
+declare global {
+  interface Window {
+    __acmeBus: EventBus;
+  }
+}
+
+window.__acmeBus ??= new EventBus();
+export const bus = window.__acmeBus;
+```
+
+```ts
+// catalog/src/components/ProductGrid.tsx — emits an event
+import { bus } from "shared/eventBus";
+
+function handleAddToCart(productId: string) {
+  // Checkout micro-frontend listens for this
+  bus.emit("cart:item-added", { productId, quantity: 1 });
+}
+```
+
+---
+
+## Real-World Use Case
+
+A large e-commerce platform has separate squads for Catalog, Checkout, Account, and the Marketing homepage. Each ships on its own two-week cadence. Without micro-frontends, a Checkout bug fix still requires coordinating with Catalog to cut a joint release.
+
+With Module Federation orchestration:
+
+- The **shell team** owns the top nav, auth context, and routing.
+- **Catalog team** deploys `ProductGrid` and `ProductPage` to their own CDN path and updates `remoteEntry.js`.
+- The shell picks up the new version on the _next page load_ — no host rebuild required.
+- A shared design system package is declared as a singleton, so only one copy of it loads regardless of how many remotes reference it.
+
+The business outcome: Checkout can hotfix a payment bug and be in production in under 30 minutes without touching any other team's pipeline.
+
+---
+
+## Common Mistakes / Gotchas
+
+### 1. Forgetting `singleton: true` for React
+
+If two remotes load their own copy of React, you'll get the infamous "hooks can only be called inside a function component" error — because there are now two separate React instances in memory. Always declare React and ReactDOM as shared singletons in every `vite.config.ts` (both host and all remotes).
+
+<Callout type="warn">
+  A version mismatch in `requiredVersion` across remotes will cause federation
+  to fall back to loading separate copies. Pin versions carefully and keep them
+  in sync.
+</Callout>
+
+### 2. Coupling Remotes to Each Other
+
+Remote A importing directly from Remote B (`import Something from 'remoteB/Component'`) seems convenient but creates an invisible dependency graph that defeats independent deployability. Use the event bus pattern or a shared state primitive (like a tiny Zustand store exposed through the shell) instead.
+
+### 3. Over-fragmenting Too Early
+
+Teams split their frontend into 12 micro-frontends before the boundaries are well understood. The result is an orchestration nightmare with 12 separate CI pipelines, version matrices, and shared dependency headaches — for an app that 4 developers could have shipped as a monolith. **Start with 2–3 clear domain boundaries and split further only when deployment independence is genuinely blocked.**
+
+### 4. Ignoring Loading and Error States
+
+Each remote is a network fetch at runtime. If `checkoutApp/CheckoutPage` fails to load (CDN outage, bad deploy), your `<Suspense>` boundary will fall through to an error boundary — or, if you haven't set one up, crash the shell. Always wrap remote lazy imports in both `<Suspense>` and an `<ErrorBoundary>`.
+
+```tsx
+// host/src/RemoteWrapper.tsx
+import { Suspense, lazy, ComponentType } from "react";
+import { ErrorBoundary } from "react-error-boundary";
+
+export function RemoteRoute({
+  loader,
+}: {
+  loader: () => Promise<{ default: ComponentType }>;
+}) {
+  const Component = lazy(loader);
+  return (
+    <ErrorBoundary
+      fallback={<div>This section is temporarily unavailable.</div>}
+    >
+      <Suspense fallback={<div>Loading…</div>}>
+        <Component />
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
+```
+
+### 5. Hardcoding Remote URLs
+
+Putting `https://catalog.acme.com/assets/remoteEntry.js` directly in `vite.config.ts` means you can't point staging at staging remotes. Drive remote URLs through environment variables (`import.meta.env.VITE_CATALOG_REMOTE`) and inject them at build time per environment.
+
+---
+
+## Summary
+
+Micro-frontend orchestration is the practice of composing independently deployed UI applications into a single coherent product. Module Federation is the dominant runtime approach, letting a host shell load remote components from separate CDN origins without a shared build step. The shell owns global concerns — auth, routing, navigation — while each remote owns its domain. Shared dependencies like React must be declared as singletons to avoid duplicate instances. The main tradeoffs are operational complexity and the discipline required to keep remotes decoupled; the payoff is genuine independent deployability across teams.

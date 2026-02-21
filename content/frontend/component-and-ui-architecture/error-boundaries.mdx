@@ -1,0 +1,222 @@
+---
+title: Error Boundaries
+description: A guide to catching and handling runtime errors in React component trees using error boundaries and the App Router's error.tsx convention.
+---
+
+## Overview
+
+An error boundary is a React component that catches JavaScript errors thrown during rendering, in lifecycle methods, or in constructors of any child component tree — and displays a fallback UI instead of crashing the entire page.
+
+Without error boundaries, a single unhandled error in a component will propagate up and unmount the whole React tree. Error boundaries contain the blast radius so the rest of your app keeps working.
+
+In the Next.js App Router, error boundaries are implemented via a special `error.tsx` file convention, which automatically wraps route segments.
+
+<Callout type="warn">
+  Error boundaries do **not** catch errors in event handlers, async code outside
+  of rendering (e.g., `setTimeout`), or server-side code. They only catch errors
+  that occur during the React render phase.
+</Callout>
+
+---
+
+## How It Works
+
+React's error boundary mechanism relies on two lifecycle methods — `getDerivedStateFromError` and `componentDidCatch` — which only exist on class components. This means the underlying boundary itself must be a class component, but you can wrap it in a functional component for convenience.
+
+In the Next.js App Router, the framework provides this class component wrapper for you. When you create an `error.tsx` file inside any `app/` segment, Next.js:
+
+1. Automatically wraps that segment's `page.tsx` in a React error boundary.
+2. Passes the caught `error` object and a `reset` function to your `error.tsx` component as props.
+3. Renders your `error.tsx` as the fallback UI when something throws inside that segment.
+
+The `reset()` function attempts to re-render the segment — useful for transient errors like a failed network request.
+
+---
+
+## Code Examples
+
+### App Router: `error.tsx` for a Route Segment
+
+```tsx
+// app/dashboard/error.tsx
+"use client"; // Error boundaries must be Client Components
+
+import { useEffect } from "react";
+
+interface ErrorProps {
+  error: Error & { digest?: string }; // digest is a server-side error ID added by Next.js
+  reset: () => void;
+}
+
+export default function DashboardError({ error, reset }: ErrorProps) {
+  useEffect(() => {
+    // Log error to an external service like Sentry
+    console.error("Dashboard segment error:", error);
+  }, [error]);
+
+  return (
+    <div className="flex flex-col items-center gap-4 p-8">
+      <h2 className="text-xl font-semibold text-red-600">
+        Something went wrong
+      </h2>
+      <p className="text-sm text-gray-500">{error.message}</p>
+      <button
+        onClick={reset} // Attempt to recover by re-rendering the segment
+        className="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"
+      >
+        Try again
+      </button>
+    </div>
+  );
+}
+```
+
+<Callout type="info">
+  `error.tsx` **must** be a Client Component (`'use client'`). The error
+  boundary itself runs on the client where React's reconciler can catch render
+  errors.
+</Callout>
+
+---
+
+### Reusable Class-Based Error Boundary (for non-Next.js or granular control)
+
+```tsx
+// components/ErrorBoundary.tsx
+import { Component, ReactNode } from "react";
+
+interface Props {
+  fallback: ReactNode;
+  children: ReactNode;
+}
+
+interface State {
+  hasError: boolean;
+  error: Error | null;
+}
+
+export class ErrorBoundary extends Component<Props, State> {
+  constructor(props: Props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): State {
+    // Update state so the next render shows the fallback UI
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, info: { componentStack: string }) {
+    // You can forward to an error monitoring service here
+    console.error("Caught by ErrorBoundary:", error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback;
+    }
+    return this.props.children;
+  }
+}
+```
+
+```tsx
+// app/some-page/page.tsx
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { RiskyWidget } from "@/components/RiskyWidget";
+
+export default function SomePage() {
+  return (
+    <main>
+      <h1>Dashboard</h1>
+      {/* Only this widget is isolated — the rest of the page renders fine on error */}
+      <ErrorBoundary fallback={<p>Widget failed to load.</p>}>
+        <RiskyWidget />
+      </ErrorBoundary>
+    </main>
+  );
+}
+```
+
+---
+
+### Global Not-Found vs. Error: Know the Difference
+
+```tsx
+// app/error.tsx — catches unhandled errors anywhere in the app (root-level boundary)
+"use client";
+
+export default function GlobalError({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void;
+}) {
+  return (
+    <html>
+      <body>
+        <h1>Application Error</h1>
+        <p>An unexpected error occurred. Our team has been notified.</p>
+        <button onClick={reset}>Reload</button>
+      </body>
+    </html>
+  );
+}
+```
+
+<Callout type="warn">
+  `app/global-error.tsx` replaces the entire root layout on error, so it must include `<html>` and `<body>` tags. Use it only as a last-resort fallback — prefer segment-level `error.tsx` files for a better UX.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+In an e-commerce app, your `/checkout` route fetches payment intent data from Stripe. If the Stripe SDK throws during rendering (e.g., due to a network timeout or malformed response), you don't want to crash the header, navigation, or cart sidebar.
+
+By adding `app/checkout/error.tsx`, only the checkout segment unmounts and shows a "Payment service unavailable — try again" message with a `reset()` button. The user can still navigate elsewhere without a full page crash. Pair this with a tool like Sentry in `componentDidCatch` to get an alert with the `error.digest` ID so you can trace the server-side root cause.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Forgetting `'use client'` on `error.tsx`**
+This is the most common mistake. Since error boundaries use class component lifecycle methods under the hood, they are inherently client-side. Next.js will throw a build error if you omit `'use client'`.
+
+**2. Expecting error boundaries to catch async errors**
+Code like this will **not** be caught by an error boundary:
+
+```tsx
+// ❌ This error escapes the boundary
+export default function MyComponent() {
+  const handleClick = async () => {
+    const data = await fetchSomething(); // throws here — not caught
+  };
+  return <button onClick={handleClick}>Load</button>;
+}
+```
+
+For async errors in event handlers, use `try/catch` and local state to render an error message manually.
+
+**3. Placing `error.tsx` at the wrong level**
+An `error.tsx` file only catches errors thrown by components _within its segment_, not in its own `layout.tsx`. If your layout throws, you need the error boundary one level up. This trips up developers who expect the boundary to protect everything including its sibling layout.
+
+**4. Not using `error.digest` for server error tracing**
+When a Server Component throws, Next.js redacts the error message on the client for security and replaces it with a generic message. The `digest` property is a hash you can use to match the client-side error to the full server-side stack trace in your logs.
+
+```tsx
+// ✅ Log digest to correlate with server logs
+useEffect(() => {
+  logger.error({ digest: error.digest, message: error.message });
+}, [error]);
+```
+
+**5. Using a single root-level boundary for everything**
+Relying solely on `app/global-error.tsx` means any error crashes the full page. Prefer granular `error.tsx` files at the feature or route level to limit the impact of failures.
+
+---
+
+## Summary
+
+Error boundaries catch render-phase errors in a React component subtree and render a fallback UI in their place. In the Next.js App Router, the `error.tsx` file convention gives you automatic, segment-scoped error boundaries without writing class components yourself. Always mark `error.tsx` as `'use client'`, use the `reset()` prop to enable recovery, and scope boundaries as narrowly as possible to preserve the working parts of your UI. For async and event-handler errors, error boundaries are not sufficient — handle those with `try/catch` and local state. Use `error.digest` to correlate client-visible errors with server-side logs.

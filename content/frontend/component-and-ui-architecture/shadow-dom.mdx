@@ -1,0 +1,278 @@
+---
+title: Shadow DOM
+description: A guide to the Shadow DOM API — what it is, how encapsulation works, and how to use it in modern web components.
+---
+
+## Overview
+
+The Shadow DOM is a browser-native API that lets you attach an isolated, encapsulated DOM tree to any HTML element. Styles and scripts inside a shadow tree don't leak out, and styles from the main document don't bleed in — by default.
+
+This is the foundation of **Web Components**. It solves a real problem: when you're building a reusable UI widget (a date picker, a tooltip, a video player), you don't want the host page's CSS to accidentally break your component's layout — and you don't want your component's styles to trash the rest of the page.
+
+Browsers use Shadow DOM internally all the time. The controls on a `<video>` element, the internal structure of `<input type="range">` — those are all shadow trees you can't normally inspect or override.
+
+---
+
+## How It Works
+
+Every standard DOM element lives in the **light DOM** — the regular document tree. When you call `element.attachShadow({ mode: 'open' })`, the browser creates a parallel **shadow root** hanging off that element. That shadow root is a separate document fragment with its own scope.
+
+Think of it like a iframe that shares the same JS process but has its own style scope — except it's much lighter and composable.
+
+### Key concepts
+
+- **Shadow host** — the regular DOM element that the shadow tree is attached to.
+- **Shadow root** — the root node of the shadow tree (returned by `attachShadow`).
+- **Shadow boundary** — the invisible wall between the shadow tree and the light DOM.
+- **Slots** — named or default `<slot>` elements that let light DOM children project _into_ the shadow tree, enabling composition.
+
+### `mode: 'open'` vs `mode: 'closed'`
+
+With `open` mode, `element.shadowRoot` returns the shadow root from outside. With `closed`, it returns `null` — the shadow tree is completely inaccessible via JS from the outside. Most userland components use `open` for debuggability. `closed` is mainly used by browser internals.
+
+---
+
+## Code Examples
+
+### Basic shadow root with scoped styles
+
+```ts
+// vanilla-tooltip.ts
+class VanillaTooltip extends HTMLElement {
+  constructor() {
+    super();
+
+    // Attach shadow root in open mode so devtools can inspect it
+    const shadow = this.attachShadow({ mode: "open" });
+
+    // Scoped styles — these will NOT leak to the outer document
+    const style = document.createElement("style");
+    style.textContent = `
+      :host {
+        display: inline-block;
+        position: relative;
+      }
+      .tooltip {
+        background: #1a1a1a;
+        color: #fff;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+    `;
+
+    const tooltip = document.createElement("div");
+    tooltip.className = "tooltip";
+    // Read the label from a host attribute
+    tooltip.textContent = this.getAttribute("label") ?? "";
+
+    shadow.appendChild(style);
+    shadow.appendChild(tooltip);
+  }
+}
+
+customElements.define("vanilla-tooltip", VanillaTooltip);
+```
+
+```html
+<!-- index.html -->
+<vanilla-tooltip label="Saved successfully!"></vanilla-tooltip>
+```
+
+The `.tooltip` style defined inside the shadow root has zero effect on any `.tooltip` class that exists in the outer document.
+
+---
+
+### Slots — projecting light DOM content
+
+Slots let consumers of your component pass in their own markup, which gets rendered at the slot's position inside the shadow tree.
+
+```ts
+// icon-button.ts
+class IconButton extends HTMLElement {
+  constructor() {
+    super();
+    const shadow = this.attachShadow({ mode: "open" });
+
+    shadow.innerHTML = `
+      <style>
+        button {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          padding: 8px 16px;
+          border: none;
+          border-radius: 6px;
+          background: #0070f3;
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+        }
+        /* ::slotted targets the projected light DOM children */
+        ::slotted(svg) {
+          width: 16px;
+          height: 16px;
+        }
+      </style>
+      <button>
+        <slot name="icon"></slot>  <!-- named slot for an icon -->
+        <slot></slot>              <!-- default slot for button text -->
+      </button>
+    `;
+  }
+}
+
+customElements.define("icon-button", IconButton);
+```
+
+```html
+<icon-button>
+  <!-- This SVG is projected into the "icon" named slot -->
+  <svg slot="icon" viewBox="0 0 24 24">...</svg>
+  Save Changes
+</icon-button>
+```
+
+The light DOM children stay in the light DOM — they're only _visually_ projected into the shadow tree. This distinction matters for styling and event handling.
+
+---
+
+### Styling the host element with `:host`
+
+```css
+/* Inside a shadow root's <style> block */
+
+/* Style the host element itself */
+:host {
+  display: block;
+}
+
+/* Conditional styles based on a host attribute */
+:host([disabled]) {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* Style based on a class applied to the host from outside */
+:host(.compact) {
+  padding: 4px;
+}
+```
+
+<Callout type="info">
+  `:host` only works inside a shadow root. It selects the shadow host element —
+  the custom element itself — from within its own shadow tree.
+</Callout>
+
+---
+
+### CSS custom properties pierce the shadow boundary
+
+One intentional escape hatch: CSS custom properties (variables) defined on the host or any ancestor _do_ inherit into the shadow tree.
+
+```css
+/* outer document */
+icon-button {
+  --button-bg: #e00;
+}
+```
+
+```css
+/* inside the shadow root */
+button {
+  background: var(--button-bg, #0070f3); /* falls back to blue if not set */
+}
+```
+
+This is the idiomatic way to let consumers theme your Web Component without breaking encapsulation.
+
+---
+
+## Real-World Use Case
+
+You're building a **design system** distributed as an npm package. Your `<ds-modal>` component has specific layout, z-index, and animation styles. Without Shadow DOM, shipping this component means either asking consumers to import a global CSS file (conflict-prone) or using deeply-scoped class names (`.ds-modal__overlay--active` — not fun).
+
+With Shadow DOM, you ship the component as a self-contained custom element. The modal's styles are fully encapsulated. Consumers only need to:
+
+1. Import the JS module that registers the custom element.
+2. Drop `<ds-modal>` into their HTML.
+3. Optionally customize via CSS custom properties you've exposed as a public API.
+
+No stylesheet imports. No class-name conflicts. No specificity wars.
+
+---
+
+## Common Mistakes / Gotchas
+
+### 1. Forgetting that `::slotted()` has limited depth
+
+`::slotted()` only matches direct slotted children — it doesn't let you style deeper descendants.
+
+```css
+/* ✅ Works — targets direct slot child */
+::slotted(p) {
+  color: red;
+}
+
+/* ❌ Does NOT work — can't target nested elements */
+::slotted(p span) {
+  color: red;
+}
+```
+
+If you need to style deeper descendants of slotted content, use CSS custom properties or accept that the consumer controls those styles.
+
+---
+
+### 2. Event retargeting surprises
+
+Events that originate inside a shadow tree are **retargeted** when they cross the shadow boundary. From the outside, `event.target` will be the shadow host, not the actual element that fired the event.
+
+```ts
+document.querySelector("icon-button")?.addEventListener("click", (e) => {
+  // e.target is <icon-button>, not the internal <button>
+  console.log(e.target);
+});
+```
+
+Use `event.composedPath()` to see the full path including shadow internals.
+
+---
+
+### 3. `innerHTML` for styling is fine, but watch XSS
+
+Many developers use `shadow.innerHTML = \`<style>...</style><div>...</div>\`` for convenience. This is fine when content is static. If you're interpolating user-provided data into that string, you have an XSS vulnerability — shadow DOM provides style encapsulation, not security sandboxing.
+
+```ts
+// ❌ Never do this with user data
+shadow.innerHTML = `<div>${userInput}</div>`;
+
+// ✅ Use DOM APIs for dynamic content
+const div = document.createElement("div");
+div.textContent = userInput; // textContent escapes HTML
+shadow.appendChild(div);
+```
+
+---
+
+### 4. Global styles like CSS resets won't apply
+
+If your app uses a global `box-sizing: border-box` reset or a font-family set on `body`, those won't inherit into your shadow trees by default. You'll need to either re-declare them inside each shadow root or use `@import` / `adoptedStyleSheets`.
+
+<Callout type="warn">
+  CSS resets, normalize.css, and Tailwind's preflight do **not** apply inside
+  shadow trees. Always test your components in isolation.
+</Callout>
+
+---
+
+### 5. Server-side rendering is still awkward
+
+Shadow DOM is a client-side browser API. Declarative Shadow DOM (using `<template shadowrootmode="open">`) is the emerging SSR solution and is now supported in all major browsers, but framework support varies. For fully SSR-rendered Web Components, verify your framework or bundler explicitly supports Declarative Shadow DOM before shipping.
+
+---
+
+## Summary
+
+Shadow DOM gives you true style and DOM encapsulation at the browser level — no build tools or naming conventions required. You attach a shadow root to a host element, define your internal structure and styles inside it, and use slots to let consumers compose content into your component. CSS custom properties are the intended API for external theming. The main gotchas are `::slotted()` depth limits, event retargeting across the boundary, and the fact that global stylesheets don't apply inside shadow trees. For building reusable, distributable UI components — especially in design systems — Shadow DOM is the native platform answer to scoped styles.
