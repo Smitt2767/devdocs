@@ -1,0 +1,261 @@
+---
+title: Long Tasks API
+description: A guide to using the Long Tasks API to detect and diagnose JavaScript tasks that block the main thread for more than 50ms.
+---
+
+## Overview
+
+The Long Tasks API is a browser performance API that lets you observe JavaScript tasks taking longer than **50 milliseconds** to execute on the main thread. These tasks directly cause jank, delayed interactivity, and poor INP (Interaction to Next Paint) scores — the Core Web Vital that measures responsiveness.
+
+Any task over 50ms is considered "long" because the human eye perceives delays above that threshold as a lag. The Long Tasks API surfaces these tasks so you can measure, log, and eliminate them.
+
+<Callout type="info">
+  The Long Tasks API is part of the broader Web Performance APIs family and is
+  available in all modern browsers. It is a key tool for diagnosing poor INP
+  scores in production.
+</Callout>
+
+---
+
+## How It Works
+
+The browser's main thread handles JavaScript execution, layout, painting, and user input. When a single task monopolizes it for more than 50ms, incoming input events are queued and the page feels unresponsive.
+
+The Long Tasks API uses a `PerformanceObserver` to subscribe to entries of type `"longtask"`. Each entry exposes:
+
+- `duration` — how long the task ran in milliseconds
+- `startTime` — when the task started relative to the page's navigation start
+- `attribution` — an array of `TaskAttributionTiming` objects describing _where_ the task originated (e.g., a script, iframe, or the top-level frame)
+
+The observer fires asynchronously after the long task completes, so it never interferes with the task itself.
+
+<Callout type="warn">
+  The `attribution` array in many browsers only provides limited detail (often
+  just `"unknown"` or a script container). Combine Long Tasks data with
+  profiling tools like Chrome DevTools for root-cause analysis.
+</Callout>
+
+---
+
+## Code Examples
+
+### Basic Observer Setup
+
+```ts
+// longTaskMonitor.ts
+
+function initLongTaskMonitor(
+  reportCallback: (entry: PerformanceEntry) => void,
+): void {
+  // Check for browser support before registering
+  if (!("PerformanceObserver" in window)) {
+    console.warn("PerformanceObserver is not supported in this browser.");
+    return;
+  }
+
+  const observer = new PerformanceObserver((entryList) => {
+    for (const entry of entryList.getEntries()) {
+      // Each entry is a PerformanceLongTaskTiming object
+      reportCallback(entry);
+    }
+  });
+
+  // buffered: true captures long tasks that occurred before the observer was registered
+  observer.observe({ type: "longtask", buffered: true });
+}
+
+// Usage: log every long task to the console during development
+initLongTaskMonitor((entry) => {
+  console.warn(
+    `Long task detected: ${entry.duration.toFixed(1)}ms at ${entry.startTime.toFixed(1)}ms`,
+  );
+});
+```
+
+### Sending Long Task Data to an Analytics Endpoint
+
+```ts
+// analytics/longTasks.ts
+
+interface LongTaskPayload {
+  duration: number;
+  startTime: number;
+  page: string;
+  attribution: string;
+}
+
+function sendToAnalytics(payload: LongTaskPayload): void {
+  // navigator.sendBeacon is non-blocking and survives page unloads
+  const blob = new Blob([JSON.stringify(payload)], {
+    type: "application/json",
+  });
+  navigator.sendBeacon("/api/metrics/long-tasks", blob);
+}
+
+function initLongTaskReporting(): void {
+  if (!("PerformanceObserver" in window)) return;
+
+  const observer = new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      const taskEntry = entry as PerformanceLongTaskTiming;
+
+      const attribution =
+        taskEntry.attribution?.[0]?.containerName ??
+        taskEntry.attribution?.[0]?.containerSrc ??
+        "unknown";
+
+      sendToAnalytics({
+        duration: Math.round(taskEntry.duration),
+        startTime: Math.round(taskEntry.startTime),
+        page: window.location.pathname,
+        attribution,
+      });
+    }
+  });
+
+  observer.observe({ type: "longtask", buffered: true });
+}
+
+export { initLongTaskReporting };
+```
+
+### Integrating into a Next.js App Router Layout
+
+```tsx
+// app/_components/PerformanceMonitor.tsx
+"use client"; // Needs browser APIs — must be a Client Component
+
+import { useEffect } from "react";
+import { initLongTaskReporting } from "@/analytics/longTasks";
+
+export function PerformanceMonitor() {
+  useEffect(() => {
+    // Run once after hydration on the client
+    initLongTaskReporting();
+  }, []);
+
+  // This component renders nothing — it's purely a side-effect component
+  return null;
+}
+```
+
+```tsx
+// app/layout.tsx
+import { PerformanceMonitor } from "./_components/PerformanceMonitor";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        {/* Invisible monitoring component — injected once at the root */}
+        <PerformanceMonitor />
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+### Measuring a Specific Heavy Operation
+
+```ts
+// utils/heavySync.ts
+
+/**
+ * Wraps a synchronous heavy operation with a User Timing mark so that
+ * Long Tasks in the performance timeline are easier to correlate with
+ * your own code in DevTools.
+ */
+function runHeavyOperation<T>(label: string, fn: () => T): T {
+  performance.mark(`${label}-start`);
+  const result = fn();
+  performance.mark(`${label}-end`);
+
+  performance.measure(label, `${label}-start`, `${label}-end`);
+
+  return result;
+}
+
+// Example: processing a large dataset client-side
+const sortedProducts = runHeavyOperation("sort-product-catalog", () => {
+  return rawProducts.sort((a, b) => b.salesRank - a.salesRank);
+});
+```
+
+<Callout type="info">
+  Adding `performance.mark()` and `performance.measure()` around expensive
+  operations makes them show up as named segments in Chrome DevTools'
+  Performance panel — much easier to correlate with long task flame charts.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+**E-commerce product listing page with client-side filtering**
+
+A product catalog page loads 500+ items and runs JavaScript-based filtering and sorting on each user interaction. Every filter change triggers a re-render of the full list, which regularly exceeds 200ms on mid-range devices — destroying INP scores.
+
+By instrumenting the page with the Long Tasks API:
+
+1. You detect that the sort-and-filter function runs synchronously for ~180ms on each input event.
+2. You correlate the `startTime` with your User Timing marks to pinpoint the exact function.
+3. You refactor the work into a `scheduler.postTask()` or Web Worker, breaking it off the main thread entirely.
+
+The Long Tasks API gave you the signal; the attribution and timing data pointed you to the root cause.
+
+---
+
+## Common Mistakes / Gotchas
+
+### 1. Assuming `attribution` Always Identifies Your Code
+
+The `attribution` array often returns `containerType: "window"` with no useful `containerSrc` or script URL — especially in Chromium when the task originates from the top-level frame. Don't rely on it as the sole debugging tool. Pair it with `performance.mark()` calls in your own code.
+
+### 2. Forgetting `buffered: true`
+
+If you register the `PerformanceObserver` late (e.g., after a React hydration cycle), you'll miss long tasks that fired during initial load. Always pass `{ type: 'longtask', buffered: true }` so the browser replays buffered entries.
+
+```ts
+// ❌ Misses early long tasks
+observer.observe({ type: "longtask" });
+
+// ✅ Catches tasks that happened before the observer was attached
+observer.observe({ type: "longtask", buffered: true });
+```
+
+### 3. Treating Every Long Task as a Code Bug
+
+Some long tasks are expected — parsing a large JSON response, compiling a WebAssembly module on first load, or rendering a complex SVG. Focus on long tasks that fire in response to user interactions (correlated with `pointerdown`, `keydown` events), as these directly impact INP. Use the [Event Timing API](https://developer.mozilla.org/en-US/docs/Web/API/PerformanceEventTiming) alongside Long Tasks for this correlation.
+
+### 4. Blocking the Main Thread to Process Long Task Data
+
+Ironic but common: processing your long task metrics (aggregating, serializing) synchronously inside the `PerformanceObserver` callback can itself become a long task. Keep observer callbacks lightweight. Defer heavy processing with `requestIdleCallback` or `queueMicrotask`.
+
+```ts
+// ❌ Heavy work inside the observer callback
+observer = new PerformanceObserver((list) => {
+  const entries = list.getEntries();
+  const report = buildHeavyAggregationReport(entries); // ← blocks main thread
+  sendToAnalytics(report);
+});
+
+// ✅ Defer with requestIdleCallback
+observer = new PerformanceObserver((list) => {
+  const entries = list.getEntries();
+  requestIdleCallback(() => {
+    const report = buildHeavyAggregationReport(entries);
+    sendToAnalytics(report);
+  });
+});
+```
+
+---
+
+## Summary
+
+The Long Tasks API exposes JavaScript tasks that block the main thread for over 50ms, giving you a measurable signal for jank and poor interactivity. You subscribe to these tasks via `PerformanceObserver` with type `"longtask"`, and each entry includes duration, start time, and partial attribution data. In practice, pair it with `performance.mark()` to correlate long tasks with your own functions, and send the data to an analytics endpoint using `navigator.sendBeacon`. Always pass `buffered: true` when observing to catch tasks that fired before your observer registered. Use the data to identify, isolate, and move expensive work off the main thread.

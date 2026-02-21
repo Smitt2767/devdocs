@@ -1,4 +1,9 @@
 {
   "title": "Browser Observation APIs",
-  "pages": []
+  "pages": [
+    "intersection-observer-internals",
+    "mutation-observer-cost",
+    "performance-observer-api",
+    "long-tasks-api"
+  ]
 }

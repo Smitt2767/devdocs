@@ -1,0 +1,276 @@
+---
+title: IntersectionObserver Internals
+description: A deep dive into how the IntersectionObserver API works under the hood, including thresholds, root margins, entry data, and performance implications.
+---
+
+## Overview
+
+The `IntersectionObserver` API lets you detect when an element enters or exits a visible area — typically the viewport, but optionally any scrollable ancestor. It replaces fragile, scroll-event-based visibility checks that forced synchronous layout reads on every scroll tick.
+
+Instead of asking "is this element visible right now?" on every scroll event, you declare _what you care about_, and the browser tells you asynchronously when that condition changes.
+
+## How It Works
+
+The browser maintains an internal intersection loop tied to its rendering pipeline, not to JavaScript's event loop. This is the key distinction: intersection callbacks run **after layout and paint**, during the browser's idle period, which means:
+
+- No forced synchronous layout (no layout thrashing)
+- Callbacks are batched and delivered together
+- Observations are made against a snapshot of the DOM, not a live read
+
+### Core Concepts
+
+**Root** — The element used as the viewport for intersection checks. Defaults to the browser viewport (`null`). Can be any scrollable ancestor.
+
+**Root Margin** — A CSS-like margin applied to the root before computing intersections. Useful for pre-loading content before it actually enters view.
+
+**Threshold** — A number or array of numbers between `0` and `1` representing what percentage of the target must be visible to trigger the callback. `0` fires as soon as one pixel is visible; `1` fires only when the target is fully visible.
+
+**IntersectionObserverEntry** — The data object passed to your callback per observed element. Key properties:
+
+| Property             | Description                                               |
+| -------------------- | --------------------------------------------------------- |
+| `isIntersecting`     | Boolean — is the element currently intersecting the root? |
+| `intersectionRatio`  | Float 0–1 — how much of the target is intersecting        |
+| `boundingClientRect` | The target element's bounding box                         |
+| `intersectionRect`   | The actual visible intersection rectangle                 |
+| `rootBounds`         | The root's bounding box                                   |
+| `time`               | High-resolution timestamp of when the change was recorded |
+
+### The Observation Loop
+
+Internally, the browser runs something conceptually similar to this on each rendering frame:
+
+1. For each active `IntersectionObserver`, compute the intersection of every observed target against the root (plus root margin).
+2. Compare the new `intersectionRatio` against all registered thresholds.
+3. If the ratio has crossed a threshold since the last check, queue an `IntersectionObserverEntry`.
+4. Deliver queued entries to the callback during the browser's task queue processing.
+
+<Callout type="info">
+  Because entries are delivered asynchronously, `IntersectionObserver` is not
+  suitable for scenarios that need pixel-perfect, synchronous layout reads —
+  like implementing a custom scroll-linked animation. Use
+  `requestAnimationFrame` with `getBoundingClientRect` for that instead.
+</Callout>
+
+## Code Examples
+
+### Basic Lazy Image Loading
+
+```tsx
+// components/LazyImage.tsx
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+interface LazyImageProps {
+  src: string;
+  alt: string;
+  width: number;
+  height: number;
+}
+
+export function LazyImage({ src, alt, width, height }: LazyImageProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [shouldLoad, setShouldLoad] = useState(false);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        // entries contains one entry per observed element
+        const [entry] = entries;
+
+        if (entry.isIntersecting) {
+          setShouldLoad(true);
+          // Once loaded, no need to keep observing
+          observer.unobserve(element);
+        }
+      },
+      {
+        root: null, // use the viewport
+        rootMargin: "200px", // start loading 200px before it enters view
+        threshold: 0, // fire as soon as 1px is within the root margin
+      },
+    );
+
+    observer.observe(element);
+
+    return () => {
+      observer.unobserve(element);
+    };
+  }, []);
+
+  return (
+    <div ref={containerRef} style={{ width, height, background: "#f0f0f0" }}>
+      {shouldLoad && <img src={src} alt={alt} width={width} height={height} />}
+    </div>
+  );
+}
+```
+
+### Tracking Scroll Progress with Multiple Thresholds
+
+```tsx
+// components/ReadingProgress.tsx
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+export function ReadingProgress({ children }: { children: React.ReactNode }) {
+  const articleRef = useRef<HTMLElement>(null);
+  const [readPercent, setReadPercent] = useState(0);
+
+  useEffect(() => {
+    const element = articleRef.current;
+    if (!element) return;
+
+    // Fire callback at every 10% visibility increment
+    const thresholds = Array.from({ length: 11 }, (_, i) => i / 10);
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const [entry] = entries;
+        // intersectionRatio tells us how much of the article is in view
+        const percent = Math.round(entry.intersectionRatio * 100);
+        setReadPercent(percent);
+      },
+      {
+        root: null,
+        threshold: thresholds,
+      },
+    );
+
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <>
+      <div
+        style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          height: 4,
+          width: `${readPercent}%`,
+          background: "royalblue",
+          transition: "width 100ms ease",
+          zIndex: 100,
+        }}
+      />
+      <article ref={articleRef}>{children}</article>
+    </>
+  );
+}
+```
+
+### Observing Multiple Elements with One Observer
+
+```tsx
+// components/AnimatedList.tsx
+"use client";
+
+import { useEffect, useRef } from "react";
+
+const items = [
+  { id: 1, label: "Revenue Report" },
+  { id: 2, label: "User Growth" },
+  { id: 3, label: "Churn Analysis" },
+];
+
+export function AnimatedList() {
+  const listRef = useRef<HTMLUListElement>(null);
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            // entry.target is the specific element that crossed the threshold
+            entry.target.classList.add("visible");
+            observer.unobserve(entry.target);
+          }
+        });
+      },
+      { threshold: 0.2 },
+    );
+
+    // Observe every list item with a single observer instance
+    list.querySelectorAll("li").forEach((li) => observer.observe(li));
+
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <ul ref={listRef}>
+      {items.map((item) => (
+        <li key={item.id} className="fade-in-item">
+          {item.label}
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+<Callout type="info">
+  One observer instance can observe many elements. The callback receives an
+  array of `IntersectionObserverEntry` objects — one per element that crossed a
+  threshold since the last delivery. Always iterate over `entries`, not just
+  `entries[0]`, when observing multiple targets.
+</Callout>
+
+## Real-World Use Case
+
+In a content-heavy dashboard, you have dozens of chart components below the fold. Each chart fetches its own data. Eagerly fetching all charts on load wastes bandwidth and slows initial TTI.
+
+By wrapping each chart in an `IntersectionObserver` with a `rootMargin` of `"300px"`, you trigger data fetching just before the chart scrolls into view. The user experiences no visible loading state because the data arrives while the chart is still off-screen — a common pattern in tools like Notion, Linear, and Vercel's dashboard.
+
+## Common Mistakes / Gotchas
+
+**1. Creating a new observer per element inside a loop**
+
+```ts
+// ❌ Wrong — creates N observers for N elements
+items.forEach((item) => {
+  const observer = new IntersectionObserver(callback);
+  observer.observe(item);
+});
+
+// ✅ Right — one observer, many targets
+const observer = new IntersectionObserver(callback);
+items.forEach((item) => observer.observe(item));
+```
+
+Each `IntersectionObserver` instance has its own callback and options. Creating one per element is wasteful — use a single observer and identify which element fired via `entry.target`.
+
+**2. Forgetting to unobserve or disconnect**
+
+If you observe an element and never call `observer.unobserve(element)` or `observer.disconnect()`, the observer holds a reference to the element and its callback indefinitely. In React, always clean up in the `useEffect` return function.
+
+**3. Misunderstanding `intersectionRatio` vs `isIntersecting`**
+
+`isIntersecting` is `true` when the element intersects the root _at the threshold level you set_. If your threshold is `0.5` and only 30% of the element is visible, `isIntersecting` is `false` even though the element is partially on screen. Don't use `isIntersecting` alone when you care about partial visibility — read `intersectionRatio` directly.
+
+**4. Using `rootMargin` with a non-viewport root without `overflow` set**
+
+`rootMargin` only works correctly when the root is either `null` (viewport) or a container that has an explicit `overflow` value (`auto`, `scroll`, or `hidden`). If you pass a root element without overflow, `rootMargin` may have no effect or behave inconsistently across browsers.
+
+**5. Assuming callback timing is synchronous or frame-accurate**
+
+The callback is asynchronous and may be delayed if the main thread is busy. Never use `IntersectionObserver` for animations that must sync precisely with scroll position — use `requestAnimationFrame` or the CSS Scroll-driven Animations API for that.
+
+<Callout type="warn">
+  `IntersectionObserver` is not available in Web Workers or server-side
+  environments. Always guard with `typeof IntersectionObserver !== 'undefined'`
+  if your code runs during SSR.
+</Callout>
+
+## Summary
+
+`IntersectionObserver` is a browser-native API that asynchronously reports when elements cross visibility thresholds relative to a root element or the viewport. It avoids layout thrashing by decoupling observation from the scroll event loop and delivers batched entries after layout and paint. The three core configuration options — `root`, `rootMargin`, and `threshold` — give fine-grained control over when and how callbacks fire. A single observer instance can track many elements efficiently by reading `entry.target` inside the callback. For most use cases — lazy loading, analytics tracking, infinite scroll, entrance animations — `IntersectionObserver` is the correct and most performant tool.
