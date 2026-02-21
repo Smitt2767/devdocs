@@ -1,0 +1,273 @@
+---
+title: Critical Rendering Path
+description: How browsers parse HTML, CSS, and JavaScript to construct and paint the first frame of a web page.
+---
+
+## Overview
+
+The **Critical Rendering Path (CRP)** is the sequence of steps a browser takes to convert HTML, CSS, and JavaScript into visible pixels on screen. Understanding it lets you identify exactly where rendering stalls and what to optimize so users see content faster.
+
+Every millisecond spent in the CRP before the first paint is time the user sees a blank screen. Optimizing the CRP is one of the highest-leverage frontend performance techniques available.
+
+## How It Works
+
+The browser follows a deterministic pipeline:
+
+1. **Parse HTML → build the DOM.** The parser reads the HTML byte-stream top-to-bottom and constructs the Document Object Model tree. It stops whenever it hits a blocking resource.
+2. **Parse CSS → build the CSSOM.** All CSS (inline, embedded, and external) is assembled into the CSS Object Model before rendering proceeds. CSS is _always_ render-blocking.
+3. **Combine DOM + CSSOM → Render Tree.** Only visible nodes are included (e.g., `display: none` nodes are excluded).
+4. **Layout (Reflow).** The browser calculates the exact size and position of every node in the render tree.
+5. **Paint.** Pixels are drawn into layers.
+6. **Composite.** Layers are merged and sent to the screen.
+
+### What "blocking" means
+
+A resource is **render-blocking** if the browser must fully download and process it before it can advance past step 3. By default:
+
+- All `<link rel="stylesheet">` tags are render-blocking.
+- All `<script>` tags without `async` or `defer` are both **parser-blocking** and render-blocking.
+
+<Callout type="warn">
+  A single slow CSS file or a synchronous `<script>` in `<head>` can delay the entire first paint, even if the rest of your HTML is tiny.
+</Callout>
+
+### JavaScript's extra complication
+
+When the HTML parser encounters a synchronous `<script>`, it must:
+
+1. Pause HTML parsing.
+2. Wait for any in-flight CSS to finish (scripts can query styles, so CSSOM must be ready).
+3. Execute the script.
+4. Resume parsing.
+
+This is why script placement and attributes (`async`, `defer`, `type="module"`) matter so much.
+
+## Code Examples
+
+### Identifying render-blocking resources
+
+Open Chrome DevTools → **Performance** tab → record a page load. Render-blocking resources appear as long bars in the **Timings** row before the First Contentful Paint marker.
+
+You can also audit programmatically with the **PerformanceResourceTiming** API:
+
+```ts
+// Run this in the browser console or a performance monitoring script
+const resources = performance.getEntriesByType(
+  "resource",
+) as PerformanceResourceTiming[];
+
+const blocking = resources.filter((r) => {
+  // renderBlockingStatus is available in Chromium-based browsers
+  return (r as any).renderBlockingStatus === "blocking";
+});
+
+console.table(
+  blocking.map((r) => ({
+    name: r.name,
+    duration: `${r.duration.toFixed(0)}ms`,
+  })),
+);
+```
+
+---
+
+### Eliminating render-blocking scripts
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Product Page</title>
+
+    <!-- Render-blocking: browser waits for this before painting -->
+    <link rel="stylesheet" href="/styles/main.css" />
+
+    <!--
+      async: downloads in parallel, executes immediately when ready.
+      Use for scripts that don't depend on the DOM or other scripts
+      (e.g., analytics, third-party widgets).
+    -->
+    <script async src="/scripts/analytics.js"></script>
+
+    <!--
+      defer: downloads in parallel, executes after HTML is fully parsed.
+      Use for scripts that need the DOM (e.g., your app bundle).
+      Maintains execution order when multiple deferred scripts are present.
+    -->
+    <script defer src="/scripts/app.js"></script>
+  </head>
+  <body>
+    <h1>Featured Products</h1>
+    <!-- content -->
+  </body>
+</html>
+```
+
+---
+
+### Inlining critical CSS (Next.js App Router)
+
+For above-the-fold content, inlining the minimal CSS needed for the first paint eliminates the round-trip for that stylesheet entirely.
+
+```tsx
+// app/layout.tsx
+// Next.js automatically extracts and inlines critical CSS when you import
+// CSS Modules. For global styles that are too large to inline fully,
+// use this pattern to manually inline only the above-the-fold rules.
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <head>
+        {/* Inline only the CSS needed for the first viewport */}
+        <style
+          dangerouslySetInnerHTML={{
+            __html: `
+              body { margin: 0; font-family: system-ui, sans-serif; }
+              .hero { display: flex; flex-direction: column; padding: 2rem; }
+              .hero__title { font-size: 2.5rem; font-weight: 700; }
+            `,
+          }}
+        />
+        {/* Load the full stylesheet non-blocking via media trick */}
+        <link
+          rel="stylesheet"
+          href="/styles/full.css"
+          media="print"
+          // After load, switch media to "all" so it applies normally
+          onLoad="this.media='all'"
+        />
+      </head>
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+<Callout type="info">
+  Next.js with the App Router automatically code-splits CSS per route and
+  inlines critical styles for you when using CSS Modules. The manual pattern
+  above is most useful when integrating third-party global stylesheets.
+</Callout>
+
+---
+
+### Preloading key resources
+
+`rel="preload"` tells the browser to fetch a resource at high priority before the parser would normally discover it.
+
+```html
+<head>
+  <!-- Preload the hero image so it's ready when the CSS requests it -->
+  <link rel="preload" href="/images/hero.webp" as="image" type="image/webp" />
+
+  <!-- Preload a custom font to avoid layout shift from late font swap -->
+  <link
+    rel="preload"
+    href="/fonts/inter-var.woff2"
+    as="font"
+    type="font/woff2"
+    crossorigin="anonymous"
+  />
+
+  <link rel="stylesheet" href="/styles/main.css" />
+</head>
+```
+
+<Callout type="warn">
+  Don't `preload` everything — it competes for bandwidth and can hurt overall
+  load time. Preload only 1–3 resources that are on the critical path and
+  discovered late (fonts, LCP images).
+</Callout>
+
+---
+
+### Measuring CRP metrics in Next.js
+
+```tsx
+// app/_components/WebVitalsReporter.tsx
+"use client";
+
+import { useReportWebVitals } from "next/web-vitals";
+
+export function WebVitalsReporter() {
+  useReportWebVitals((metric) => {
+    // FCP = First Contentful Paint (first text or image)
+    // LCP = Largest Contentful Paint (main content visible)
+    // TTFB = Time to First Byte (server response speed)
+    if (["FCP", "LCP", "TTFB"].includes(metric.name)) {
+      console.log(`${metric.name}: ${metric.value.toFixed(0)}ms`);
+
+      // In production, send to your analytics endpoint
+      // fetch("/api/vitals", { method: "POST", body: JSON.stringify(metric) });
+    }
+  });
+
+  return null;
+}
+```
+
+```tsx
+// app/layout.tsx
+import { WebVitalsReporter } from "./_components/WebVitalsReporter";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        <WebVitalsReporter />
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+## Real-World Use Case
+
+An e-commerce product listing page loads a global CSS bundle (180 KB), three analytics scripts, and a custom font. Users on mobile report a blank screen for 3–4 seconds before anything appears.
+
+Diagnosis via DevTools reveals:
+
+- The CSS bundle is render-blocking and takes 1.8s on 3G.
+- All three analytics scripts are synchronous in `<head>`.
+- The font has no `preload`, so it's discovered only after CSS parses.
+
+Fix checklist:
+
+1. Split the CSS bundle. Extract above-the-fold styles (~8 KB) and inline them. Load the rest with the `media="print"` trick.
+2. Add `async` to all analytics scripts — they don't need the DOM.
+3. Add `<link rel="preload">` for the font file.
+4. Add `fetchpriority="high"` to the LCP product image.
+
+After these changes, FCP drops from 3.4s to 0.9s on simulated 3G.
+
+## Common Mistakes / Gotchas
+
+**1. Assuming `async` and `defer` are interchangeable.**
+`async` executes the script as soon as it downloads — even if the DOM isn't ready, even out of order. `defer` always waits for the DOM and respects source order. Using `async` on scripts that query the DOM causes "element not found" errors that are difficult to reproduce because they depend on network timing.
+
+**2. Inlining too much CSS.**
+Inlining critical CSS is powerful, but if you inline your entire stylesheet to "avoid a round-trip," you bloat the HTML document, increase TTFB, and lose caching. Inline only the ~5–15 KB of styles needed to render the above-the-fold viewport.
+
+**3. Forgetting that CSS blocks script execution.**
+Developers often fix script blocking by adding `defer`, then wonder why rendering is still slow. If a deferred script follows a large stylesheet in the HTML, the browser won't execute the script until the CSSOM is built — effectively making the stylesheet block rendering through an indirect dependency chain.
+
+**4. Preloading low-priority resources.**
+`rel="preload"` competes with other high-priority fetches (HTML, critical CSS). Preloading a carousel image that's below the fold or a font used only in the footer can delay FCP by starving the actual critical resources of bandwidth.
+
+**5. Not accounting for HTTP/2 and CDN caching when benchmarking.**
+CRP optimizations like eliminating render-blocking resources show dramatically different results on HTTP/1.1 vs HTTP/2 (which multiplexes requests). Always benchmark in conditions that match your production environment.
+
+## Summary
+
+The Critical Rendering Path is the browser's pipeline from bytes to pixels: HTML → DOM, CSS → CSSOM, combined into a render tree, then laid out, painted, and composited. Any resource that stalls this pipeline delays the first paint. CSS is always render-blocking; JavaScript is parser-blocking by default unless marked `async` or `defer`. The main levers to optimize CRP are: eliminate or defer render-blocking resources, inline only the CSS needed for the first viewport, preload late-discovered critical assets, and measure the real impact using FCP and LCP metrics. In a Next.js App Router project, CSS Modules, `next/font`, and `useReportWebVitals` handle most of this automatically — but understanding the underlying mechanism is essential for diagnosing edge cases.

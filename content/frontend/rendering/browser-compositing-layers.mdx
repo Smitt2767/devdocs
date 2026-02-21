@@ -1,0 +1,201 @@
+---
+title: Browser Compositing Layers
+description: How browsers use GPU-accelerated compositing layers to optimize rendering performance and how to control layer promotion in your web apps.
+---
+
+## Overview
+
+When a browser renders a webpage, it doesn't paint everything onto a single flat canvas. Instead, it splits parts of the page into independent **compositing layers** — separate surfaces that the GPU can manipulate and combine (composite) independently.
+
+This matters because moving, fading, or transforming a composited layer is extremely cheap: the GPU just repositions or blends pre-painted surfaces without repainting any pixels. When done right, this is what makes 60fps animations feel buttery smooth. When done wrong (too many layers, or layers that repaint constantly), it tanks performance.
+
+## How It Works
+
+The browser rendering pipeline has four main stages:
+
+1. **Style** — Compute which CSS rules apply to which elements.
+2. **Layout** — Calculate the size and position of every element.
+3. **Paint** — Record drawing instructions (fills, borders, text) into paint records.
+4. **Composite** — Upload painted layers to the GPU and combine them on screen.
+
+Normally, all elements live on the **root layer**. When the browser detects (or you hint) that an element will change independently of its surroundings, it **promotes** that element to its own compositing layer. That layer gets its own GPU texture. Subsequent transforms and opacity changes on that element only require the composite step — skipping layout and paint entirely.
+
+Think of it like a stage production: repainting is re-drawing the entire set, while compositing is just moving a pre-built prop across the stage. The prop (layer) is already built — you're just repositioning it.
+
+**What triggers layer promotion?**
+
+The browser promotes an element automatically when it:
+
+- Has a CSS `transform` or `opacity` animation/transition actively running
+- Uses `will-change: transform` or `will-change: opacity`
+- Is a `<video>`, `<canvas>`, or `<iframe>`
+- Has `position: fixed` (in some browsers)
+- Is a child of a composited layer that requires it for correct stacking
+
+## Code Examples
+
+### Promoting a layer for a smooth animation
+
+```css
+/* Without promotion — the browser repaints on every frame */
+.card-bad {
+  transition: transform 300ms ease;
+}
+
+/* With promotion — only the composite step runs during the animation */
+.card-good {
+  will-change: transform; /* Promotes to its own layer before animation starts */
+  transition: transform 300ms ease;
+}
+```
+
+```tsx
+// app/components/AnimatedCard.tsx
+// Server Component — no 'use client' needed for static structure
+export default function AnimatedCard({ title }: { title: string }) {
+  return (
+    // The CSS class handles layer promotion; no JS animation needed
+    <div className="card-good">
+      <h2>{title}</h2>
+    </div>
+  );
+}
+```
+
+### Triggering layer promotion with transform (not top/left)
+
+```css
+/* BAD: animating top/left forces layout recalculation on every frame */
+.tooltip-bad {
+  position: absolute;
+  transition: top 200ms;
+}
+
+/* GOOD: animating transform skips layout and paint */
+.tooltip-good {
+  position: absolute;
+  transition: transform 200ms;
+  /* translateY moves the element visually without affecting layout */
+}
+```
+
+```tsx
+// app/components/Tooltip.tsx
+"use client";
+
+import { useState } from "react";
+
+export default function Tooltip({ text }: { text: string }) {
+  const [visible, setVisible] = useState(false);
+
+  return (
+    <div
+      onMouseEnter={() => setVisible(true)}
+      onMouseLeave={() => setVisible(false)}
+      className="relative inline-block"
+    >
+      Hover me
+      <span
+        style={{
+          // Compositing-friendly: only triggers composite step
+          transform: visible ? "translateY(0)" : "translateY(-8px)",
+          opacity: visible ? 1 : 0,
+          transition: "transform 200ms ease, opacity 200ms ease",
+          willChange: "transform, opacity",
+        }}
+        className="absolute top-full left-0 bg-black text-white px-2 py-1 rounded text-sm"
+      >
+        {text}
+      </span>
+    </div>
+  );
+}
+```
+
+### Inspecting layers in DevTools
+
+```bash
+# In Chrome DevTools:
+# 1. Open DevTools → More Tools → Layers
+# 2. Or enable: Rendering panel → "Layer borders" (teal = composited layer)
+# 3. Run a Performance recording and look for "Composite Layers" in the flame chart
+```
+
+## Real-World Use Case
+
+In a dashboard app with a collapsible sidebar, you want the slide-in animation to be jank-free even while the main content area is still loading data. By applying `will-change: transform` to the sidebar element, the browser promotes it to its own GPU layer before the animation begins. The sidebar slides in at 60fps regardless of any JavaScript or network activity happening in the main thread — because the compositor thread operates independently of the main thread.
+
+Similarly, sticky headers (`position: sticky`) and fixed navigation bars benefit from layer promotion because they move relative to the scroll position every frame. Promoting them avoids a repaint on every scroll event.
+
+## Common Mistakes / Gotchas
+
+**1. Promoting everything "just in case"**
+
+`will-change: transform` on every element is an anti-pattern. Each composited layer consumes GPU memory (a full texture for its painted content). Promote only elements that will actually animate or that you've profiled as causing jank.
+
+```css
+/* Don't do this */
+* {
+  will-change: transform; /* Explodes GPU memory usage */
+}
+```
+
+**2. Animating layout-triggering properties**
+
+Animating `width`, `height`, `top`, `left`, `margin`, or `padding` forces layout and paint on every frame, making layer promotion useless. Always animate `transform` and `opacity` instead — these are the only two properties that can be animated entirely on the compositor thread.
+
+<Callout type="warn">
+  The CSS properties `transform` and `opacity` are the only ones that skip both
+  layout and paint during animation. Every other animated property will cause at
+  least a paint, and geometric properties like `width` or `top` will trigger
+  layout too.
+</Callout>
+
+**3. Forgetting that `will-change` should be removed after use**
+
+`will-change` is a hint to allocate GPU resources ahead of time. If you set it permanently on elements that only animate occasionally, you're wasting GPU memory the entire time. For infrequent animations, add and remove `will-change` via JavaScript just before and after the animation.
+
+```tsx
+"use client";
+
+import { useRef } from "react";
+
+export default function InfrequentButton() {
+  const ref = useRef<HTMLDivElement>(null);
+
+  const handleMouseEnter = () => {
+    // Allocate GPU layer right before animation
+    if (ref.current) ref.current.style.willChange = "transform";
+  };
+
+  const handleAnimationEnd = () => {
+    // Release GPU memory after animation completes
+    if (ref.current) ref.current.style.willChange = "auto";
+  };
+
+  return (
+    <div
+      ref={ref}
+      onMouseEnter={handleMouseEnter}
+      onAnimationEnd={handleAnimationEnd}
+      className="panel"
+    >
+      Content
+    </div>
+  );
+}
+```
+
+**4. Assuming composited = no repaint**
+
+A layer is composited but still repaints if its content changes (e.g., text updates, background color changes, child DOM mutations). Layer promotion only helps with geometric transforms and opacity. If the pixels inside the layer change, it must repaint before compositing.
+
+<Callout type="info">
+  Use the Chrome DevTools **Rendering** panel with "Paint flashing" enabled to
+  see green overlays wherever repaints occur. If a composited layer flashes
+  green on every frame, you're not getting the performance benefit you expect.
+</Callout>
+
+## Summary
+
+Compositing layers let the browser GPU handle certain visual changes — specifically transforms and opacity — without re-running layout or paint. You promote elements to their own layer using `will-change` or by animating `transform`/`opacity`. The key is intentionality: promote elements that actually need it, animate only compositor-friendly properties, and verify your assumptions with DevTools. Overusing layers wastes GPU memory and can hurt performance more than help it. The goal is surgical promotion, not blanket application.

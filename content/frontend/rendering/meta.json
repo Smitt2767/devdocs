@@ -8,6 +8,9 @@
     "time-slicing",
     "reconciliation-algorithm",
     "fiber-architecture",
-    "virtual-dom-diffing-complexity"
+    "virtual-dom-diffing-complexity",
+    "critical-rendering-path",
+    "render-blocking-resources",
+    "browser-compositing-layers"
   ]
 }

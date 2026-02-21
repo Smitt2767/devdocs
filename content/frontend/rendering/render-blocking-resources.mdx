@@ -1,0 +1,262 @@
+---
+title: Render Blocking Resources
+description: A guide to understanding what render-blocking resources are, how they delay page paint, and how to eliminate or defer them for faster load performance.
+---
+
+## Overview
+
+When a browser loads a webpage, it builds two trees before painting anything to the screen: the **DOM** (from HTML) and the **CSSOM** (from CSS). Only when both trees are ready does the browser combine them into a render tree and paint.
+
+A **render-blocking resource** is any file the browser must fully download and process before it can complete this render tree — delaying the first paint and hurting metrics like **First Contentful Paint (FCP)** and **Largest Contentful Paint (LCP)**.
+
+The two main offenders:
+
+- **CSS files** loaded via `<link rel="stylesheet">` — always render-blocking by default.
+- **JavaScript files** loaded via `<script>` without `async` or `defer` — block both HTML parsing and rendering.
+
+Fonts loaded with `@font-face` can also cause a **Flash of Invisible Text (FOIT)** or delay rendering if not handled carefully.
+
+<Callout type="info">
+  Render-blocking is distinct from *parser-blocking*. A script can block the HTML parser without blocking paint, and vice versa. In practice, classic `<script>` tags do both.
+</Callout>
+
+---
+
+## How It Works
+
+### The Critical Rendering Path
+
+The browser follows this sequence:
+
+1. Parse HTML → build DOM
+2. Encounter `<link rel="stylesheet">` → **pause rendering**, fetch and parse CSS → build CSSOM
+3. Encounter `<script>` (classic) → **pause HTML parsing**, fetch and execute JS
+4. Merge DOM + CSSOM → Render Tree → Layout → Paint
+
+Any file that interrupts steps 1–4 before the first paint is render-blocking.
+
+### Why CSS Is Always Blocking
+
+The browser can't safely paint without CSS — rendering unstyled content first (a **Flash of Unstyled Content, FOUC**) would cause a jarring visual jump. So it waits. This is intentional behavior, which means the goal isn't to make CSS non-blocking but to make it **as small and fast as possible**, and to defer non-critical CSS.
+
+### Why Classic Scripts Are Blocking
+
+When the HTML parser hits a `<script src="...">` tag with no attributes, it must:
+
+1. Stop parsing HTML
+2. Fetch the script
+3. Execute it (because the script might call `document.write()` or modify the DOM)
+4. Resume parsing
+
+`async` and `defer` break this behavior:
+
+| Attribute | Fetch    | Execution timing        | Blocks parsing?      |
+| --------- | -------- | ----------------------- | -------------------- |
+| _(none)_  | Sync     | Immediately after fetch | ✅ Yes               |
+| `async`   | Parallel | As soon as fetched      | ✅ Yes (during exec) |
+| `defer`   | Parallel | After HTML fully parsed | ❌ No                |
+
+---
+
+## Code Examples
+
+### 1. Deferring Non-Critical JavaScript
+
+```html
+<!-- ❌ Blocks HTML parsing and rendering -->
+<script src="/analytics.js"></script>
+
+<!-- ✅ Fetches in parallel, executes after HTML is parsed -->
+<script src="/analytics.js" defer></script>
+
+<!-- ✅ For truly independent scripts (e.g. ads, widgets) -->
+<script src="/chat-widget.js" async></script>
+```
+
+<Callout type="warn">
+  Use `defer` for most scripts. Use `async` only when the script has no
+  dependencies and execution order doesn't matter. Never use `async` for scripts
+  that depend on each other — execution order is not guaranteed.
+</Callout>
+
+---
+
+### 2. Deferring Non-Critical CSS
+
+Critical CSS (above-the-fold styles) should load normally. Everything else can be deferred using the `media` trick:
+
+```html
+<!-- ✅ Critical styles — load blocking (intentional) -->
+<link rel="stylesheet" href="/critical.css" />
+
+<!-- ✅ Defer non-critical CSS using media="print" trick -->
+<link
+  rel="stylesheet"
+  href="/non-critical.css"
+  media="print"
+  onload="this.media='all'"
+/>
+<noscript>
+  <link rel="stylesheet" href="/non-critical.css" />
+</noscript>
+```
+
+The browser loads `media="print"` stylesheets without blocking render. The `onload` handler switches it to `media="all"` once it's ready, applying the styles without a render-blocking penalty.
+
+---
+
+### 3. Inlining Critical CSS in Next.js (App Router)
+
+For the smallest above-the-fold CSS, inline it directly in your root layout to eliminate the network round trip:
+
+```tsx
+// app/layout.tsx
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
+  title: "My App",
+};
+
+const criticalStyles = `
+  body { margin: 0; font-family: system-ui, sans-serif; }
+  header { height: 64px; background: #0f172a; }
+  .hero { min-height: 100vh; display: flex; align-items: center; }
+`;
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <head>
+        {/* Inlined critical CSS — zero network requests */}
+        <style dangerouslySetInnerHTML={{ __html: criticalStyles }} />
+
+        {/* Non-critical stylesheet deferred */}
+        <link
+          rel="stylesheet"
+          href="/styles/extended.css"
+          media="print"
+          // @ts-expect-error — onload is valid here
+          onLoad="this.media='all'"
+        />
+      </head>
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+---
+
+### 4. Preloading Key Resources
+
+`<link rel="preload">` tells the browser to fetch a resource at high priority without blocking render:
+
+```html
+<!-- Preload a critical font -->
+<link
+  rel="preload"
+  href="/fonts/inter-var.woff2"
+  as="font"
+  type="font/woff2"
+  crossorigin="anonymous"
+/>
+
+<!-- Preload a hero image -->
+<link rel="preload" href="/images/hero.webp" as="image" />
+```
+
+In Next.js App Router, add these to your root `layout.tsx` inside `<head>`, or use the built-in `next/font` which handles preloading automatically:
+
+```tsx
+// app/layout.tsx
+import { Inter } from "next/font/google";
+
+// next/font automatically preloads and self-hosts the font,
+// eliminating the render-blocking Google Fonts request entirely.
+const inter = Inter({
+  subsets: ["latin"],
+  display: "swap", // Prevents FOIT — shows fallback font while Inter loads
+});
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en" className={inter.className}>
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+**Scenario: E-commerce product page with slow FCP**
+
+You're building a Next.js storefront. Lighthouse flags your FCP at 3.2s. The waterfall shows:
+
+1. A third-party chat widget script (`chat.js`, 180kb) loading synchronously in `<head>` — blocking render for ~1.1s.
+2. A `print.css` stylesheet being loaded unconditionally — blocking even though it only applies on print.
+3. A Google Fonts `<link>` making two round trips before any text renders.
+
+**Fixes applied:**
+
+- Replace `<script src="chat.js">` with `<script src="chat.js" defer>` — render no longer waits.
+- Add `media="print"` to `print.css` — browser skips it for screen rendering.
+- Replace Google Fonts `<link>` with `next/font/google` — self-hosted, preloaded, zero FOIT.
+
+Result: FCP drops to 1.4s. No code logic changed — only resource loading strategy.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Using `async` on interdependent scripts**
+
+If `app.js` depends on `utils.js`, using `async` on both means whichever downloads first executes first — likely causing a runtime error. Use `defer` to preserve execution order while still parallelizing downloads.
+
+**2. Treating all CSS as "critical"**
+
+Developers often inline all CSS to avoid render-blocking, bloating the HTML document and increasing Time to First Byte (TTFB). Only inline styles required to render **above-the-fold content**. Everything else should be a deferred external stylesheet.
+
+**3. Forgetting `crossorigin` on preloaded fonts**
+
+Fonts are fetched with CORS. If you preload a font without `crossorigin="anonymous"`, the browser fetches it twice — once for the preload hint and once when the `@font-face` rule is processed.
+
+```html
+<!-- ❌ Missing crossorigin — double fetch -->
+<link rel="preload" href="/fonts/inter.woff2" as="font" type="font/woff2" />
+
+<!-- ✅ Correct -->
+<link
+  rel="preload"
+  href="/fonts/inter.woff2"
+  as="font"
+  type="font/woff2"
+  crossorigin="anonymous"
+/>
+```
+
+**4. Assuming `defer` works on inline scripts**
+
+`defer` and `async` only apply to external scripts with a `src` attribute. Inline `<script>` blocks always execute synchronously during parsing — keep them minimal in `<head>`.
+
+<Callout type="warn">
+  Don't blindly defer every script. Scripts that must run before the page is
+  visible (e.g., theme detection to avoid flash of wrong theme) should remain
+  synchronous and be as small as possible.
+</Callout>
+
+---
+
+## Summary
+
+Render-blocking resources are CSS and JavaScript files that prevent the browser from painting the page until they're fully downloaded and processed. CSS is always blocking by default — keep it lean and defer non-critical stylesheets using the `media` trick. Classic `<script>` tags block HTML parsing; use `defer` for most scripts and `async` only for fully independent ones. In Next.js, `next/font` eliminates render-blocking font requests automatically. The goal isn't to make everything non-blocking — it's to ensure the browser has exactly what it needs for the first paint, and nothing more.
