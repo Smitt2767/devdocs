@@ -1,0 +1,344 @@
+---
+title: Promise Combinators
+description: A practical guide to Promise.all, allSettled, any, and race — and how to handle errors correctly with each combinator.
+---
+
+## Overview
+
+JavaScript ships four built-in Promise combinators: `Promise.all`, `Promise.allSettled`, `Promise.any`, and `Promise.race`. Each one composes multiple async operations differently, and each has a distinct error propagation model.
+
+Picking the wrong combinator is one of the most common sources of silent failures and unhandled rejections in async code. This doc explains how each works, when to use it, and how to propagate errors correctly in real applications.
+
+---
+
+## How It Works
+
+All four combinators accept an iterable of promises and return a single new promise. They differ in **when they settle** and **what they do with rejections**.
+
+| Combinator           | Resolves when                       | Rejects when                |
+| -------------------- | ----------------------------------- | --------------------------- |
+| `Promise.all`        | All promises resolve                | Any one rejects             |
+| `Promise.allSettled` | All promises settle (either way)    | Never rejects               |
+| `Promise.any`        | Any one resolves                    | All reject (AggregateError) |
+| `Promise.race`       | Any one settles (resolve or reject) | Any one rejects first       |
+
+Understanding this table is the foundation. The error propagation implications follow directly from it.
+
+---
+
+## Code Examples
+
+### `Promise.all` — Parallel fetches where all must succeed
+
+Use this when every result is required to proceed. A single rejection short-circuits the entire operation.
+
+```ts
+// lib/dashboard.ts
+
+interface User {
+  id: string;
+  name: string;
+}
+
+interface Orders {
+  total: number;
+  items: string[];
+}
+
+interface Notifications {
+  unread: number;
+}
+
+async function fetchDashboardData(userId: string): Promise<{
+  user: User;
+  orders: Orders;
+  notifications: Notifications;
+}> {
+  // All three requests fire in parallel — not sequentially
+  const [user, orders, notifications] = await Promise.all([
+    fetch(`/api/users/${userId}`).then((res) => {
+      if (!res.ok) throw new Error(`User fetch failed: ${res.status}`);
+      return res.json() as Promise<User>;
+    }),
+    fetch(`/api/orders?userId=${userId}`).then((res) => {
+      if (!res.ok) throw new Error(`Orders fetch failed: ${res.status}`);
+      return res.json() as Promise<Orders>;
+    }),
+    fetch(`/api/notifications?userId=${userId}`).then((res) => {
+      if (!res.ok) throw new Error(`Notifications fetch failed: ${res.status}`);
+      return res.json() as Promise<Notifications>;
+    }),
+  ]);
+
+  return { user, orders, notifications };
+}
+```
+
+<Callout type="warn">
+  `Promise.all` rejects with the **first** error it encounters and discards the
+  rest. If you need to know which requests failed, use `Promise.allSettled`
+  instead.
+</Callout>
+
+---
+
+### `Promise.allSettled` — Independent operations where partial failure is acceptable
+
+Use this when operations are independent and you want to handle successes and failures individually.
+
+```ts
+// lib/notifications.ts
+
+type EmailResult =
+  | { status: "fulfilled"; value: { messageId: string } }
+  | { status: "rejected"; reason: Error };
+
+async function sendBulkNotifications(
+  userIds: string[],
+): Promise<{ sent: string[]; failed: string[] }> {
+  const results = await Promise.allSettled(
+    userIds.map((id) =>
+      fetch("/api/email/send", {
+        method: "POST",
+        body: JSON.stringify({ userId: id }),
+        headers: { "Content-Type": "application/json" },
+      }).then((res) => {
+        if (!res.ok) throw new Error(`Failed for user ${id}: ${res.status}`);
+        return res.json();
+      }),
+    ),
+  );
+
+  const sent: string[] = [];
+  const failed: string[] = [];
+
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled") {
+      sent.push(userIds[index]);
+    } else {
+      // result.reason is the thrown Error
+      console.error(result.reason.message);
+      failed.push(userIds[index]);
+    }
+  });
+
+  return { sent, failed };
+}
+```
+
+---
+
+### `Promise.any` — First successful response wins
+
+Use this for redundancy: try multiple sources and use whichever responds successfully first.
+
+```ts
+// lib/geo.ts
+
+interface GeoLocation {
+  lat: number;
+  lng: number;
+  city: string;
+}
+
+async function resolveLocation(ip: string): Promise<GeoLocation> {
+  try {
+    // Race three geolocation providers — use the first successful one
+    const location = await Promise.any([
+      fetch(`https://provider-a.example.com/geo?ip=${ip}`).then((r) =>
+        r.json(),
+      ),
+      fetch(`https://provider-b.example.com/geo?ip=${ip}`).then((r) =>
+        r.json(),
+      ),
+      fetch(`https://provider-c.example.com/geo?ip=${ip}`).then((r) =>
+        r.json(),
+      ),
+    ]);
+
+    return location as GeoLocation;
+  } catch (error) {
+    // Promise.any throws AggregateError when ALL promises reject
+    if (error instanceof AggregateError) {
+      // error.errors is an array of all individual rejection reasons
+      const messages = error.errors.map((e: Error) => e.message).join(", ");
+      throw new Error(`All geolocation providers failed: ${messages}`);
+    }
+    throw error;
+  }
+}
+```
+
+<Callout type="info">
+  Always handle `AggregateError` when using `Promise.any`. It's the only
+  combinator that throws this special error type, and it contains every
+  individual failure in `error.errors`.
+</Callout>
+
+---
+
+### `Promise.race` — Timeout pattern
+
+`Promise.race` is most practically used to enforce deadlines on async operations.
+
+```ts
+// lib/timeout.ts
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  const timeout = new Promise<never>((_, reject) =>
+    // Use a named error so callers can distinguish timeouts from other failures
+    setTimeout(
+      () => reject(new Error(`Operation timed out after ${ms}ms`)),
+      ms,
+    ),
+  );
+
+  return Promise.race([promise, timeout]);
+}
+
+// Usage
+async function fetchWithDeadline(url: string): Promise<unknown> {
+  try {
+    const data = await withTimeout(
+      fetch(url).then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      }),
+      5000, // 5 second deadline
+    );
+    return data;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("timed out")) {
+      // Handle timeout specifically
+      throw new Error(`Request to ${url} exceeded the 5s deadline`);
+    }
+    throw error;
+  }
+}
+```
+
+<Callout type="warn">
+  `Promise.race` does not cancel the losing promises — they continue running in
+  the background. For fetch requests, pass an `AbortController` signal to
+  actually cancel the underlying HTTP request when the race is won.
+</Callout>
+
+---
+
+### Combining `AbortController` with `Promise.race` (production pattern)
+
+```ts
+// lib/abortable-fetch.ts
+
+async function fetchWithAbortableTimeout(
+  url: string,
+  timeoutMs: number,
+): Promise<unknown> {
+  const controller = new AbortController();
+
+  const timeout = setTimeout(() => {
+    // Actually cancels the in-flight HTTP request
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`Request to ${url} was aborted after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout); // Always clean up the timer
+  }
+}
+```
+
+---
+
+## Real-World Use Case
+
+In a Next.js App Router e-commerce application, the product detail page needs to load the product, the logged-in user's cart, and their saved wishlist. These are three independent API calls.
+
+- Use **`Promise.all`** if the page can't render without all three (e.g., you need the cart to render the "Add to Cart" button state correctly).
+- Use **`Promise.allSettled`** if the wishlist is optional — a failed wishlist fetch shouldn't break the whole page; you can just render the heart icon in its default empty state.
+- Use **`Promise.any`** if you have a CDN and an origin server both capable of serving product data and want the fastest response.
+
+```tsx
+// app/products/[slug]/page.tsx
+
+import { notFound } from "next/navigation";
+
+export default async function ProductPage({
+  params,
+}: {
+  params: { slug: string };
+}) {
+  // Product is critical; cart is required; wishlist is optional
+  const [productAndCart, wishlistResult] = await Promise.all([
+    // These two must both succeed
+    Promise.all([
+      fetchProduct(params.slug),
+      fetchCart(), // throws if not authenticated
+    ]),
+    // This one is allowed to fail silently
+    fetchWishlist().then(
+      (data) => ({ status: "fulfilled" as const, value: data }),
+      (error) => ({ status: "rejected" as const, reason: error }),
+    ),
+  ]);
+
+  const [product, cart] = productAndCart;
+
+  if (!product) notFound();
+
+  const wishlistItems =
+    wishlistResult.status === "fulfilled" ? wishlistResult.value : [];
+
+  return <ProductView product={product} cart={cart} wishlist={wishlistItems} />;
+}
+```
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Using `Promise.all` when partial failure is acceptable**
+
+If you fire 10 requests with `Promise.all` and one fails, you lose all 10 results. For independent side effects like sending emails or writing logs, always reach for `Promise.allSettled`.
+
+**2. Not handling `AggregateError` from `Promise.any`**
+
+`Promise.any` throws an `AggregateError` — not a regular `Error` — when all promises reject. If your catch block does `error.message`, you'll get `"All promises were rejected"`, not the actual individual failure reasons. Always inspect `error.errors`.
+
+**3. Forgetting that `Promise.race` doesn't cancel losers**
+
+Winning the race doesn't stop the other promises. If they're fetch requests, they keep consuming bandwidth and server resources. Pair `Promise.race`-based timeouts with `AbortController` to actually clean up.
+
+**4. Sequential `await` instead of parallel combinators**
+
+```ts
+// ❌ This takes 3x as long — each await blocks the next
+const user = await fetchUser(id);
+const orders = await fetchOrders(id);
+const prefs = await fetchPreferences(id);
+
+// ✅ All three fire at the same time
+const [user, orders, prefs] = await Promise.all([
+  fetchUser(id),
+  fetchOrders(id),
+  fetchPreferences(id),
+]);
+```
+
+**5. Swallowing errors in `.allSettled` without logging**
+
+`allSettled` never rejects, which makes it easy to silently lose errors. Always log or report rejected results, even when partial success is acceptable.
+
+---
+
+## Summary
+
+`Promise.all` is the right default for parallel operations where every result is needed — one rejection fails the whole batch. `Promise.allSettled` is for independent operations where partial failure is acceptable; it never rejects and gives you a result object for each promise. `Promise.any` returns the first success and throws `AggregateError` only when every promise fails — useful for redundancy patterns. `Promise.race` settles on the first outcome, making it ideal for timeout enforcement, but always pair it with `AbortController` to cancel losing requests. Matching the right combinator to your error tolerance is what separates resilient async code from fragile code.
