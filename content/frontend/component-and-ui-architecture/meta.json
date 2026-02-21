@@ -1,0 +1,4 @@
+{
+  "title": "Component & UI Architecture",
+  "pages": ["suspense-boundaries", "server-components", "edge-rendering"]
+}

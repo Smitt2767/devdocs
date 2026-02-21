@@ -1,0 +1,253 @@
+---
+title: Server Components
+description: A guide to React Server Components in Next.js App Router — what they are, how they work, and how to use them correctly.
+---
+
+## Overview
+
+React Server Components (RSC) are components that render exclusively on the server. They never ship their component code to the browser, which means no JavaScript bundle overhead for the client. The output — plain HTML — is what gets sent.
+
+This is a fundamental shift from the traditional React model where all components, even ones that just fetch data and render static markup, end up in the client bundle.
+
+In Next.js App Router, **every component is a Server Component by default**. You opt into client-side behavior explicitly with `'use client'`.
+
+<Callout type="info">
+  Server Components are not the same as SSR. SSR runs your component on the
+  server *and* hydrates it on the client. Server Components render on the server
+  and are never hydrated — there's no client-side JS for them at all.
+</Callout>
+
+---
+
+## How It Works
+
+When a request hits your Next.js app, the server renders your Server Component tree. During this render, components can:
+
+- **Directly access server-only resources** — databases, filesystems, internal APIs — without going through a public API route.
+- **Keep secrets on the server** — API keys, credentials, internal logic never touch the browser.
+- **Reduce bundle size** — libraries used only in Server Components (e.g., an ORM, a markdown parser) are not included in the client bundle.
+
+The rendered output travels to the client as a special React payload (RSC Payload), not raw HTML. Next.js combines this with streaming to progressively deliver UI.
+
+Think of it like a restaurant kitchen: Server Components are the kitchen — all the prep work (data fetching, heavy computation) happens there. The client only receives the finished plate, not the recipes or ingredients.
+
+**Where the boundary lives:**
+
+```
+Server Component (default)
+  └── can render → Server Components ✅
+  └── can render → Client Components ✅
+  └── can NOT use → useState, useEffect, browser APIs ❌
+
+Client Component ('use client')
+  └── can render → Client Components ✅
+  └── can NOT render → Server Components directly ❌
+  └── CAN receive Server Components as props/children ✅
+```
+
+---
+
+## Code Examples
+
+### Basic Server Component with Data Fetching
+
+```tsx
+// app/products/page.tsx
+// No 'use client' — this is a Server Component by default
+
+import { db } from "@/lib/db"; // direct DB access, safe on server
+
+export default async function ProductsPage() {
+  // fetch happens on the server at request time
+  const products = await db.product.findMany({
+    orderBy: { createdAt: "desc" },
+    take: 20,
+  });
+
+  return (
+    <main className="p-8">
+      <h1 className="text-2xl font-bold mb-4">Products</h1>
+      <ul className="space-y-2">
+        {products.map((product) => (
+          <li key={product.id} className="border rounded p-4">
+            <span className="font-medium">{product.name}</span>
+            <span className="ml-4 text-gray-500">${product.price}</span>
+          </li>
+        ))}
+      </ul>
+    </main>
+  );
+}
+```
+
+No `useEffect`, no `fetch('/api/products')`, no API route needed. The DB query runs directly in the component.
+
+---
+
+### Composing Server and Client Components
+
+```tsx
+// app/products/[id]/page.tsx — Server Component
+import { db } from "@/lib/db";
+import { AddToCartButton } from "@/components/AddToCartButton"; // Client Component
+
+interface Props {
+  params: { id: string };
+}
+
+export default async function ProductPage({ params }: Props) {
+  const product = await db.product.findUnique({
+    where: { id: params.id },
+  });
+
+  if (!product) return <p>Product not found.</p>;
+
+  return (
+    <div className="p-8 max-w-lg">
+      <h1 className="text-3xl font-bold">{product.name}</h1>
+      <p className="mt-2 text-gray-600">{product.description}</p>
+      <p className="mt-4 text-xl font-semibold">${product.price}</p>
+
+      {/* Client Component receives only serializable props */}
+      <AddToCartButton productId={product.id} productName={product.name} />
+    </div>
+  );
+}
+```
+
+```tsx
+// components/AddToCartButton.tsx — Client Component
+"use client";
+
+import { useState } from "react";
+
+interface Props {
+  productId: string;
+  productName: string;
+}
+
+export function AddToCartButton({ productId, productName }: Props) {
+  const [added, setAdded] = useState(false);
+
+  async function handleClick() {
+    await fetch("/api/cart", {
+      method: "POST",
+      body: JSON.stringify({ productId }),
+    });
+    setAdded(true);
+  }
+
+  return (
+    <button
+      onClick={handleClick}
+      className="mt-6 px-6 py-2 bg-blue-600 text-white rounded"
+    >
+      {added ? `${productName} added!` : "Add to Cart"}
+    </button>
+  );
+}
+```
+
+The Server Component handles data fetching; the Client Component handles interactivity. Clean separation.
+
+---
+
+### Passing Server Components as Children (The Composition Pattern)
+
+```tsx
+// components/Shell.tsx — Client Component that accepts RSC children
+"use client";
+
+import { useState } from "react";
+
+export function CollapsibleShell({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState(true);
+
+  return (
+    <div>
+      <button onClick={() => setOpen((o) => !o)}>
+        {open ? "Collapse" : "Expand"}
+      </button>
+      {open && <div>{children}</div>}
+    </div>
+  );
+}
+```
+
+```tsx
+// app/dashboard/page.tsx — Server Component
+import { CollapsibleShell } from "@/components/Shell";
+import { db } from "@/lib/db";
+
+export default async function DashboardPage() {
+  const stats = await db.stats.getLatest();
+
+  return (
+    // Server Component passed as children into a Client Component — this is valid ✅
+    <CollapsibleShell>
+      <p>Total orders: {stats.orders}</p>
+      <p>Revenue: ${stats.revenue}</p>
+    </CollapsibleShell>
+  );
+}
+```
+
+<Callout type="info">
+  This pattern works because `children` is already rendered by the server before
+  being passed into the Client Component. The Client Component receives an
+  opaque React node, not raw server logic.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+In an e-commerce application, your product listing page needs to:
+
+1. Query the database for products (server-only concern)
+2. Render a filterable, sortable list (client interactivity needed)
+3. Show an "Add to Cart" button that updates global cart state
+
+You'd implement this as a Server Component page that fetches products directly from the database, passes the data as props to a Client Component that handles filtering/sorting state, and wraps the cart button in its own small Client Component. The result: the data fetching logic, DB credentials, and ORM never touch the client bundle. Only the thin interactive layer is sent as JavaScript.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Adding `'use client'` to everything**
+
+Many developers reflexively add `'use client'` out of habit from the Pages Router era. This defeats the purpose of RSC and bloats your bundle. Only add it where you need `useState`, `useEffect`, browser APIs, or event handlers.
+
+**2. Trying to pass non-serializable props to Client Components**
+
+Server Components can pass data to Client Components, but that data must be serializable (strings, numbers, plain objects, arrays). You cannot pass functions, class instances, Dates directly, or Promises as props across the boundary.
+
+```tsx
+// ❌ This will error — functions are not serializable
+<ClientComponent onFetch={() => db.query()} />
+
+// ✅ Fetch on the server, pass the result
+const data = await db.query()
+<ClientComponent data={data} />
+```
+
+**3. Importing server-only modules in Client Components**
+
+If you import a file that uses `fs`, `crypto`, or a DB client inside a Client Component, Next.js will try to bundle it for the browser and fail. Use the `server-only` package to guard against accidental imports.
+
+```ts
+// lib/db.ts
+import "server-only"; // throws a build error if imported in a Client Component
+import { PrismaClient } from "@prisma/client";
+export const db = new PrismaClient();
+```
+
+**4. Confusing Server Components with API Routes**
+
+You no longer need an API route just to fetch data for your own UI. Server Components can query the database directly. API routes are for external consumers, webhooks, or mutations triggered from the client.
+
+---
+
+## Summary
+
+React Server Components render on the server and send zero JavaScript to the client for their own logic. In Next.js App Router, all components are Server Components by default — `'use client'` is the explicit opt-in for interactivity. Server Components can directly access databases, APIs, and secrets without an intermediary API layer. The key design principle is to push interactivity as far toward the leaves of your component tree as possible, keeping the heavy lifting on the server. Compose Server and Client Components together using the children prop pattern when you need a Client Component wrapper around server-fetched content.

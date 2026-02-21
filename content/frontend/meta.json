@@ -1,5 +1,9 @@
 {
   "title": "Frontend",
   "root": true,
-  "pages": ["index", "rendering-and-browser-pipeline"]
+  "pages": [
+    "index",
+    "rendering-and-browser-pipeline",
+    "component-and-ui-architecture"
+  ]
 }

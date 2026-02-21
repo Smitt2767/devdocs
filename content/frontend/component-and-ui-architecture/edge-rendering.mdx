@@ -1,0 +1,167 @@
+---
+title: Edge Rendering
+description: A guide to rendering content at the network edge using runtimes like Vercel Edge and Cloudflare Workers, with a focus on Next.js App Router patterns.
+---
+
+## Overview
+
+Edge rendering means running your server-side code on infrastructure that lives geographically close to your users — not in a single centralized region, but distributed across dozens of locations worldwide.
+
+Instead of a request from Tokyo hitting a server in Virginia, it hits a node in Tokyo (or Osaka). The result: dramatically lower latency for dynamic content.
+
+In Next.js App Router, you opt a route into the edge runtime with a single export. The tradeoff is a constrained runtime — no full Node.js APIs, smaller bundle limits, but fast cold starts and global distribution.
+
+<Callout type="info">
+  Edge rendering is not the same as a CDN serving static files. The edge
+  *executes code* — it can read cookies, fetch data, rewrite responses, and
+  return personalized HTML dynamically.
+</Callout>
+
+---
+
+## How It Works
+
+By default, Next.js runs server-side code in a Node.js runtime on a single server region. When you switch to the edge runtime, your route handler or page is compiled to a lightweight format (based on the Web Standards API — `Request`, `Response`, `fetch`) and deployed to every edge location in your provider's network.
+
+The request lifecycle looks like this:
+
+1. User makes a request.
+2. The CDN/edge network routes it to the nearest edge node.
+3. Your code runs there — reading headers, cookies, env vars — and returns a `Response`.
+4. The user receives HTML or data with minimal round-trip time.
+
+Because the edge runtime is stripped-down (no `fs`, no native modules, limited `crypto`), cold starts are near-zero. But it also means you can't use everything you'd use in a normal Node.js server.
+
+<Callout type="warn">
+  The edge runtime does **not** support Node.js built-ins like `fs`, `path`,
+  `child_process`, or most native npm packages. If your route needs those, stick
+  with the Node.js runtime.
+</Callout>
+
+---
+
+## Code Examples
+
+### Edge Route Handler
+
+```ts
+// app/api/geo/route.ts
+export const runtime = "edge"; // opt this route into the edge runtime
+
+export async function GET(request: Request) {
+  // Access geo headers injected by Vercel's edge network
+  const country = request.headers.get("x-vercel-ip-country") ?? "Unknown";
+  const city = request.headers.get("x-vercel-ip-city") ?? "Unknown";
+
+  return Response.json({
+    message: `Hello from ${city}, ${country}`,
+  });
+}
+```
+
+### Edge Middleware (Next.js)
+
+Middleware in Next.js _always_ runs on the edge runtime — no opt-in needed.
+
+```ts
+// middleware.ts (project root)
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+
+export function middleware(request: NextRequest) {
+  const country = request.geo?.country ?? "US";
+
+  // Redirect users from Germany to a localized route
+  if (country === "DE") {
+    return NextResponse.redirect(new URL("/de", request.url));
+  }
+
+  return NextResponse.next();
+}
+
+export const config = {
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+};
+```
+
+### Edge Server Component Page
+
+```tsx
+// app/dashboard/page.tsx
+export const runtime = "edge";
+
+async function getUserData(userId: string) {
+  // fetch() is fully supported on the edge — use it instead of Node http
+  const res = await fetch(`https://api.example.com/users/${userId}`, {
+    headers: { Authorization: `Bearer ${process.env.API_SECRET}` },
+    // Next.js extended fetch: opt out of caching for dynamic data
+    cache: "no-store",
+  });
+
+  if (!res.ok) throw new Error("Failed to fetch user");
+  return res.json();
+}
+
+export default async function DashboardPage() {
+  const user = await getUserData("user_abc123");
+
+  return (
+    <main>
+      <h1>Welcome, {user.name}</h1>
+      <p>Last login: {new Date(user.lastLogin).toLocaleDateString()}</p>
+    </main>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+**Personalized storefronts at scale.**
+
+An e-commerce platform serves millions of users across Asia, Europe, and the Americas. Product pages need to be dynamic — showing local currency, regional promotions, and inventory per warehouse.
+
+With a Node.js-only setup, all requests funnel through one region. Users in Singapore wait on a round-trip to us-east-1 for every page load.
+
+By opting product pages into the edge runtime and reading geo headers or a session cookie, the team serves localized, dynamic HTML from the nearest edge node. Latency drops from ~300ms to ~40ms for international users, with no static pre-generation required.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Importing Node.js-only packages into edge routes.**
+
+If you import a library that uses `fs`, `Buffer` (outside Web APIs), or native bindings, your edge build will fail or silently break. Always check whether a package explicitly supports the edge/WinterCG runtime.
+
+```ts
+// ❌ This will break in the edge runtime
+import { readFileSync } from "fs";
+
+// ✅ Use fetch or edge-compatible alternatives
+const data = await fetch("/api/config").then((r) => r.json());
+```
+
+**2. Expecting full environment variable access.**
+
+Only environment variables explicitly exposed to the edge runtime are available. In Next.js, server-only vars (non-`NEXT_PUBLIC_`) work, but you must ensure they're provisioned in your edge deployment environment, not just `.env.local`.
+
+**3. Using edge runtime for CPU-heavy or long-running tasks.**
+
+Edge functions have strict CPU time limits (often 50ms–100ms). Tasks like image processing, PDF generation, or large database queries belong in a Node.js runtime or a background job queue — not on the edge.
+
+<Callout type="warn">
+  Edge functions are optimized for **fast, lightweight logic** — auth checks,
+  redirects, header manipulation, and simple data fetching. Don't move your
+  entire API to the edge just because you can.
+</Callout>
+
+**4. Conflating edge rendering with static generation.**
+
+Edge-rendered routes run on every request. They are dynamic by nature. If your content rarely changes, consider ISR (Incremental Static Regeneration) or static generation with revalidation instead — they'll be faster and cheaper.
+
+---
+
+## Summary
+
+Edge rendering executes server-side code at geographically distributed nodes, reducing latency for users worldwide. In Next.js App Router, you opt routes into the edge runtime with `export const runtime = 'edge'`, and middleware runs on the edge by default. The edge runtime is based on Web Standard APIs — not full Node.js — so native modules and CPU-intensive work are off the table. It's best suited for personalization, geo-routing, auth checks, and lightweight dynamic responses. Used correctly, edge rendering closes the gap between static performance and dynamic flexibility.

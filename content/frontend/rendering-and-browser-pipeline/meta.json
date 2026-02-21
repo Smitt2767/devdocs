@@ -3,6 +3,7 @@
   "pages": [
     "hydration",
     "partial-hydration",
+    "selective-hydration",
     "streaming-ssr",
     "concurrent-rendering",
     "time-slicing",
