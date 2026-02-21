@@ -1,17 +1,5 @@
 {
   "title": "Frontend",
   "root": true,
-  "pages": [
-    "index",
-    "rendering",
-    "performance",
-    "javascript",
-    "frameworks",
-    "state-management",
-    "styling",
-    "build-tooling",
-    "browser-web-apis",
-    "accessibility",
-    "testing"
-  ]
+  "pages": ["index"]
 }
