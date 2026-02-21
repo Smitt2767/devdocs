@@ -246,7 +246,7 @@ export const getCachedFeaturedProducts = unstable_cache(
 
 **E-commerce product catalog with an admin dashboard.**
 
-Product listings are read far more than they're written. You cache them aggressively with a 5-minute TTL to handle traffic spikes. When a merchant updates a product price or marks something out of stock, the admin dashboard calls a Server Action that fires `revalidateTag('products')` and `revalidateTag(`product-${id}`)`. Customers see the correct price within seconds, not minutes. The CMS that manages marketing banners uses a webhook to call your `/api/revalidate` endpoint on every publish, so the homepage banner updates instantly without a full deploy.
+Product listings are read far more than they're written. You cache them aggressively with a 5-minute TTL to handle traffic spikes. When a merchant updates a product price or marks something out of stock, the admin dashboard calls a Server Action that fires `revalidateTag('products')` and `revalidateTag('product-<id>')`. Customers see the correct price within seconds, not minutes. The CMS that manages marketing banners uses a webhook to call your `/api/revalidate` endpoint on every publish, so the homepage banner updates instantly without a full deploy.
 
 ---
 
