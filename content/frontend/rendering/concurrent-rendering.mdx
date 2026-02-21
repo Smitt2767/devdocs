@@ -1,0 +1,201 @@
+---
+title: Concurrent Rendering
+description: How React's concurrent rendering model enables interruptible, prioritized work to keep UIs responsive during complex updates.
+---
+
+## Overview
+
+Concurrent Rendering is React's ability to prepare multiple versions of the UI at the same time — and to interrupt, pause, resume, or abandon that work based on priority. Before React 18, rendering was synchronous and blocking: once React started rendering a tree, nothing could interrupt it until it finished. This caused janky UIs when expensive renders held up user interactions.
+
+With Concurrent Rendering, React can start rendering an update, pause midway if something more urgent comes in (like a keystroke), handle the urgent work, and then resume where it left off. From the user's perspective, the interface stays responsive.
+
+<Callout type="info">
+  Concurrent Rendering is not a feature you call directly. It's a capability
+  unlocked by using the concurrent root (`createRoot`) and opting into
+  concurrent features like `useTransition`, `useDeferredValue`, and `Suspense`.
+</Callout>
+
+---
+
+## How It Works
+
+React builds a "work-in-progress" fiber tree in memory. In legacy (synchronous) mode, React committed this tree to the DOM in one uninterruptible pass. In concurrent mode, React assigns **lanes** — a priority system — to each update.
+
+- **Urgent updates** (typing, clicking, pressing) get high-priority lanes and render synchronously.
+- **Transition updates** (navigation, data-fetching results, large list re-renders) get low-priority lanes and can be interrupted.
+
+React's scheduler runs work in small chunks, yielding control back to the browser between chunks. If a higher-priority update arrives mid-chunk, React discards the low-priority work-in-progress, handles the urgent update, then restarts the low-priority work.
+
+Think of it like a chef who pauses plating a complicated dish the moment a fire alarm goes off, handles the emergency, and then returns to the dish.
+
+---
+
+## Code Examples
+
+### 1. Marking a State Update as a Non-Urgent Transition
+
+Without `useTransition`, filtering a large list on every keystroke blocks the input field from feeling responsive.
+
+```tsx
+// app/search/page.tsx
+"use client";
+
+import { useState, useTransition } from "react";
+import { ProductList } from "@/components/ProductList";
+import { filterProducts } from "@/lib/products";
+
+export default function SearchPage() {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState(filterProducts(""));
+  const [isPending, startTransition] = useTransition();
+
+  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const value = e.target.value;
+    setQuery(value); // urgent: update the input immediately
+
+    startTransition(() => {
+      // non-urgent: computing filtered results can be deferred
+      setResults(filterProducts(value));
+    });
+  }
+
+  return (
+    <div>
+      <input
+        value={query}
+        onChange={handleChange}
+        placeholder="Search products..."
+        className="border p-2 w-full"
+      />
+      {isPending && <p className="text-sm text-gray-400">Updating results…</p>}
+      <ProductList items={results} />
+    </div>
+  );
+}
+```
+
+### 2. Deferring an Expensive Derived Value with `useDeferredValue`
+
+Use this when you don't own the state setter — for example, when a value comes from a parent prop or context.
+
+```tsx
+// app/dashboard/page.tsx
+"use client";
+
+import { useDeferredValue, useState } from "react";
+import { HeavyChart } from "@/components/HeavyChart";
+
+export default function DashboardPage() {
+  const [metric, setMetric] = useState("revenue");
+
+  // The deferred value lags behind `metric` intentionally.
+  // React renders with the stale value first, keeping the UI responsive,
+  // then re-renders with the new value when capacity is available.
+  const deferredMetric = useDeferredValue(metric);
+
+  return (
+    <div>
+      <select
+        value={metric}
+        onChange={(e) => setMetric(e.target.value)}
+        className="border p-2"
+      >
+        <option value="revenue">Revenue</option>
+        <option value="sessions">Sessions</option>
+        <option value="conversions">Conversions</option>
+      </select>
+
+      {/* HeavyChart only re-renders with the deferred value */}
+      <HeavyChart metric={deferredMetric} />
+    </div>
+  );
+}
+```
+
+### 3. Suspense as a Concurrent Boundary
+
+`Suspense` integrates directly with concurrent rendering. While a component is suspended (e.g., waiting on data), React can render other parts of the tree and show the fallback without blocking.
+
+```tsx
+// app/profile/[id]/page.tsx
+import { Suspense } from "react";
+import { UserCard } from "@/components/UserCard";
+import { ActivityFeed } from "@/components/ActivityFeed";
+
+export default function ProfilePage({ params }: { params: { id: string } }) {
+  return (
+    <div className="grid grid-cols-2 gap-4">
+      {/* Each Suspense boundary is independent — one loading state won't block the other */}
+      <Suspense fallback={<p>Loading profile…</p>}>
+        <UserCard userId={params.id} />
+      </Suspense>
+
+      <Suspense fallback={<p>Loading activity…</p>}>
+        <ActivityFeed userId={params.id} />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+**E-commerce search with instant filtering**
+
+A product catalog page has 10,000 items. As a user types in a search box, the app needs to filter and re-render the list. Without concurrent rendering, each keystroke triggers a heavy synchronous render that delays the input from updating visually — the UI feels frozen.
+
+With `useTransition`, the input update is treated as urgent (renders immediately) while the list re-render is treated as a transition (deferred, interruptible). The user sees their keystrokes reflected instantly, and the results update a few milliseconds later — or are superseded by the next keystroke before they ever commit, saving wasted work entirely.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Putting urgent UI state inside `startTransition`**
+
+`startTransition` is for work that can be deferred. If you wrap `setQuery` (the controlled input value) inside it, the input will lag visibly. Only wrap the expensive downstream update.
+
+```tsx
+// ❌ Wrong — input will feel delayed
+startTransition(() => {
+  setQuery(value);
+  setResults(filterProducts(value));
+});
+
+// ✅ Correct — input is urgent, filtering is deferred
+setQuery(value);
+startTransition(() => setResults(filterProducts(value)));
+```
+
+**2. Assuming `isPending` means the transition is "loading" data**
+
+`isPending` from `useTransition` only reflects that React is still working on the transition render. It is not a data-fetching loading state. Don't conflate it with async fetch status — use Suspense or separate loading state for that.
+
+**3. Forgetting that concurrent rendering can render a component multiple times**
+
+Because React may start, discard, and restart renders, side effects inside the render phase (outside `useEffect`) can fire more than once. Never put API calls or mutations directly in the component body — keep them in event handlers or `useEffect`.
+
+```tsx
+// ❌ This might run multiple times during a transition
+function ExpensiveComponent() {
+  analytics.track("component-rendered"); // side effect in render — dangerous
+  return <div>...</div>;
+}
+```
+
+**4. Using legacy `ReactDOM.render` and expecting concurrent features to work**
+
+Concurrent features only activate when you use `createRoot`. In Next.js App Router, this is handled for you. But in custom setups, using the old `ReactDOM.render` silently falls back to legacy synchronous mode.
+
+<Callout type="warn">
+  In Next.js App Router, you never call `createRoot` manually — it's already
+  using the concurrent root. Do not add a custom `_app.tsx` bootstrapping
+  pattern from the Pages Router.
+</Callout>
+
+---
+
+## Summary
+
+Concurrent Rendering lets React interrupt, pause, and reprioritize rendering work so that urgent interactions (like typing) are never blocked by expensive updates (like filtering a large list). You opt into it using `useTransition` to mark low-priority state updates, `useDeferredValue` to defer derived values, and `Suspense` to declaratively handle async rendering boundaries. The key mental model is **priority lanes**: React assigns urgency to each update and schedules work accordingly. Side effects must stay out of the render phase, since React may render a component multiple times before committing.

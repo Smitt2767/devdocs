@@ -1,0 +1,229 @@
+---
+title: Streaming SSR
+description: How Next.js App Router streams HTML to the client incrementally using React Suspense, reducing time-to-first-byte and improving perceived performance.
+---
+
+## Overview
+
+Streaming SSR lets your server send HTML to the browser in chunks — as each piece is ready — instead of waiting for the entire page to be built before sending anything.
+
+Traditional SSR has a waterfall problem: the server fetches all data, renders the full page, then sends the whole HTML document at once. If one slow query takes 800ms, the user sees nothing for 800ms. With streaming, fast parts of your UI appear immediately while slower parts follow as they resolve.
+
+Next.js App Router enables streaming by default through React's built-in `Suspense` component. You wrap slow components in `<Suspense>`, provide a fallback (like a skeleton), and React flushes the ready HTML first — then streams in the deferred content.
+
+<Callout type="info">
+  Streaming SSR is only available in the App Router (`app/`). The Pages Router
+  uses a static HTML flush model and does not support incremental streaming.
+</Callout>
+
+---
+
+## How It Works
+
+When a request hits your Next.js server, React begins rendering your component tree. When it encounters a `<Suspense>` boundary wrapping an async component, it:
+
+1. Immediately sends the fallback UI (e.g., a skeleton loader) as part of the initial HTML flush.
+2. Continues rendering the rest of the tree that doesn't depend on the suspended component.
+3. When the suspended component's data resolves, React renders it server-side and streams the resulting HTML chunk to the browser.
+4. A small inline `<script>` tag tells the browser where to "swap in" the new content, replacing the fallback.
+
+The browser receives a valid, progressively-enhanced HTML document throughout this process — no client-side JavaScript is required to see the initial content.
+
+Think of it like a restaurant serving courses as they're ready rather than making you wait for every dish to be plated before bringing anything to the table.
+
+---
+
+## Code Examples
+
+### Basic Page with Streaming
+
+```tsx
+// app/products/page.tsx
+import { Suspense } from "react";
+import { ProductGrid } from "@/components/product-grid";
+import { ProductGridSkeleton } from "@/components/skeletons";
+import { FeaturedBanner } from "@/components/featured-banner";
+
+// This component is fast — renders immediately
+async function FeaturedBannerSection() {
+  const featured = await getFeaturedProduct(); // fast query, ~20ms
+  return <FeaturedBanner product={featured} />;
+}
+
+// This component is slow — wrapped in Suspense
+async function ProductSection() {
+  const products = await getProducts(); // slow query, ~600ms
+  return <ProductGrid products={products} />;
+}
+
+export default function ProductsPage() {
+  return (
+    <main>
+      {/* Rendered and flushed immediately */}
+      <Suspense fallback={<div>Loading banner...</div>}>
+        <FeaturedBannerSection />
+      </Suspense>
+
+      {/* Fallback shown immediately; real content streamed in ~600ms */}
+      <Suspense fallback={<ProductGridSkeleton />}>
+        <ProductSection />
+      </Suspense>
+    </main>
+  );
+}
+```
+
+### Nested Suspense Boundaries
+
+Use nested boundaries to progressively reveal content at multiple granularities.
+
+```tsx
+// app/dashboard/page.tsx
+import { Suspense } from "react";
+
+async function RevenueChart() {
+  const data = await fetchRevenueData(); // ~400ms
+  return <Chart data={data} />;
+}
+
+async function RecentOrders() {
+  const orders = await fetchRecentOrders(); // ~700ms
+  return <OrderTable orders={orders} />;
+}
+
+async function UserGreeting() {
+  const user = await fetchCurrentUser(); // ~50ms
+  return <h1>Welcome back, {user.name}</h1>;
+}
+
+export default function DashboardPage() {
+  return (
+    <div className="dashboard">
+      {/* Appears almost instantly */}
+      <Suspense fallback={<p>Loading...</p>}>
+        <UserGreeting />
+      </Suspense>
+
+      <div className="grid">
+        {/* Appears at ~400ms */}
+        <Suspense fallback={<ChartSkeleton />}>
+          <RevenueChart />
+        </Suspense>
+
+        {/* Appears at ~700ms */}
+        <Suspense fallback={<TableSkeleton />}>
+          <RecentOrders />
+        </Suspense>
+      </div>
+    </div>
+  );
+}
+```
+
+### Loading UI Convention
+
+Next.js provides a `loading.tsx` file convention as a shorthand for wrapping an entire page segment in `<Suspense>`.
+
+```tsx
+// app/dashboard/loading.tsx
+// This automatically wraps app/dashboard/page.tsx in a Suspense boundary
+export default function DashboardLoading() {
+  return (
+    <div className="dashboard-skeleton">
+      <div className="skeleton h-8 w-48" /> {/* greeting placeholder */}
+      <div className="skeleton h-64 w-full" /> {/* chart placeholder */}
+    </div>
+  );
+}
+```
+
+<Callout type="info">
+  `loading.tsx` applies to the entire route segment. For finer-grained control — where different parts of the page stream independently — use explicit `<Suspense>` boundaries as shown above.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+**E-commerce product listing page**
+
+A product page might need to load:
+
+- The page shell (nav, layout) — instant
+- Featured promotions — fast (~30ms, cached CDN data)
+- Product grid — moderate (~300ms, database query)
+- Personalized recommendations — slow (~900ms, ML service call)
+
+Without streaming, the user waits ~900ms to see anything. With streaming and `<Suspense>` boundaries around each section, the shell and promotions appear near-instantly, the product grid follows at 300ms, and recommendations fill in last. The user can start browsing products 600ms sooner.
+
+This also improves Core Web Vitals: TTFB (Time to First Byte) drops because the server starts sending immediately, and LCP (Largest Contentful Paint) improves because the main content region renders earlier.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Putting all data fetches at the top of the page component**
+
+```tsx
+// ❌ Bad — waits for ALL data before rendering anything
+export default async function Page() {
+  const [user, products, recommendations] = await Promise.all([
+    fetchUser(),
+    fetchProducts(),
+    fetchRecommendations(), // slowest — blocks everything
+  ]);
+  return <PageContent user={user} products={products} recs={recommendations} />;
+}
+
+// ✅ Good — push fetches down into async Server Components
+export default function Page() {
+  return (
+    <>
+      <Suspense fallback={<ProductSkeleton />}>
+        <ProductSection /> {/* fetches internally */}
+      </Suspense>
+      <Suspense fallback={<RecsSkeleton />}>
+        <RecommendationsSection /> {/* fetches internally */}
+      </Suspense>
+    </>
+  );
+}
+```
+
+**2. Forgetting that `loading.tsx` only covers the initial navigation**
+
+`loading.tsx` shows during the initial server render of a segment. If you navigate client-side to the same route again, Next.js may not re-trigger the loading state unless the cache is invalidated. Don't rely on `loading.tsx` as a general loading indicator for re-fetches — use React Query, SWR, or `useTransition` for that.
+
+**3. Wrapping too much in a single Suspense boundary**
+
+```tsx
+// ❌ Bad — one boundary means everything waits on the slowest child
+<Suspense fallback={<BigSkeleton />}>
+  <FastComponent />    {/* ready in 50ms, stuck waiting */}
+  <SlowComponent />   {/* ready in 800ms */}
+</Suspense>
+
+// ✅ Good — independent boundaries stream independently
+<Suspense fallback={<FastSkeleton />}>
+  <FastComponent />
+</Suspense>
+<Suspense fallback={<SlowSkeleton />}>
+  <SlowComponent />
+</Suspense>
+```
+
+**4. Using `'use client'` unnecessarily on components that just display data**
+
+Marking a data-fetching component as a Client Component opts it out of server rendering entirely, breaking streaming for that subtree. Only add `'use client'` when you need browser APIs, event handlers, or React hooks like `useState`/`useEffect`.
+
+<Callout type="warn">
+  Client Components are not streamed the same way — their content is bundled as
+  JavaScript and hydrated on the client. Keep data-fetching components as Server
+  Components to take full advantage of streaming.
+</Callout>
+
+---
+
+## Summary
+
+Streaming SSR in Next.js App Router uses React `Suspense` to send HTML incrementally, so users see content as it becomes ready rather than waiting for the slowest data fetch. You enable it by pushing data fetching into async Server Components and wrapping them in `<Suspense>` with meaningful fallbacks. The `loading.tsx` convention provides a quick shorthand for segment-level loading states, while explicit `<Suspense>` boundaries give you fine-grained control. The key mental shift is moving from "fetch everything, then render" to "render what you can now, stream the rest later." This pattern meaningfully improves TTFB, perceived performance, and Core Web Vitals with minimal added complexity.

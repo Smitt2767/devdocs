@@ -1,0 +1,265 @@
+---
+title: Reconciliation Algorithm
+description: How React's diffing algorithm determines the minimal set of DOM changes needed when your component tree re-renders.
+---
+
+## Overview
+
+When state or props change in a React application, React doesn't immediately reach into the browser's DOM and start making changes. Instead, it builds a new virtual representation of your UI, compares it against the previous one, and then surgically applies only the differences to the real DOM.
+
+This comparison process is called **reconciliation**. The algorithm React uses to perform this diff is what makes React fast — a naïve comparison of two arbitrary trees is O(n³), but React's heuristic algorithm runs in O(n) by making two key assumptions about your component tree.
+
+Understanding reconciliation helps you write components that perform well and avoid subtle bugs caused by unexpected remounts.
+
+## How It Works
+
+React maintains a **fiber tree** — an internal linked-list data structure where each node (a "fiber") represents a component or DOM element. When a re-render is triggered, React builds a new fiber tree called the **work-in-progress tree** and diffs it against the current tree.
+
+React's diffing is governed by two heuristics:
+
+**1. Elements of different types produce entirely different trees.**
+If a `<div>` changes to a `<section>`, React tears down the entire subtree rooted at that node — including all its children and their state — and builds a fresh one. Same rule applies to components: swapping `<UserCard>` for `<AdminCard>` destroys `UserCard`'s state entirely.
+
+**2. The `key` prop is the developer's signal for list identity.**
+When diffing lists of children, React matches old and new elements by their `key`. Without keys, React matches by index, which causes incorrect state associations when items are reordered or inserted.
+
+Think of it like a diff tool for code: it works line by line (element by element at each level of the tree) and doesn't look across levels. If line 1 changes type, it doesn't try to salvage anything below it.
+
+### The Commit Phase
+
+Reconciliation itself is a pure computation — React figures out _what_ needs to change. The actual DOM mutations happen afterward in the **commit phase**, which is synchronous and cannot be interrupted.
+
+```
+Render phase (interruptible):  build work-in-progress tree → diff against current tree → collect effects
+Commit phase (synchronous):    apply DOM mutations → run layout effects → run passive effects
+```
+
+## Code Examples
+
+### Example 1: Type change causes full remount
+
+```tsx
+// app/components/ProfilePanel.tsx
+"use client";
+
+import { useState } from "react";
+
+function EditorPanel() {
+  const [text, setText] = useState("Draft content...");
+  return (
+    <textarea
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      className="w-full h-32 p-2 border rounded"
+    />
+  );
+}
+
+function ViewerPanel() {
+  return <p className="p-2 text-gray-700">Viewing mode — no editor here.</p>;
+}
+
+export default function ProfilePanel() {
+  const [isEditing, setIsEditing] = useState(false);
+
+  return (
+    <div>
+      <button onClick={() => setIsEditing((prev) => !prev)}>
+        {isEditing ? "Stop Editing" : "Edit"}
+      </button>
+
+      {/*
+        When isEditing flips, React swaps between two *different component types*.
+        EditorPanel's local state (the textarea draft) is destroyed on every toggle
+        because React sees a type change at this position in the tree.
+      */}
+      {isEditing ? <EditorPanel /> : <ViewerPanel />}
+    </div>
+  );
+}
+```
+
+<Callout type="warn">
+  Mounting different component types at the same tree position always destroys
+  local state. If you need to preserve state across a conditional, keep the same
+  component type and toggle visibility with CSS or a prop instead.
+</Callout>
+
+### Example 2: Keys control list identity
+
+```tsx
+// app/components/TaskList.tsx
+"use client";
+
+import { useState } from "react";
+
+type Task = { id: string; label: string };
+
+const initialTasks: Task[] = [
+  { id: "task-1", label: "Design mockups" },
+  { id: "task-2", label: "Write tests" },
+  { id: "task-3", label: "Deploy to staging" },
+];
+
+function TaskItem({ label }: { label: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <li
+      onClick={() => setDone((d) => !d)}
+      className={done ? "line-through text-gray-400" : "cursor-pointer"}
+    >
+      {label}
+    </li>
+  );
+}
+
+export default function TaskList() {
+  const [tasks, setTasks] = useState(initialTasks);
+
+  const addUrgentTask = () => {
+    const urgent: Task = { id: "task-urgent", label: "🔥 Fix prod bug" };
+    // Prepend the new task
+    setTasks((prev) => [urgent, ...prev]);
+  };
+
+  return (
+    <div>
+      <button
+        onClick={addUrgentTask}
+        className="mb-2 px-3 py-1 bg-red-500 text-white rounded"
+      >
+        Add Urgent Task
+      </button>
+      <ul>
+        {tasks.map((task) => (
+          /*
+            key={task.id} ties each TaskItem's identity to the task's stable ID.
+            React can reorder, insert, or remove items without confusing
+            one item's "done" state with another's.
+            Using key={index} here would cause the new urgent task to incorrectly
+            "inherit" the checked state of whatever was previously at index 0.
+          */
+          <TaskItem key={task.id} label={task.label} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+### Example 3: Forcing a remount with `key` to reset state
+
+```tsx
+// app/components/VideoPlayer.tsx
+"use client";
+
+import { useState } from "react";
+
+const videos = [
+  { id: "vid-1", src: "/videos/intro.mp4", title: "Introduction" },
+  { id: "vid-2", src: "/videos/deep-dive.mp4", title: "Deep Dive" },
+];
+
+function Player({ src }: { src: string }) {
+  // Imagine this component manages playback position internally
+  return <video src={src} controls className="w-full rounded" />;
+}
+
+export default function VideoPlayer() {
+  const [activeId, setActiveId] = useState(videos[0].id);
+  const activeVideo = videos.find((v) => v.id === activeId)!;
+
+  return (
+    <div>
+      <div className="flex gap-2 mb-4">
+        {videos.map((v) => (
+          <button key={v.id} onClick={() => setActiveId(v.id)}>
+            {v.title}
+          </button>
+        ))}
+      </div>
+
+      {/*
+        By passing key={activeVideo.id}, we deliberately tell React:
+        "treat each video as a completely separate component instance."
+        This resets internal state (playback position, volume scrubber, etc.)
+        whenever the user switches videos — exactly what we want here.
+      */}
+      <Player key={activeVideo.id} src={activeVideo.src} />
+    </div>
+  );
+}
+```
+
+<Callout type="info">
+  Using `key` to force a remount is a legitimate and idiomatic React pattern.
+  It's preferable to manually resetting state inside a `useEffect`.
+</Callout>
+
+## Real-World Use Case
+
+In a **multi-step checkout flow**, each step (shipping, payment, review) might render different form components. A naive implementation that switches component types between steps will silently destroy any uncontrolled form state the user typed. Understanding reconciliation tells you that you should either:
+
+- Keep the same component type at that slot and pass a `step` prop to control what it renders, or
+- Lift all form state into a parent or a global store so remounting doesn't matter.
+
+Reconciliation also comes up in **virtualized lists** (e.g., `react-window`). Keys on virtualized rows prevent React from reusing a DOM node from row 3 for the content of row 47 when the user scrolls, which would produce flickering or stale content.
+
+## Common Mistakes / Gotchas
+
+**1. Using array index as `key` in dynamic lists.**
+This is safe only for static, non-reorderable lists. For any list where items can be added, removed, or reordered, index keys cause React to match the wrong fibers, leading to incorrect state, broken animations, and hard-to-debug UI glitches.
+
+```tsx
+// ❌ Breaks when items are prepended or reordered
+tasks.map((task, index) => <TaskItem key={index} label={task.label} />);
+
+// ✅ Stable identity
+tasks.map((task) => <TaskItem key={task.id} label={task.label} />);
+```
+
+**2. Generating keys with `Math.random()` or `Date.now()` on every render.**
+A key that changes every render tells React to unmount and remount the component on every render, destroying state and causing unnecessary DOM churn.
+
+```tsx
+// ❌ New key on every render = new mount on every render
+items.map((item) => <Row key={Math.random()} data={item} />);
+```
+
+**3. Expecting state to survive a component type swap.**
+Developers sometimes expect that because two components render similar JSX, their state is preserved when they swap places. It isn't. React uses component identity (the function or class reference) as part of the fiber type check. Even two structurally identical components that are different functions will cause a full remount if swapped at the same tree position.
+
+```tsx
+// ❌ These are different types — GuestForm's state is lost when AdminForm mounts
+{
+  isAdmin ? <AdminForm /> : <GuestForm />;
+}
+
+// ✅ Same type, different behavior controlled by a prop
+<UnifiedForm role={isAdmin ? "admin" : "guest"} />;
+```
+
+**4. Placing components inside other components' render bodies.**
+If you define a component inside another component's function body, React sees a _new function reference_ on every render, treating it as a different type and remounting it every time.
+
+```tsx
+// ❌ InnerList is a new function reference on every render of OuterList
+function OuterList({ items }) {
+  function InnerList() { // re-created every render
+    return <ul>{items.map(...)}</ul>;
+  }
+  return <InnerList />;
+}
+
+// ✅ Define components at module scope
+function InnerList({ items }) {
+  return <ul>{items.map(...)}</ul>;
+}
+function OuterList({ items }) {
+  return <InnerList items={items} />;
+}
+```
+
+## Summary
+
+React's reconciliation algorithm diffs your component tree using two core heuristics: different element types always produce a full remount, and `key` props identify elements across renders. The algorithm runs in O(n) by only comparing nodes at the same level, never across levels. Understanding this helps you use `key` correctly in lists, intentionally force resets with stable keys, and avoid the pitfall of losing state during conditional renders. Most performance and state bugs in React UIs trace back to a misunderstanding of how reconciliation determines "sameness."

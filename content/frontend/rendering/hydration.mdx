@@ -1,0 +1,209 @@
+---
+title: Hydration
+description: How React attaches event listeners and client-side interactivity to server-rendered HTML without re-rendering the entire DOM.
+---
+
+## Overview
+
+When a React app renders on the server, it produces a plain HTML string. That HTML reaches the browser fast — the user sees content immediately. But at that point, the page is inert: no event listeners, no state, no interactivity.
+
+**Hydration** is the process where React "wakes up" that static HTML on the client. React renders the component tree in memory, compares it to the existing DOM, and attaches event listeners — all without throwing away and rebuilding the markup from scratch.
+
+Think of it like a freeze-dried meal: the structure ships to you fully formed (server HTML), and hydration is just adding water (JavaScript) to make it functional.
+
+## How It Works
+
+During hydration, React does three things in sequence:
+
+1. **Downloads and parses** the JavaScript bundle.
+2. **Re-renders the component tree** in memory (without touching the DOM).
+3. **Reconciles** its virtual output against the real DOM. If they match, React reuses the existing nodes and attaches handlers. If they don't match, React warns and may re-render parts of the tree.
+
+This reconciliation step is why hydration mismatches are painful — React expects the server-rendered HTML to be bit-for-bit identical to what it would produce on the client. Any difference forces a full client re-render for that subtree, destroying the performance benefit.
+
+<Callout type="info">
+  In React's App Router, Server Components are **never** hydrated. They render
+  to HTML on the server and stay there. Only Client Components (`'use client'`)
+  go through the hydration process.
+</Callout>
+
+### Selective Hydration
+
+React 18 introduced selective (concurrent) hydration. Rather than blocking the entire page while hydrating, React can:
+
+- Prioritize hydrating components the user is **actively interacting with**.
+- Hydrate other parts of the tree in the background.
+- Pause hydration to handle urgent user input.
+
+This is enabled automatically when you use `<Suspense>` boundaries.
+
+## Code Examples
+
+### Basic Server + Client Component Split
+
+```tsx
+// app/product/[id]/page.tsx
+// This is a Server Component — no hydration cost at all.
+
+import { AddToCartButton } from "@/components/AddToCartButton";
+
+async function getProduct(id: string) {
+  const res = await fetch(`https://api.example.com/products/${id}`, {
+    next: { revalidate: 60 },
+  });
+  return res.json();
+}
+
+export default async function ProductPage({
+  params,
+}: {
+  params: { id: string };
+}) {
+  const product = await getProduct(params.id);
+
+  return (
+    <div>
+      <h1>{product.name}</h1>
+      <p>{product.description}</p>
+      <span>${product.price}</span>
+
+      {/* Only this component hydrates — everything above is static HTML */}
+      <AddToCartButton productId={product.id} />
+    </div>
+  );
+}
+```
+
+```tsx
+// components/AddToCartButton.tsx
+"use client";
+
+import { useState } from "react";
+
+export function AddToCartButton({ productId }: { productId: string }) {
+  const [added, setAdded] = useState(false);
+
+  async function handleClick() {
+    await fetch("/api/cart", {
+      method: "POST",
+      body: JSON.stringify({ productId }),
+    });
+    setAdded(true);
+  }
+
+  return (
+    <button onClick={handleClick} disabled={added}>
+      {added ? "Added!" : "Add to Cart"}
+    </button>
+  );
+}
+```
+
+### Avoiding a Hydration Mismatch with `useEffect`
+
+A common source of mismatches is rendering browser-only values (like `window.innerWidth` or `Date.now()`) during the initial render. The server doesn't have access to these, so the output differs.
+
+```tsx
+"use client";
+
+import { useState, useEffect } from "react";
+
+export function ClientTimestamp() {
+  // Start with null so server and client initial renders match
+  const [timestamp, setTimestamp] = useState<string | null>(null);
+
+  useEffect(() => {
+    // This only runs on the client, after hydration is complete
+    setTimestamp(new Date().toLocaleTimeString());
+  }, []);
+
+  if (!timestamp) {
+    // Render a placeholder that matches what the server sent
+    return <span>Loading time...</span>;
+  }
+
+  return <span>Page loaded at: {timestamp}</span>;
+}
+```
+
+<Callout type="warn">
+  Never access `window`, `localStorage`, or `document` at the top level of a
+  component or during render. Always guard these inside `useEffect` or check
+  `typeof window !== 'undefined'`.
+</Callout>
+
+### Wrapping with Suspense for Selective Hydration
+
+```tsx
+// app/dashboard/page.tsx
+import { Suspense } from "react";
+import { HeavyWidget } from "@/components/HeavyWidget";
+import { CriticalStats } from "@/components/CriticalStats";
+
+export default function DashboardPage() {
+  return (
+    <main>
+      {/* Hydrates immediately — critical content */}
+      <CriticalStats />
+
+      {/* React can defer hydrating this boundary until CriticalStats is done */}
+      <Suspense fallback={<div>Loading widget...</div>}>
+        <HeavyWidget />
+      </Suspense>
+    </main>
+  );
+}
+```
+
+## Real-World Use Case
+
+In an e-commerce storefront, product listing pages are mostly static: titles, images, prices. These render well as Server Components with zero hydration cost, which keeps Time to Interactive (TTI) low.
+
+Only the interactive slices — the cart button, a quantity picker, a wishlist toggle — need to be Client Components. Wrapping each in `<Suspense>` lets React hydrate the above-the-fold cart button first (since users click it immediately), while the wishlist toggle lower on the page hydrates lazily.
+
+The result: fast initial paint from SSR + snappy interactivity from selective hydration, without shipping a massive JS bundle that blocks the main thread.
+
+## Common Mistakes / Gotchas
+
+**1. Rendering non-deterministic values during render**
+
+Any value that differs between server and client (random IDs, current timestamps, `Math.random()`) will cause a hydration mismatch. Always defer these to `useEffect`.
+
+**2. Marking too many components as `'use client'`**
+
+Adding `'use client'` to a parent component makes its **entire subtree** a Client Component. This balloons your JavaScript bundle and erases the SSR benefit. Push `'use client'` as far down the tree as possible — ideally to leaf components.
+
+```tsx
+// ❌ Bad — the whole layout hydrates because of one button
+'use client'
+export function ProductLayout({ product, children }) { ... }
+
+// ✅ Good — only the button hydrates
+export function ProductLayout({ product, children }) {
+  // Server Component — no 'use client'
+  return (
+    <div>
+      <h1>{product.name}</h1>
+      {children}
+      <AddToCartButton productId={product.id} /> {/* Client Component */}
+    </div>
+  )
+}
+```
+
+**3. Suppressing hydration warnings without understanding why**
+
+React provides `suppressHydrationWarning` on DOM elements to silence mismatch warnings. It's tempting to slap it on and move on, but it masks real bugs. Only use it for genuinely intentional differences (e.g., a `<time>` element showing the current date).
+
+```tsx
+// Only acceptable for known, intentional client-only values
+<time suppressHydrationWarning>{new Date().toLocaleString()}</time>
+```
+
+**4. Forgetting that hydration has a CPU cost**
+
+Even with selective hydration, parsing and executing JavaScript takes time. A page with hundreds of Client Components will have a noticeable TTI delay on low-end devices. Profile with Chrome DevTools and keep your Client Component surface area small.
+
+## Summary
+
+Hydration is the bridge between server-rendered HTML and an interactive React app. The server sends static markup for a fast first paint; the client rehydrates it by re-running the component tree and attaching event handlers. React 18's selective hydration — powered by `<Suspense>` boundaries — lets React prioritize hydrating the parts users interact with first. The key practice in the App Router is to default to Server Components (no hydration cost) and only opt into `'use client'` for genuinely interactive leaves. The most common pitfall is mismatches caused by values that differ between server and client renders, which are fixed by deferring browser-only logic to `useEffect`.

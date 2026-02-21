@@ -1,0 +1,12 @@
+{
+  "title": "Rendering",
+  "pages": [
+    "hydration",
+    "partial-hydration",
+    "streaming-ssr",
+    "concurrent-rendering",
+    "time-slicing",
+    "reconciliation-algorithm",
+    "fiber-architecture"
+  ]
+}

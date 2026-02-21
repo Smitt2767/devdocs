@@ -1,0 +1,202 @@
+---
+title: Partial Hydration
+description: An explanation of partial hydration — selectively hydrating only interactive components on the client while leaving static content as dry HTML.
+---
+
+## Overview
+
+When a server renders a page, it sends HTML to the browser. That HTML is static — it can't respond to clicks or state changes yet. **Hydration** is the process where React attaches event listeners and reconstructs its component tree on top of that HTML, making it interactive.
+
+**Full hydration** does this for the entire page — even components that never change. That's wasteful. A blog post header, a footer, a block of static text — none of them need JavaScript to function.
+
+**Partial hydration** solves this by hydrating _only_ the components that are actually interactive. Everything else stays as static HTML. The result: less JavaScript parsed, less work for the browser, faster Time to Interactive (TTI).
+
+<Callout type="info">
+  In the React Server Components model (used by Next.js App Router), partial
+  hydration is built into the architecture. Server Components never hydrate —
+  they render on the server and ship zero client-side JS by default.
+</Callout>
+
+---
+
+## How It Works
+
+Think of your page as a document with a few interactive "islands" embedded in it — a search bar, a shopping cart button, a collapsible FAQ. Everything else is inert content.
+
+In a full-hydration model, React boots up for the _entire_ page, reconstructs every component, and then attaches listeners. In a partial hydration model, the static regions are skipped entirely. React only boots up for the islands that need it.
+
+In Next.js App Router, this boundary is expressed with `'use client'`:
+
+- Any component **without** `'use client'` is a **Server Component**. It renders on the server, sends HTML, and ships no JavaScript to the client.
+- Any component **with** `'use client'` is a **Client Component**. It is hydrated in the browser.
+
+The React runtime on the client only attaches to the subtrees marked as Client Components. The rest of the HTML is left alone.
+
+<Callout type="warn">
+  `'use client'` does not mean "only runs on the client." It means "this
+  component and everything it imports will be included in the client bundle and
+  hydrated." Keep `'use client'` boundaries as deep in the tree as possible.
+</Callout>
+
+---
+
+## Code Examples
+
+### A static page with one interactive island
+
+```tsx
+// app/products/[id]/page.tsx
+// This is a Server Component — no 'use client', no JS sent for this file
+
+import { AddToCartButton } from "@/components/AddToCartButton";
+import { getProduct } from "@/lib/data";
+
+export default async function ProductPage({
+  params,
+}: {
+  params: { id: string };
+}) {
+  const product = await getProduct(params.id);
+
+  return (
+    <main>
+      {/* Static content — rendered as HTML, never hydrated */}
+      <h1>{product.name}</h1>
+      <p>{product.description}</p>
+      <img src={product.imageUrl} alt={product.name} />
+
+      {/* Interactive island — this subtree is hydrated on the client */}
+      <AddToCartButton productId={product.id} price={product.price} />
+    </main>
+  );
+}
+```
+
+```tsx
+// components/AddToCartButton.tsx
+"use client";
+
+import { useState } from "react";
+
+interface Props {
+  productId: string;
+  price: number;
+}
+
+export function AddToCartButton({ productId, price }: Props) {
+  const [added, setAdded] = useState(false);
+
+  async function handleClick() {
+    await fetch("/api/cart", {
+      method: "POST",
+      body: JSON.stringify({ productId }),
+    });
+    setAdded(true);
+  }
+
+  return (
+    <button onClick={handleClick} disabled={added}>
+      {added ? "Added to Cart" : `Add to Cart — $${price}`}
+    </button>
+  );
+}
+```
+
+In this setup, the entire `ProductPage` tree is server-rendered HTML. React only hydrates the `AddToCartButton` subtree. The heading, description, and image never touch the client runtime.
+
+---
+
+### Pushing the client boundary deeper
+
+A common mistake is marking a parent component as `'use client'` when only a child needs interactivity. This forces the entire subtree into the client bundle unnecessarily.
+
+```tsx
+// ❌ Wasteful — the whole layout is now a Client Component
+"use client";
+
+export function ProductLayout({ product, children }) {
+  return (
+    <section>
+      <h1>{product.name}</h1> {/* Static — doesn't need to be here */}
+      {children}
+    </section>
+  );
+}
+```
+
+```tsx
+// ✅ Better — keep the layout as a Server Component, pass interactive parts as children
+
+// app/products/[id]/page.tsx (Server Component)
+import { LikeButton } from "@/components/LikeButton";
+
+export default async function ProductPage({ params }) {
+  const product = await getProduct(params.id);
+
+  return (
+    <section>
+      <h1>{product.name}</h1>
+      {/* LikeButton is the only hydrated island */}
+      <LikeButton productId={product.id} initialCount={product.likes} />
+    </section>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+Consider a marketing landing page for a SaaS product. It contains:
+
+- A hero section with a headline and background image
+- Feature descriptions with icons
+- Customer testimonials
+- A pricing table
+- A single **"Start Free Trial"** CTA button that opens a modal
+
+Only the modal trigger and the modal itself require interactivity. With partial hydration, you ship JavaScript only for those two components. The rest of the page — which may contain hundreds of DOM nodes — is pure HTML. This can cut your client JS bundle by 60–80% on content-heavy pages, with a direct improvement to Core Web Vitals scores like TTI and Total Blocking Time (TBT).
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Placing `'use client'` too high in the tree**
+
+If you add `'use client'` to a layout or wrapper component, every component it renders becomes a client component — including static ones. Always push `'use client'` as close to the interactive leaf as possible.
+
+**2. Importing a Server Component inside a Client Component**
+
+You cannot directly import a Server Component into a Client Component. Once you're inside a `'use client'` boundary, you're in client-land. The correct pattern is to pass Server Components as `children` or props from a Server Component parent.
+
+```tsx
+// ❌ This will error or silently convert StaticContent to a Client Component
+"use client";
+import { StaticContent } from "./StaticContent"; // Server Component
+
+// ✅ Pass it as children instead
+// In the Server Component parent:
+<InteractiveWrapper>
+  <StaticContent />
+</InteractiveWrapper>;
+```
+
+**3. Assuming `'use client'` means no server rendering**
+
+Client Components are _still_ server-rendered for the initial HTML. `'use client'` only controls whether the component is _also_ hydrated on the client. This is a source of persistent confusion — the directive is about hydration, not rendering location.
+
+**4. Over-splitting components unnecessarily**
+
+Partial hydration is a performance tool, not an architectural rule. Don't fragment components into tiny pieces just to avoid `'use client'`. If a component is already small and interactive, marking it as a client component is correct and fine. Optimize when you have a measurable reason to.
+
+<Callout type="tip">
+  Use the Next.js bundle analyzer (`@next/bundle-analyzer`) to visualize which
+  modules are in your client bundle. This makes it easy to spot `'use client'`
+  boundaries that are too broad.
+</Callout>
+
+---
+
+## Summary
+
+Partial hydration means only the interactive parts of your UI are hydrated on the client — the rest stays as static HTML. In Next.js App Router, this is achieved through the Server Component / Client Component split: Server Components render to HTML and ship no JavaScript, while Client Components are hydrated in the browser. The key practice is keeping `'use client'` boundaries as deep in the component tree as possible, so the minimum amount of JavaScript is sent to and executed by the browser. This directly improves performance metrics like TTI and TBT, especially on content-heavy pages. Partial hydration is not a workaround — it's the default model of modern React.
