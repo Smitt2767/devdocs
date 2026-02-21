@@ -1,0 +1,321 @@
+---
+title: WebSockets vs SSE vs Long Polling
+description: A practical comparison of the three main real-time communication strategies for the web — when to use each, how they work, and what to avoid.
+---
+
+## Overview
+
+When you need data to flow between server and client in real time — chat messages, live scores, stock tickers, progress bars — you have three primary tools: **WebSockets**, **Server-Sent Events (SSE)**, and **Long Polling**. They solve the same surface-level problem but with very different tradeoffs around complexity, browser support, directionality, and infrastructure compatibility.
+
+Choosing the wrong one leads to wasted engineering effort, connection leaks, or unnecessary infrastructure cost. This doc gives you the mental model to pick correctly the first time.
+
+---
+
+## How Each One Works
+
+### Long Polling
+
+The client sends an HTTP request. The server holds it open until it has something to say, then responds. The client immediately fires another request. It's a loop of "ask → wait → respond → repeat."
+
+```
+Client:  GET /events  ──────────────────────────────► Server
+                                                       (holds request open)
+Server:  ◄────────────── 200 OK { event: "new-message" }
+Client:  GET /events  ──────────────────────────────► Server
+                                                       (holds again...)
+```
+
+It's HTTP through and through. No special protocol. Works everywhere. But it's chatty — each cycle re-establishes a connection.
+
+### Server-Sent Events (SSE)
+
+The client opens **one** HTTP connection and keeps it open. The server pushes newline-delimited text events down that single persistent stream. The browser has a native `EventSource` API to consume it.
+
+```
+Client:  GET /stream  ──────────────────────────────► Server
+Server:  ◄──── data: {"score": 1} \n\n
+Server:  ◄──── data: {"score": 2} \n\n
+Server:  ◄──── data: {"score": 3} \n\n
+         (connection stays open indefinitely)
+```
+
+Traffic flows **one direction only**: server → client. Built-in reconnection, event IDs, and named event types are part of the spec.
+
+### WebSockets
+
+A full-duplex, persistent TCP connection. The browser sends an HTTP `Upgrade` request, the server agrees, and from that point forward both sides can push frames at any time — simultaneously, without waiting for the other.
+
+```
+Client:  GET /ws  (Upgrade: websocket)  ────────────► Server
+Server:  ◄──── 101 Switching Protocols
+Client:  ◄──── message: "user joined"
+Client:  ──── message: "hello"  ────────────────────► Server
+Server:  ◄──── message: "hello back"
+```
+
+Maximum flexibility, maximum complexity.
+
+---
+
+## Code Examples
+
+### Long Polling — Node.js (Hono) + Fetch
+
+```ts
+// app/api/poll/route.ts  (Next.js App Router Route Handler)
+import { NextResponse } from "next/server";
+
+// Simulate waiting for a new event (in production, query a DB or pub/sub)
+async function waitForNextEvent(): Promise<{ message: string }> {
+  return new Promise((resolve) => {
+    setTimeout(() => resolve({ message: "New notification arrived" }), 2000);
+  });
+}
+
+export async function GET() {
+  const event = await waitForNextEvent();
+  return NextResponse.json(event);
+}
+```
+
+```tsx
+// components/NotificationPoller.tsx
+"use client";
+
+import { useEffect, useState } from "react";
+
+export function NotificationPoller() {
+  const [notifications, setNotifications] = useState<string[]>([]);
+
+  useEffect(() => {
+    let active = true;
+
+    async function poll() {
+      while (active) {
+        try {
+          const res = await fetch("/api/poll");
+          const data = await res.json();
+          setNotifications((prev) => [...prev, data.message]);
+        } catch {
+          // Back off briefly on error before retrying
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+      }
+    }
+
+    poll();
+    return () => {
+      active = false; // Stop the loop on unmount
+    };
+  }, []);
+
+  return (
+    <ul>
+      {notifications.map((n, i) => (
+        <li key={i}>{n}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+---
+
+### SSE — Next.js App Router Streaming Route
+
+```ts
+// app/api/live-score/route.ts
+export const runtime = "nodejs"; // Edge runtime works too, but Node gives more control
+
+export async function GET() {
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      let score = 0;
+
+      const interval = setInterval(() => {
+        score++;
+        // SSE format requires "data: ...\n\n"
+        const payload = `data: ${JSON.stringify({ score })}\n\n`;
+        controller.enqueue(encoder.encode(payload));
+
+        if (score >= 5) {
+          clearInterval(interval);
+          controller.close();
+        }
+      }, 1000);
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
+}
+```
+
+```tsx
+// components/LiveScore.tsx
+"use client";
+
+import { useEffect, useState } from "react";
+
+export function LiveScore() {
+  const [score, setScore] = useState(0);
+
+  useEffect(() => {
+    // EventSource handles reconnection automatically
+    const source = new EventSource("/api/live-score");
+
+    source.onmessage = (e) => {
+      const { score } = JSON.parse(e.data);
+      setScore(score);
+    };
+
+    source.onerror = () => source.close();
+
+    return () => source.close(); // Always clean up
+  }, []);
+
+  return <p>Current Score: {score}</p>;
+}
+```
+
+---
+
+### WebSockets — Node.js Server + Browser Client
+
+```ts
+// server/ws-server.ts  (standalone Node.js, e.g. with the `ws` package)
+import { WebSocketServer } from "ws";
+
+const wss = new WebSocketServer({ port: 8080 });
+
+wss.on("connection", (socket) => {
+  console.log("Client connected");
+
+  socket.on("message", (raw) => {
+    const { type, payload } = JSON.parse(raw.toString());
+
+    if (type === "chat-message") {
+      // Broadcast to every connected client
+      wss.clients.forEach((client) => {
+        if (client.readyState === client.OPEN) {
+          client.send(JSON.stringify({ type: "chat-message", payload }));
+        }
+      });
+    }
+  });
+
+  socket.on("close", () => console.log("Client disconnected"));
+});
+```
+
+```tsx
+// components/ChatRoom.tsx
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+export function ChatRoom() {
+  const [messages, setMessages] = useState<string[]>([]);
+  const [draft, setDraft] = useState("");
+  const wsRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    const ws = new WebSocket("ws://localhost:8080");
+    wsRef.current = ws;
+
+    ws.onmessage = (e) => {
+      const { payload } = JSON.parse(e.data);
+      setMessages((prev) => [...prev, payload]);
+    };
+
+    ws.onerror = (err) => console.error("WebSocket error", err);
+
+    return () => ws.close();
+  }, []);
+
+  function send() {
+    if (!wsRef.current || draft.trim() === "") return;
+    wsRef.current.send(
+      JSON.stringify({ type: "chat-message", payload: draft }),
+    );
+    setDraft("");
+  }
+
+  return (
+    <div>
+      <ul>
+        {messages.map((m, i) => (
+          <li key={i}>{m}</li>
+        ))}
+      </ul>
+      <input value={draft} onChange={(e) => setDraft(e.target.value)} />
+      <button onClick={send}>Send</button>
+    </div>
+  );
+}
+```
+
+---
+
+## Real-World Use Cases
+
+| Technique        | Use It For                                                                                                                                             |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Long Polling** | Admin dashboards behind a corporate proxy/firewall that blocks persistent connections; legacy systems where infrastructure can't be changed            |
+| **SSE**          | Live sports scores, CI/CD build logs, AI token streaming (`text/event-stream` is exactly what OpenAI's API uses), notification feeds                   |
+| **WebSockets**   | Multiplayer games, collaborative editors (Figma-style), chat apps, trading terminals — anything requiring **bidirectional, low-latency** communication |
+
+### AI Streaming Example (SSE in the wild)
+
+When you call `POST /v1/chat/completions` with `stream: true` from OpenAI, the response is an SSE stream. Next.js's AI SDK (`ai` package) wraps this pattern — the `StreamingTextResponse` helper is SSE under the hood.
+
+---
+
+## Common Mistakes / Gotchas
+
+### 1. Using WebSockets when SSE is enough
+
+WebSockets are harder to scale (stateful connections, no standard load balancer support without sticky sessions), harder to proxy, and require separate infrastructure in serverless environments. If your data flows only **server → client**, SSE is simpler, uses standard HTTP, and gets you auto-reconnect for free.
+
+<Callout type="warn">
+  Vercel, Cloudflare Workers, and most serverless platforms support SSE natively
+  via streaming `Response`. WebSocket support is limited or requires a separate
+  always-on service.
+</Callout>
+
+### 2. Forgetting to clean up connections
+
+Every `EventSource` and `WebSocket` opened without a corresponding `.close()` on component unmount leaks a connection. In React, always return a cleanup function from `useEffect`.
+
+```tsx
+useEffect(() => {
+  const source = new EventSource("/api/stream");
+  // ...
+  return () => source.close(); // ✅ required
+}, []);
+```
+
+### 3. Not handling reconnection in Long Polling
+
+If a long-poll request fails (network blip, server restart), a naive implementation just crashes. Always wrap the poll loop in a try/catch with exponential backoff.
+
+### 4. Blocking the event loop in SSE handlers
+
+If your SSE route handler does a synchronous expensive computation before writing to the stream, the entire stream stalls. Keep stream handlers async and non-blocking; offload heavy work to a worker thread or background queue.
+
+### 5. Assuming WebSockets work through all proxies
+
+Corporate proxies, some CDNs, and older load balancers silently drop or reject WebSocket upgrade requests. Long polling or SSE are more reliably proxy-compatible. Always have a fallback strategy or use a library like Socket.IO that handles this.
+
+---
+
+## Summary
+
+Long polling is the compatibility baseline — it's plain HTTP and works anywhere, but it's inefficient for high-frequency updates. SSE is the sweet spot for most real-time server-push scenarios: it's HTTP-native, auto-reconnecting, works in serverless environments, and requires no special client beyond `EventSource`. WebSockets are the right tool when you genuinely need **bidirectional, high-frequency, low-latency** communication — but they come with real infrastructure and complexity costs. Default to SSE, reach for WebSockets only when the bidirectional requirement is clear, and use long polling only as a fallback for constrained environments.

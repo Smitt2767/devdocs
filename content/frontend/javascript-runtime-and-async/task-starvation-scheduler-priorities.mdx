@@ -1,0 +1,284 @@
+---
+title: Task Starvation & Scheduler Priorities
+description: How JavaScript's event loop scheduler prioritizes tasks, what causes task starvation, and how to write code that avoids blocking lower-priority work.
+---
+
+## Overview
+
+JavaScript runs on a single thread. Everything — user interactions, network responses, rendering, timers — competes for that one thread. The browser (and Node.js) use a **scheduler** to decide which work runs next and in what order.
+
+**Task starvation** happens when high-priority or long-running tasks monopolize the thread, preventing lower-priority tasks from ever getting CPU time. The result: frozen UIs, dropped frames, delayed responses, and degraded user experience.
+
+Understanding scheduler priorities lets you write code that stays responsive under load — especially important in React apps, animation-heavy UIs, and high-throughput Node.js servers.
+
+---
+
+## How It Works
+
+### The Event Loop and Task Queues
+
+The JavaScript runtime maintains several queues, each with different priority levels:
+
+| Queue                   | Examples                                                       | Priority                                |
+| ----------------------- | -------------------------------------------------------------- | --------------------------------------- |
+| **Microtask queue**     | `Promise.then`, `queueMicrotask`, `MutationObserver`           | Highest — drains fully before next task |
+| **Macrotask queue**     | `setTimeout`, `setInterval`, `I/O callbacks`, `MessageChannel` | One task per event loop tick            |
+| **Animation callbacks** | `requestAnimationFrame`                                        | Before paint, after macrotasks          |
+| **Idle callbacks**      | `requestIdleCallback`                                          | Lowest — only when browser is idle      |
+
+After each **macrotask** completes, the engine drains the entire **microtask queue** before moving on. This is the root cause of starvation: if you continuously queue microtasks, macrotasks will never run.
+
+```
+[Macrotask] → drain [Microtask queue] → [Render if needed] → [Next Macrotask]
+```
+
+### How Starvation Occurs
+
+Two common patterns:
+
+1. **Microtask flooding** — a recursive chain of `Promise.resolve()` calls that never yields to the event loop.
+2. **Long synchronous work** — a `for` loop processing 500,000 records blocks the thread entirely until it finishes.
+
+In React's concurrent model, the scheduler (via the `scheduler` package) adds another layer: it assigns **lanes** (priority levels) to updates. A high-priority interaction like typing can interrupt a lower-priority re-render — but only if the low-priority work yields periodically.
+
+---
+
+## Code Examples
+
+### Example 1: Demonstrating Starvation via Microtask Flooding
+
+```ts
+// This loop starves the macrotask queue indefinitely.
+// The setTimeout callback will NEVER fire.
+function floodMicrotasks() {
+  Promise.resolve().then(floodMicrotasks); // recursively re-queues itself
+}
+
+setTimeout(() => {
+  console.log("This will never print"); // starved
+}, 0);
+
+floodMicrotasks();
+```
+
+<Callout type="warn">
+  Never create recursive promise chains without a yielding escape hatch. This
+  pattern locks the thread permanently.
+</Callout>
+
+---
+
+### Example 2: Breaking Up Long Work with `scheduler.yield` (Modern Pattern)
+
+The [Scheduler API](https://developer.mozilla.org/en-US/docs/Web/API/Scheduler) (`scheduler.yield()`) is the modern way to explicitly yield back to the browser between chunks of work.
+
+```ts
+// app/lib/process-records.ts
+
+interface ProductRecord {
+  id: string;
+  price: number;
+  category: string;
+}
+
+/**
+ * Process a large array of records in chunks, yielding to the browser
+ * between each chunk so higher-priority work (like user input) can run.
+ */
+export async function processRecordsWithYield(
+  records: ProductRecord[],
+  onProgress: (processed: number) => void,
+): Promise<number[]> {
+  const results: number[] = [];
+  const CHUNK_SIZE = 100; // process 100 items per "slice"
+
+  for (let i = 0; i < records.length; i++) {
+    // Yield back to browser after every chunk
+    if (i > 0 && i % CHUNK_SIZE === 0) {
+      if ("scheduler" in globalThis && "yield" in scheduler) {
+        await scheduler.yield(); // modern — preserves task priority
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 0)); // fallback
+      }
+      onProgress(i);
+    }
+
+    // Simulate CPU work per record
+    results.push(records[i].price * 1.2);
+  }
+
+  return results;
+}
+```
+
+```tsx
+// app/dashboard/page.tsx
+"use client";
+
+import { useState, useTransition } from "react";
+import { processRecordsWithYield } from "@/lib/process-records";
+import type { ProductRecord } from "@/lib/types";
+
+export default function DashboardPage() {
+  const [progress, setProgress] = useState(0);
+  const [results, setResults] = useState<number[]>([]);
+  const [isPending, startTransition] = useTransition();
+
+  async function handleProcess(records: ProductRecord[]) {
+    // Wrap in startTransition so React treats this as low-priority work.
+    // High-priority updates (like typing in an input) will preempt this.
+    startTransition(async () => {
+      const processed = await processRecordsWithYield(records, setProgress);
+      setResults(processed);
+    });
+  }
+
+  return (
+    <div>
+      <p>Progress: {progress} records processed</p>
+      {isPending && <p>Processing in background...</p>}
+    </div>
+  );
+}
+```
+
+---
+
+### Example 3: React Concurrent Scheduler — Priority Levels
+
+React's internal scheduler exposes priority lanes. You influence them via APIs like `startTransition` and `useDeferredValue`.
+
+```tsx
+// app/search/page.tsx
+"use client";
+
+import { useState, useDeferredValue, useMemo } from "react";
+
+interface Product {
+  id: string;
+  name: string;
+}
+
+function ExpensiveList({ query }: { query: string }) {
+  // Simulates filtering a large product catalog
+  const filtered = useMemo(() => {
+    return Array.from({ length: 10_000 }, (_, i) => ({
+      id: String(i),
+      name: `Product ${i}`,
+    })).filter((p) => p.name.includes(query));
+  }, [query]);
+
+  return (
+    <ul>
+      {filtered.slice(0, 50).map((p) => (
+        <li key={p.id}>{p.name}</li>
+      ))}
+    </ul>
+  );
+}
+
+export default function SearchPage() {
+  const [inputValue, setInputValue] = useState("");
+
+  // `deferredQuery` updates at lower priority than `inputValue`.
+  // The input stays snappy while the expensive list re-renders lazily.
+  const deferredQuery = useDeferredValue(inputValue);
+
+  return (
+    <div>
+      <input
+        value={inputValue}
+        onChange={(e) => setInputValue(e.target.value)}
+        placeholder="Search products..."
+      />
+      {/* Renders with the deferred (stale-ok) value */}
+      <ExpensiveList query={deferredQuery} />
+    </div>
+  );
+}
+```
+
+<Callout type="info">
+  `useDeferredValue` does **not** debounce. It lets React render the input
+  update immediately and schedule the expensive child render at a lower
+  priority. They're fundamentally different.
+</Callout>
+
+---
+
+### Example 4: Node.js — Avoiding I/O Starvation with `setImmediate`
+
+In Node.js, `setImmediate` runs after I/O callbacks, before timers — useful for yielding without delaying I/O.
+
+```ts
+// scripts/migrate-data.ts
+import { readFile } from "node:fs/promises";
+
+async function migrateInBatches(rows: string[]): Promise<void> {
+  const BATCH_SIZE = 500;
+
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = rows.slice(i, i + BATCH_SIZE);
+
+    await processBatch(batch); // your DB write / transform logic
+
+    // Yield to Node's event loop between batches.
+    // This allows pending I/O callbacks (e.g., incoming HTTP requests)
+    // to run before we process the next batch.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    console.log(`Migrated rows ${i} to ${i + BATCH_SIZE}`);
+  }
+}
+
+async function processBatch(rows: string[]): Promise<void> {
+  // simulate async DB insert
+  await new Promise((resolve) => setTimeout(resolve, 5));
+}
+```
+
+---
+
+## Real-World Use Case
+
+**E-commerce search with large catalogs:** A product search page filters 50,000 SKUs on the client. Without yielding, every keystroke triggers a synchronous filter loop that locks the UI for 200–300ms. Users see the input lag, frame drops, and broken animations.
+
+The fix: wrap the filter computation in `useDeferredValue` so React schedules it at low priority. The input updates instantly; the product list catches up a frame or two later. Users perceive the UI as fast even though the same amount of work is happening.
+
+**Background data migration in Node.js:** A migration script processes millions of database rows. If it runs synchronously in a `for` loop, it starves the event loop and blocks any health check endpoints from responding — causing load balancers to mark the server as unhealthy. Yielding via `setImmediate` between batches keeps the HTTP server responsive.
+
+---
+
+## Common Mistakes / Gotchas
+
+### 1. Confusing `setTimeout(fn, 0)` with "immediate" execution
+
+`setTimeout(fn, 0)` still queues a **macrotask**. The callback won't run until after the current call stack and all pending microtasks drain. For true immediate-next-tick behavior in Node.js, use `setImmediate` or `process.nextTick` (carefully — `process.nextTick` is actually a microtask-like queue, even higher priority than Promises).
+
+### 2. Assuming `startTransition` makes work non-blocking
+
+`startTransition` marks work as **interruptible**, not non-blocking. React can pause and restart it, but the underlying JS still runs on the main thread. For truly heavy CPU work, you still need to chunk it manually or move it to a Web Worker.
+
+<Callout type="warn">
+  `startTransition` is not a replacement for Web Workers. It gives React
+  permission to interrupt and reprioritize rendering — it doesn't offload
+  computation to another thread.
+</Callout>
+
+### 3. Recursive microtasks with unguarded `Promise.resolve`
+
+A pattern like `Promise.resolve().then(fn)` inside `fn` itself creates an infinite microtask chain. This permanently starves macrotasks and freezes the browser tab. Always include a termination condition or yield to a macrotask periodically.
+
+### 4. Overusing `useDeferredValue` when `useMemo` is sufficient
+
+`useDeferredValue` involves extra re-renders and complexity. If the computation is cheap enough to memoize (under ~16ms), `useMemo` is the right tool. Profile before reaching for concurrent APIs.
+
+### 5. Ignoring `scheduler.yield()` priority parameter
+
+`scheduler.yield()` can accept a priority option (`'user-blocking'`, `'user-visible'`, `'background'`). Defaulting to `'user-visible'` is usually correct, but yielding at `'background'` for truly non-urgent work ensures even higher-priority tasks (like scroll handlers) can preempt it.
+
+---
+
+## Summary
+
+JavaScript's event loop processes work through prioritized queues: microtasks drain completely before the next macrotask runs, making them a common starvation vector. Task starvation — where important work is delayed or blocked — occurs when long synchronous operations or flooding microtask queues monopolize the thread. Modern solutions include `scheduler.yield()` for chunked CPU work, React's `startTransition` and `useDeferredValue` for deprioritizing expensive renders, and `setImmediate` in Node.js to yield between I/O-heavy batches. None of these are magic: they all work by voluntarily giving up the thread so higher-priority work can proceed. Understanding which queue your code lands in — and how to yield out of it — is the foundation of building consistently responsive applications.

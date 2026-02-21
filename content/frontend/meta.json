@@ -4,6 +4,7 @@
   "pages": [
     "index",
     "rendering-and-browser-pipeline",
-    "component-and-ui-architecture"
+    "component-and-ui-architecture",
+    "javascript-runtime-and-async"
   ]
 }
