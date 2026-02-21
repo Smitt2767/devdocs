@@ -1,0 +1,347 @@
+---
+title: Authentication Flows
+description: A practical guide to implementing OAuth 2.0, JWT, and session cookie authentication in modern Next.js applications using the App Router.
+---
+
+## Overview
+
+Authentication is the process of verifying who a user is. In web applications, three patterns dominate: **OAuth 2.0** (delegating login to a third party like Google), **JWTs** (JSON Web Tokens — stateless, self-contained tokens), and **session cookies** (server-managed state tied to a browser cookie).
+
+Each solves a slightly different problem. Understanding when to use which — and how they interact — is critical to building secure, scalable apps.
+
+---
+
+## How It Works
+
+### OAuth 2.0
+
+OAuth 2.0 is an _authorization framework_ that lets users grant your app limited access to their account on another service (Google, GitHub, etc.) without sharing their password.
+
+The standard flow (Authorization Code Flow) works like this:
+
+1. Your app redirects the user to the provider's login page with a `client_id` and `redirect_uri`.
+2. The user authenticates with the provider and grants permission.
+3. The provider redirects back to your app with a short-lived **authorization code**.
+4. Your server exchanges the code for an **access token** (and optionally a **refresh token**) via a back-channel request.
+5. Your server uses the access token to fetch the user's profile and creates a local session.
+
+<Callout type="info">
+  OAuth 2.0 is for *authorization*, not authentication by itself. OpenID Connect
+  (OIDC) is the identity layer built on top of OAuth 2.0 that gives you an
+  `id_token` with user identity claims.
+</Callout>
+
+### JWTs (JSON Web Tokens)
+
+A JWT is a Base64-encoded, cryptographically signed token with three parts: **header**, **payload**, and **signature**. The server signs it with a secret (HMAC) or private key (RSA/ECDSA). Any service with the secret/public key can verify it without a database lookup — making JWTs _stateless_.
+
+Structure:
+
+```
+eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiIxMjMiLCJleHAiOjE3MDAwMDB9.SIGNATURE
+header              .payload                                      .signature
+```
+
+The payload can include claims like `userId`, `role`, `exp` (expiry), and `iat` (issued at).
+
+<Callout type="warn">
+  JWTs cannot be invalidated before expiry unless you maintain a token denylist
+  — which defeats their stateless benefit. Keep JWT expiry short (15–60 minutes)
+  and use refresh tokens for long-lived sessions.
+</Callout>
+
+### Session Cookies
+
+The server creates a session record (in memory, Redis, or a database) and sends the browser a cookie containing only the **session ID**. On every request, the browser sends the cookie, and the server looks up the session.
+
+This is _stateful_ — the server must store session data — but it gives you easy, instant revocation (just delete the session record).
+
+---
+
+## Code Examples
+
+### 1. OAuth 2.0 — GitHub Login with Route Handlers
+
+```tsx
+// app/api/auth/github/route.ts
+// Step 1: Redirect user to GitHub
+export async function GET() {
+  const params = new URLSearchParams({
+    client_id: process.env.GITHUB_CLIENT_ID!,
+    redirect_uri: process.env.GITHUB_REDIRECT_URI!,
+    scope: "read:user user:email",
+  });
+
+  return Response.redirect(
+    `https://github.com/login/oauth/authorize?${params.toString()}`,
+  );
+}
+```
+
+```tsx
+// app/api/auth/github/callback/route.ts
+// Step 2: Handle the callback and exchange code for token
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const code = searchParams.get("code");
+
+  if (!code) {
+    return new Response("Missing authorization code", { status: 400 });
+  }
+
+  // Exchange code for access token (back-channel — never expose client_secret to browser)
+  const tokenResponse = await fetch(
+    "https://github.com/login/oauth/access_token",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        client_id: process.env.GITHUB_CLIENT_ID,
+        client_secret: process.env.GITHUB_CLIENT_SECRET,
+        code,
+        redirect_uri: process.env.GITHUB_REDIRECT_URI,
+      }),
+    },
+  );
+
+  const { access_token } = await tokenResponse.json();
+
+  // Fetch the user's profile using the access token
+  const userResponse = await fetch("https://api.github.com/user", {
+    headers: { Authorization: `Bearer ${access_token}` },
+  });
+
+  const githubUser = await userResponse.json();
+
+  // Upsert user in your database (pseudocode replaced with real structure)
+  const user = await db.user.upsert({
+    where: { githubId: String(githubUser.id) },
+    create: {
+      githubId: String(githubUser.id),
+      email: githubUser.email,
+      name: githubUser.name,
+    },
+    update: { name: githubUser.name },
+  });
+
+  // Create a session cookie
+  const cookieStore = await cookies();
+  cookieStore.set("session_id", user.id, {
+    httpOnly: true, // not accessible via JS
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 60 * 60 * 24 * 7, // 7 days
+    path: "/",
+  });
+
+  redirect("/dashboard");
+}
+```
+
+---
+
+### 2. JWT — Issuing and Verifying Tokens
+
+```ts
+// lib/jwt.ts
+import { SignJWT, jwtVerify } from "jose"; // jose is edge-compatible, unlike jsonwebtoken
+
+const SECRET = new TextEncoder().encode(process.env.JWT_SECRET!);
+
+export interface SessionPayload {
+  userId: string;
+  role: "user" | "admin";
+}
+
+export async function signToken(payload: SessionPayload): Promise<string> {
+  return new SignJWT(payload)
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt()
+    .setExpirationTime("15m") // short-lived access token
+    .sign(SECRET);
+}
+
+export async function verifyToken(token: string): Promise<SessionPayload> {
+  const { payload } = await jwtVerify(token, SECRET);
+  return payload as unknown as SessionPayload;
+}
+```
+
+```tsx
+// app/api/auth/login/route.ts
+import { signToken } from "@/lib/jwt";
+import { cookies } from "next/headers";
+
+export async function POST(request: Request) {
+  const { email, password } = await request.json();
+
+  const user = await db.user.findUnique({ where: { email } });
+
+  const isValid = user && (await bcrypt.compare(password, user.hashedPassword));
+
+  if (!isValid) {
+    return Response.json({ error: "Invalid credentials" }, { status: 401 });
+  }
+
+  const token = await signToken({ userId: user.id, role: user.role });
+
+  const cookieStore = await cookies();
+  cookieStore.set("access_token", token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 60 * 15, // 15 minutes, matching token expiry
+    path: "/",
+  });
+
+  return Response.json({ success: true });
+}
+```
+
+```tsx
+// middleware.ts
+// Protect routes by verifying the JWT on every request
+import { NextRequest, NextResponse } from "next/server";
+import { verifyToken } from "@/lib/jwt";
+
+export async function middleware(request: NextRequest) {
+  const token = request.cookies.get("access_token")?.value;
+
+  if (!token) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+
+  try {
+    const payload = await verifyToken(token);
+    // Forward user identity to Server Components via headers
+    const headers = new Headers(request.headers);
+    headers.set("x-user-id", payload.userId);
+    headers.set("x-user-role", payload.role);
+
+    return NextResponse.next({ request: { headers } });
+  } catch {
+    // Token expired or invalid
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+}
+
+export const config = {
+  matcher: ["/dashboard/:path*", "/account/:path*"],
+};
+```
+
+---
+
+### 3. Session Cookie — Reading Session in a Server Component
+
+```tsx
+// lib/session.ts
+import { cookies } from "next/headers";
+import { cache } from "react";
+
+export const getSession = cache(async () => {
+  const cookieStore = await cookies();
+  const sessionId = cookieStore.get("session_id")?.value;
+
+  if (!sessionId) return null;
+
+  // Fetch session from database/Redis
+  const session = await db.session.findUnique({
+    where: { id: sessionId },
+    include: { user: true },
+  });
+
+  // Treat expired sessions as invalid
+  if (!session || session.expiresAt < new Date()) return null;
+
+  return session;
+});
+```
+
+```tsx
+// app/dashboard/page.tsx
+// Server Component — no 'use client' needed
+import { getSession } from "@/lib/session";
+import { redirect } from "next/navigation";
+
+export default async function DashboardPage() {
+  const session = await getSession();
+
+  if (!session) {
+    redirect("/login");
+  }
+
+  return (
+    <main>
+      <h1>Welcome, {session.user.name}</h1>
+      <p>Your role: {session.user.role}</p>
+    </main>
+  );
+}
+```
+
+<Callout type="info">
+  `cache()` from React deduplicates `getSession()` calls within a single render
+  pass, so you can call it in multiple Server Components without hitting the
+  database repeatedly.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+In a SaaS project management app:
+
+- **OAuth 2.0** handles "Sign in with Google" — users don't want another password, and you want their verified email address.
+- After OAuth completes, your server issues a **session cookie** tied to a database record. This gives you instant revocation if a user is banned or logs out from another device.
+- For your **public API** (used by CLI tools or mobile apps), you issue **JWTs** — these clients can't use cookies reliably, and stateless verification scales across multiple API servers without a shared session store.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Storing JWTs in `localStorage`**
+
+`localStorage` is accessible to any JavaScript on the page, making it vulnerable to XSS attacks. Always store tokens in `httpOnly` cookies, which are invisible to JavaScript.
+
+**2. Long-lived JWTs without a refresh strategy**
+
+A JWT with a 30-day expiry can't be revoked if the user's account is compromised. Use short-lived access tokens (15 minutes) paired with a `httpOnly` refresh token cookie. When the access token expires, the client silently calls a `/api/auth/refresh` endpoint to get a new one.
+
+**3. Not validating the `state` parameter in OAuth**
+
+The `state` parameter is a random nonce you generate before redirecting to the OAuth provider and verify when the callback returns. Skipping this check opens your app to CSRF attacks where a malicious site tricks a user into completing your OAuth flow with the attacker's account.
+
+```ts
+// Before redirect — store state in session
+const state = crypto.randomUUID();
+cookieStore.set("oauth_state", state, { httpOnly: true, maxAge: 60 * 10 });
+
+// In callback — verify it matches
+const returnedState = searchParams.get("state");
+const storedState = cookieStore.get("oauth_state")?.value;
+
+if (!returnedState || returnedState !== storedState) {
+  return new Response("Invalid state parameter", { status: 403 });
+}
+```
+
+**4. Forgetting to set `sameSite` on cookies**
+
+Without `sameSite: "lax"` or `"strict"`, your session cookies are sent on cross-site requests, enabling CSRF. `"lax"` is a safe default — it blocks cookies on cross-site POST requests but allows them on top-level navigations (e.g., OAuth redirects back to your site).
+
+**5. Conflating authentication with authorization**
+
+OAuth gives you _who the user is_. What they're _allowed to do_ is a separate concern. After OAuth, always check the user's roles/permissions in your own database before granting access to protected resources.
+
+---
+
+## Summary
+
+OAuth 2.0 delegates login to a trusted provider and is best for social login; it should always use the Authorization Code Flow with PKCE for public clients. JWTs are stateless tokens ideal for APIs and distributed systems, but must be short-lived and stored in `httpOnly` cookies to stay secure. Session cookies are stateful, easy to revoke, and the right default for server-rendered web apps. In many production applications, all three patterns are used together: OAuth for login, a session cookie for the web app, and JWTs for API consumers. Always set `httpOnly`, `secure`, and `sameSite` on any auth cookie.

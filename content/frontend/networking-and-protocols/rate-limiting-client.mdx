@@ -1,0 +1,305 @@
+---
+title: Client-Side Rate Limiting
+description: How to detect, handle, and communicate API rate limit responses gracefully on the client side in modern React and Next.js applications.
+---
+
+## Overview
+
+Rate limiting is a server-side mechanism that caps how many requests a client can make within a given time window. When a limit is exceeded, the server responds with a `429 Too Many Requests` status.
+
+Client-side rate limiting _awareness_ means your frontend detects these responses and reacts intelligently — backing off, retrying after a delay, showing meaningful feedback, and avoiding hammering the server further. Without it, your UI either silently fails or shows cryptic errors.
+
+## How It Works
+
+When you exceed a rate limit, the server returns:
+
+- **HTTP 429** status code
+- Optionally a `Retry-After` header indicating how many seconds to wait
+- Optionally a `X-RateLimit-Remaining` or `X-RateLimit-Reset` header with quota info
+
+Your client needs to:
+
+1. Inspect the response status before processing data
+2. Read `Retry-After` if present
+3. Either retry automatically with a delay (exponential backoff) or surface the constraint to the user
+4. Prevent additional requests while in a limited state
+
+Think of it like a tollbooth with a sign: "Lane closed for 30 seconds." A good driver reads the sign, waits, and retries. A bad driver keeps honking.
+
+## Code Examples
+
+### 1. Core fetch wrapper with 429 handling
+
+```ts
+// lib/api-client.ts
+
+export class RateLimitError extends Error {
+  retryAfterSeconds: number;
+
+  constructor(retryAfter: number) {
+    super(`Rate limited. Retry after ${retryAfter}s.`);
+    this.name = "RateLimitError";
+    this.retryAfterSeconds = retryAfter;
+  }
+}
+
+export async function apiFetch<T>(
+  url: string,
+  options?: RequestInit,
+): Promise<T> {
+  const response = await fetch(url, options);
+
+  if (response.status === 429) {
+    // Parse Retry-After header; default to 60s if absent
+    const retryAfter = parseInt(
+      response.headers.get("Retry-After") ?? "60",
+      10,
+    );
+    throw new RateLimitError(retryAfter);
+  }
+
+  if (!response.ok) {
+    throw new Error(`Request failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<T>;
+}
+```
+
+### 2. Automatic retry with exponential backoff
+
+```ts
+// lib/fetch-with-retry.ts
+
+import { apiFetch, RateLimitError } from "./api-client";
+
+interface RetryOptions {
+  maxRetries?: number;
+  baseDelayMs?: number;
+}
+
+export async function fetchWithRetry<T>(
+  url: string,
+  options?: RequestInit,
+  { maxRetries = 3, baseDelayMs = 1000 }: RetryOptions = {},
+): Promise<T> {
+  let attempt = 0;
+
+  while (attempt <= maxRetries) {
+    try {
+      return await apiFetch<T>(url, options);
+    } catch (error) {
+      if (error instanceof RateLimitError) {
+        if (attempt === maxRetries) throw error;
+
+        // Respect the server's Retry-After; fall back to exponential backoff
+        const delay = error.retryAfterSeconds
+          ? error.retryAfterSeconds * 1000
+          : baseDelayMs * 2 ** attempt; // 1s, 2s, 4s, ...
+
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        attempt++;
+        continue;
+      }
+      throw error; // Non-rate-limit errors bubble up immediately
+    }
+  }
+
+  throw new Error("Max retries exceeded");
+}
+```
+
+### 3. React hook with user-facing rate limit state
+
+```tsx
+// hooks/use-rate-limited-fetch.ts
+"use client";
+
+import { useState, useCallback } from "react";
+import { fetchWithRetry } from "@/lib/fetch-with-retry";
+import { RateLimitError } from "@/lib/api-client";
+
+interface UseFetchState<T> {
+  data: T | null;
+  loading: boolean;
+  error: string | null;
+  rateLimited: boolean;
+  retryAfter: number | null; // seconds remaining
+}
+
+export function useRateLimitedFetch<T>(url: string) {
+  const [state, setState] = useState<UseFetchState<T>>({
+    data: null,
+    loading: false,
+    error: null,
+    rateLimited: false,
+    retryAfter: null,
+  });
+
+  const execute = useCallback(async () => {
+    setState((s) => ({ ...s, loading: true, error: null, rateLimited: false }));
+
+    try {
+      const data = await fetchWithRetry<T>(url);
+      setState({
+        data,
+        loading: false,
+        error: null,
+        rateLimited: false,
+        retryAfter: null,
+      });
+    } catch (error) {
+      if (error instanceof RateLimitError) {
+        setState({
+          data: null,
+          loading: false,
+          error: "You've hit the rate limit.",
+          rateLimited: true,
+          retryAfter: error.retryAfterSeconds,
+        });
+
+        // Auto-clear the rate limit state after the window expires
+        setTimeout(() => {
+          setState((s) => ({
+            ...s,
+            rateLimited: false,
+            retryAfter: null,
+            error: null,
+          }));
+        }, error.retryAfterSeconds * 1000);
+      } else {
+        setState((s) => ({
+          ...s,
+          loading: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+        }));
+      }
+    }
+  }, [url]);
+
+  return { ...state, execute };
+}
+```
+
+### 4. Component using the hook
+
+```tsx
+// app/search/page.tsx
+"use client";
+
+import { useRateLimitedFetch } from "@/hooks/use-rate-limited-fetch";
+
+interface SearchResult {
+  id: string;
+  title: string;
+}
+
+export default function SearchPage() {
+  const { data, loading, error, rateLimited, retryAfter, execute } =
+    useRateLimitedFetch<SearchResult[]>("/api/search");
+
+  return (
+    <div className="p-6">
+      <button
+        onClick={execute}
+        disabled={loading || rateLimited}
+        className="rounded bg-blue-600 px-4 py-2 text-white disabled:opacity-50"
+      >
+        {loading ? "Searching..." : "Search"}
+      </button>
+
+      {rateLimited && (
+        <p className="mt-3 text-amber-600">
+          Rate limit reached. Please wait {retryAfter}s before trying again.
+        </p>
+      )}
+
+      {error && !rateLimited && <p className="mt-3 text-red-600">{error}</p>}
+
+      {data && (
+        <ul className="mt-4 space-y-2">
+          {data.map((result) => (
+            <li key={result.id}>{result.title}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+```
+
+### 5. Proactive throttling with a client-side request queue
+
+Rather than waiting to be told "no," you can throttle on the client before requests ever leave.
+
+```ts
+// lib/throttled-client.ts
+
+export function createThrottledFetcher(requestsPerSecond: number) {
+  const intervalMs = 1000 / requestsPerSecond;
+  let lastCallAt = 0;
+
+  return async function throttledFetch<T>(
+    url: string,
+    options?: RequestInit,
+  ): Promise<T> {
+    const now = Date.now();
+    const elapsed = now - lastCallAt;
+
+    if (elapsed < intervalMs) {
+      // Wait out the remaining interval before sending
+      await new Promise((resolve) => setTimeout(resolve, intervalMs - elapsed));
+    }
+
+    lastCallAt = Date.now();
+    return fetch(url, options).then((res) => res.json() as Promise<T>);
+  };
+}
+
+// Usage: max 5 requests per second
+export const safeFetch = createThrottledFetcher(5);
+```
+
+## Real-World Use Case
+
+In a developer tools SaaS dashboard, users can trigger API calls to a third-party provider (e.g., OpenAI, GitHub, Stripe) through your backend. Those providers rate-limit by API key — which belongs to your server.
+
+If a user spam-clicks "Regenerate" on an AI feature, your backend forwards those requests and quickly exhausts the quota. Without client-side awareness:
+
+- The user sees a broken spinner indefinitely
+- Your backend may log dozens of failed 429s
+- The remaining rate limit window is wasted
+
+With proper client-side handling, you disable the button after the first 429, show a countdown timer using `retryAfter`, and automatically re-enable the action when the window resets — all without a page reload.
+
+## Common Mistakes / Gotchas
+
+**1. Ignoring `Retry-After` and using a fixed delay**
+
+Hardcoding `setTimeout(retry, 3000)` ignores the server's instruction. If the reset window is 60 seconds, you'll retry 19 more times unnecessarily, making the problem worse. Always read the header first.
+
+<Callout type="warn">
+  Some APIs return `Retry-After` as an HTTP date string (e.g., `Fri, 21 Feb 2026
+  12:00:00 GMT`) instead of a number of seconds. Parse accordingly using `new
+  Date(header).getTime() - Date.now()`.
+</Callout>
+
+**2. Retrying indefinitely without a cap**
+
+Unbounded retry loops can lock up the UI or cause memory leaks in long-running sessions. Always enforce a `maxRetries` limit and surface a final error state to the user when exhausted.
+
+**3. Not disabling the trigger UI during a rate-limited window**
+
+If the "Submit" button stays active while the client is rate-limited, users will keep clicking it, generating new failed requests and resetting your backoff logic. Disable the control and show a clear time-remaining message.
+
+**4. Conflating 429 with other 4xx errors**
+
+A 401 means unauthenticated, a 403 means forbidden, a 422 means invalid input. Only 429 warrants a retry. A generic `!response.ok` catch-all that retries on any error will retry on 401s endlessly, which is both wasteful and potentially a security concern.
+
+**5. Assuming all APIs send `Retry-After`**
+
+Many APIs return 429 with no headers at all. Your code must handle the absent-header case gracefully — default to a sensible value like 60 seconds rather than `NaN` or `0`.
+
+## Summary
+
+Client-side rate limit awareness means your application reads and respects `429` responses rather than failing silently or retrying blindly. Use a centralized fetch wrapper to detect 429s, extract `Retry-After`, and either back off automatically or surface the constraint clearly in the UI. For high-frequency interactions, proactive client-side throttling prevents hitting the limit in the first place. Always cap retries, disable triggering controls during a rate-limited window, and handle the case where `Retry-After` is absent. These patterns keep your UI responsive and your API quota intact.

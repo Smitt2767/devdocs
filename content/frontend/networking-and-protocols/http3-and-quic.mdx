@@ -1,0 +1,257 @@
+---
+title: HTTP/3 & QUIC
+description: A practical guide to HTTP/3 and the QUIC transport protocol — how they work, why they're faster, and how to enable and leverage them in modern web applications.
+---
+
+## Overview
+
+HTTP/3 is the third major version of the Hypertext Transfer Protocol. Unlike HTTP/1.1 and HTTP/2, which both run over TCP, HTTP/3 runs over **QUIC** — a transport protocol built on top of UDP.
+
+This shift matters because TCP, despite being reliable, has fundamental limitations that hurt web performance: head-of-line blocking, slow handshakes, and poor recovery on lossy networks. QUIC was designed from scratch to solve these problems while preserving the reliability guarantees developers expect.
+
+QUIC was originally developed by Google, standardized by the IETF, and is now the foundation of HTTP/3 (RFC 9114). As of 2024, HTTP/3 is supported by all major browsers and is in production at Google, Cloudflare, Meta, and most modern CDNs.
+
+---
+
+## How It Works
+
+### QUIC Replaces TCP + TLS
+
+In HTTP/2, you have three separate layers:
+
+```
+HTTP/2 → TLS 1.3 → TCP
+```
+
+QUIC collapses this into one:
+
+```
+HTTP/3 → QUIC (TLS 1.3 built-in)
+```
+
+TLS is baked directly into the QUIC handshake. A brand-new connection requires just **1 RTT** (round-trip time) to establish — and for returning clients, **0-RTT resumption** is possible, meaning data can be sent before the handshake completes.
+
+### Multiplexing Without Head-of-Line Blocking
+
+HTTP/2 introduced multiplexing: multiple requests share one TCP connection. The problem is that TCP treats the connection as a single ordered byte stream. If one packet is lost, _all_ streams stall while TCP waits for retransmission — this is **head-of-line (HOL) blocking at the transport layer**.
+
+QUIC multiplexes streams independently at the protocol level. A lost packet on stream 3 does not block streams 1, 2, or 4. Each stream manages its own ordering and retransmission.
+
+### Connection Migration
+
+QUIC identifies connections with a **Connection ID** rather than a 4-tuple (IP + port). When a mobile user switches from Wi-Fi to cellular, the IP address changes — but the QUIC connection survives because the Connection ID stays constant. TCP connections would drop entirely in this scenario.
+
+### Congestion Control & Loss Recovery
+
+QUIC implements its own congestion control in user space, not in the kernel. This means it can iterate and improve faster than TCP. It also uses unique packet numbers that never repeat, making loss detection more precise than TCP's sequence numbers.
+
+---
+
+## Code Examples
+
+### 1. Enabling HTTP/3 in Node.js with `node:http2` + `@fastify/http2`
+
+Node.js has experimental QUIC/HTTP3 support under development. Today, the most production-ready path is using **Caddy**, **Nginx (with QUIC patch)**, or **Cloudflare** as your HTTP/3 termination layer in front of a Node.js server.
+
+Here's how to configure a Node.js HTTPS server that a QUIC-capable reverse proxy will sit in front of:
+
+```ts
+// server.ts
+import { createServer } from "node:https";
+import { readFileSync } from "node:fs";
+
+const options = {
+  key: readFileSync("./certs/server.key"),
+  cert: readFileSync("./certs/server.crt"),
+};
+
+const server = createServer(options, (req, res) => {
+  // Signal to the client that HTTP/3 is available on port 443
+  res.setHeader("Alt-Svc", 'h3=":443"; ma=86400');
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(
+    JSON.stringify({
+      message: "Hello from HTTPS — upgrade to HTTP/3 via Alt-Svc",
+    }),
+  );
+});
+
+server.listen(443, () => {
+  console.log("HTTPS server running on port 443");
+});
+```
+
+The `Alt-Svc` header is how servers advertise HTTP/3 support. The browser sees it on the first HTTP/1.1 or HTTP/2 response and upgrades subsequent requests to HTTP/3.
+
+---
+
+### 2. Caddy Server Config for HTTP/3 (Recommended for Local Dev & Production)
+
+Caddy enables HTTP/3 automatically with zero configuration when HTTPS is active.
+
+```
+# Caddyfile
+localhost {
+  reverse_proxy localhost:3000
+
+  # HTTP/3 is enabled by default in Caddy when HTTPS is active.
+  # You can explicitly configure QUIC options:
+  servers {
+    protocols h1 h2 h3
+  }
+}
+```
+
+Run Caddy and check response headers:
+
+```bash
+curl -sI --http3 https://localhost | grep -i "alt-svc\|quic\|http"
+```
+
+---
+
+### 3. Verifying HTTP/3 in Next.js (App Router)
+
+Next.js deployed on Vercel or behind Cloudflare gets HTTP/3 automatically. You can verify the protocol in use from a Server Component:
+
+```tsx
+// app/debug/protocol/page.tsx
+// This is a Server Component — no 'use client' needed
+
+interface HeadersInfo {
+  protocol: string | null;
+  via: string | null;
+}
+
+export default async function ProtocolDebugPage() {
+  // In Next.js App Router, headers() gives access to incoming request headers
+  const { headers } = await import("next/headers");
+  const headersList = await headers();
+
+  const info: HeadersInfo = {
+    // Cloudflare sets this header to indicate the request protocol
+    protocol: headersList.get("x-forwarded-proto"),
+    via: headersList.get("via"),
+  };
+
+  return (
+    <main className="p-8 font-mono">
+      <h1 className="text-2xl font-bold mb-4">Protocol Debug</h1>
+      <pre className="bg-gray-100 p-4 rounded">
+        {JSON.stringify(info, null, 2)}
+      </pre>
+    </main>
+  );
+}
+```
+
+---
+
+### 4. Checking HTTP/3 Support with the Fetch API (Client-Side)
+
+There's no browser API to directly query which protocol was used for a request. Use the **Navigation Timing API** or check DevTools → Network → Protocol column. Here's how to log it via a Resource Timing observer:
+
+```tsx
+"use client";
+
+// app/components/ProtocolObserver.tsx
+import { useEffect } from "react";
+
+export function ProtocolObserver() {
+  useEffect(() => {
+    const observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (entry.entryType === "navigation") {
+          const navEntry = entry as PerformanceNavigationTiming;
+          // nextHopProtocol will be "h3" if HTTP/3 was used
+          console.log("Protocol used:", navEntry.nextHopProtocol);
+        }
+      }
+    });
+
+    observer.observe({ type: "navigation", buffered: true });
+
+    return () => observer.disconnect();
+  }, []);
+
+  return null; // This component only logs — renders nothing
+}
+```
+
+```tsx
+// app/layout.tsx
+import { ProtocolObserver } from "@/components/ProtocolObserver";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        <ProtocolObserver />
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+**E-commerce on mobile networks:** A user on a train browses a product listing page. Their connection fluctuates between 4G and 5G repeatedly. With HTTP/2 over TCP, each network switch drops the connection and requires a full TCP + TLS handshake — causing visible loading delays.
+
+With HTTP/3 + QUIC, the Connection ID survives the IP change. The page's 40 parallel asset requests (images, scripts, fonts) continue without interruption. Packet loss on one image stream doesn't stall the others. The result is a measurably smoother experience — Cloudflare reports **up to 12% faster load times** on high-latency or lossy connections with HTTP/3 enabled.
+
+**Video streaming:** QUIC's stream independence means a dropped packet in one video chunk doesn't block the audio or subtitle stream. Services like YouTube and Netflix use HTTP/3 for exactly this reason.
+
+---
+
+## Common Mistakes / Gotchas
+
+### 1. Assuming HTTP/3 is Always Active on First Request
+
+HTTP/3 requires HTTPS. The browser learns about HTTP/3 support via the `Alt-Svc` header on a prior HTTP/1.1 or HTTP/2 response. The _first_ request to a new origin will almost never use HTTP/3 — it upgrades on subsequent visits (or via DNS HTTPS records / QUIC transport hints).
+
+<Callout type="info">
+  Use `HTTPS` DNS records (`type=HTTPS` / SVCB) with `alpn=h3` to allow browsers
+  to attempt HTTP/3 on the very first request, bypassing the Alt-Svc discovery
+  step.
+</Callout>
+
+### 2. Firewalls and Middleboxes Blocking UDP 443
+
+QUIC runs on **UDP port 443**. Many corporate firewalls and older network equipment block UDP on that port or rate-limit it aggressively. QUIC clients (browsers) detect this and automatically fall back to HTTP/2 over TCP. Your app must continue to serve HTTP/1.1 and HTTP/2 — HTTP/3 is an upgrade, not a replacement.
+
+<Callout type="warn">
+  Never assume HTTP/3 will be used. Always benchmark with realistic network
+  conditions and ensure your server gracefully handles HTTP/2 fallback.
+</Callout>
+
+### 3. Misattributing Performance Gains (or Losses)
+
+QUIC has higher CPU overhead than TCP because encryption and multiplexing happen in user space rather than the kernel. On low-latency, high-bandwidth networks (like a datacenter LAN), HTTP/3 can actually be _slower_ than HTTP/2. The gains are most pronounced on **high-latency, lossy networks** (mobile, satellite, intercontinental). Profile before assuming HTTP/3 is always better.
+
+### 4. Conflating HTTP/3 with HTTP/2 Push
+
+HTTP/2 Server Push was deprecated and removed in most browsers. HTTP/3 does not resurrect it. If you were relying on push for preloading assets, the modern replacement is the `103 Early Hints` status code, which works with HTTP/2 and HTTP/3.
+
+```ts
+// Sending 103 Early Hints in Node.js
+res.writeEarlyHints({
+  link: "</styles/main.css>; rel=preload; as=style, </scripts/app.js>; rel=preload; as=script",
+});
+```
+
+### 5. Not Testing 0-RTT Replay Risks
+
+QUIC's 0-RTT resumption lets clients send data before the handshake completes — but this data is **replayable**. An attacker can replay 0-RTT data to trigger state-mutating operations. Never allow 0-RTT for non-idempotent requests (POST, PUT, DELETE). TLS 1.3 and QUIC implementations offer ways to reject 0-RTT for sensitive endpoints.
+
+---
+
+## Summary
+
+HTTP/3 replaces TCP with QUIC — a UDP-based transport protocol with built-in TLS 1.3, independent stream multiplexing, and connection migration. The biggest wins are on lossy and high-latency networks where TCP's head-of-line blocking and connection drops are most painful. In practice, enabling HTTP/3 means configuring your reverse proxy (Caddy, Nginx with QUIC, Cloudflare) to advertise `h3` via `Alt-Svc` — your application code doesn't change. Always maintain HTTP/2 and HTTP/1.1 fallback since UDP port 443 is frequently blocked. Measure the actual impact in your deployment environment before assuming performance improvements.

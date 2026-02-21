@@ -1,0 +1,269 @@
+---
+title: REST vs GraphQL vs tRPC
+description: A practical comparison of REST, GraphQL, and tRPC to help you choose the right API paradigm for your Next.js or Node.js project.
+---
+
+## Overview
+
+When building a web application, one of the earliest architectural decisions you'll make is how your frontend and backend communicate. Three paradigms dominate modern development:
+
+- **REST** — Resource-based HTTP endpoints, the long-standing industry default.
+- **GraphQL** — A query language that lets clients request exactly the data they need.
+- **tRPC** — End-to-end typesafe RPC calls with zero schema duplication, built for TypeScript-first stacks.
+
+Each has a distinct philosophy, set of tradeoffs, and a class of projects where it excels. Choosing the wrong one adds unnecessary complexity; choosing the right one disappears into the background.
+
+---
+
+## How It Works
+
+### REST
+
+REST maps operations to HTTP verbs and URLs. A `GET /products/42` fetches a product; a `PATCH /products/42` updates it. The server defines the shape of every response. Clients take what they get.
+
+This works well when your API is consumed by many different clients (mobile apps, third parties, partner integrations) because it's language-agnostic and universally understood. The downside is over-fetching (getting fields you don't need) and under-fetching (needing multiple round-trips to assemble a UI).
+
+### GraphQL
+
+GraphQL exposes a single endpoint (`POST /graphql`). The client sends a query describing exactly the shape of data it wants, and the server resolves only those fields. This eliminates over- and under-fetching.
+
+The tradeoff is operational complexity: you need a schema, resolvers, a client-side cache (Apollo, urql, or TanStack Query with a GraphQL fetcher), and tooling for things like persisted queries and rate limiting. For a public API with diverse consumers, this investment pays off. For an internal app with one frontend, it often doesn't.
+
+### tRPC
+
+tRPC is not a wire protocol — it's a TypeScript layer over HTTP. You define procedures on the server as plain TypeScript functions. The client calls them as if they were local async functions. No schema file, no codegen step, no REST endpoint design. Types flow automatically from server to client via TypeScript inference.
+
+tRPC is explicitly designed for **full-stack TypeScript monorepos** where the frontend and backend are developed together. It does not produce a public API contract. If you need to expose your API to non-TypeScript consumers, tRPC is the wrong tool.
+
+<Callout type="info">
+  tRPC v11 works seamlessly with Next.js App Router via React Server Components
+  and the `@trpc/react-query` adapter. Server Actions are a valid alternative
+  for simpler mutations, but tRPC gives you more structure at scale.
+</Callout>
+
+---
+
+## Code Examples
+
+### REST — Route Handler in Next.js App Router
+
+```ts
+// app/api/products/[id]/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { db } from "@/lib/db";
+
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: { id: string } },
+) {
+  const product = await db.product.findUnique({
+    where: { id: params.id },
+    select: { id: true, name: true, price: true, stock: true },
+  });
+
+  if (!product) {
+    return NextResponse.json({ error: "Product not found" }, { status: 404 });
+  }
+
+  return NextResponse.json(product);
+}
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: { id: string } },
+) {
+  const body = await req.json();
+
+  const updated = await db.product.update({
+    where: { id: params.id },
+    data: { price: body.price }, // only allow price updates via this endpoint
+  });
+
+  return NextResponse.json(updated);
+}
+```
+
+### GraphQL — Schema + Resolver with graphql-yoga
+
+```ts
+// app/api/graphql/route.ts
+import { createSchema, createYoga } from "graphql-yoga";
+import { db } from "@/lib/db";
+
+const schema = createSchema({
+  typeDefs: /* GraphQL */ `
+    type Product {
+      id: ID!
+      name: String!
+      price: Float!
+    }
+
+    type Query {
+      product(id: ID!): Product
+      products: [Product!]!
+    }
+
+    type Mutation {
+      updatePrice(id: ID!, price: Float!): Product!
+    }
+  `,
+  resolvers: {
+    Query: {
+      product: (_root, { id }) => db.product.findUnique({ where: { id } }),
+
+      products: () => db.product.findMany({ orderBy: { name: "asc" } }),
+    },
+    Mutation: {
+      updatePrice: (_root, { id, price }) =>
+        db.product.update({ where: { id }, data: { price } }),
+    },
+  },
+});
+
+const { handleRequest } = createYoga({
+  schema,
+  graphqlEndpoint: "/api/graphql",
+});
+
+export const GET = handleRequest;
+export const POST = handleRequest;
+```
+
+The client can now query only the fields it needs:
+
+```graphql
+query GetProductName($id: ID!) {
+  product(id: $id) {
+    name
+    price
+  }
+}
+```
+
+### tRPC — Router + Client in a Next.js Monorepo
+
+**Server router:**
+
+```ts
+// server/routers/product.ts
+import { z } from "zod";
+import { router, publicProcedure } from "../trpc";
+import { db } from "@/lib/db";
+
+export const productRouter = router({
+  getById: publicProcedure
+    .input(z.object({ id: z.string() }))
+    .query(async ({ input }) => {
+      const product = await db.product.findUnique({
+        where: { id: input.id },
+      });
+      if (!product) throw new Error("Product not found");
+      return product; // TypeScript infers this return type automatically
+    }),
+
+  updatePrice: publicProcedure
+    .input(z.object({ id: z.string(), price: z.number().positive() }))
+    .mutation(async ({ input }) => {
+      return db.product.update({
+        where: { id: input.id },
+        data: { price: input.price },
+      });
+    }),
+});
+```
+
+**Client usage (no type imports needed — inferred automatically):**
+
+```tsx
+// app/products/[id]/page.tsx  ← Server Component
+import { serverClient } from "@/server/trpc-server-client";
+
+export default async function ProductPage({
+  params,
+}: {
+  params: { id: string };
+}) {
+  // Fully typesafe — autocomplete works, no codegen required
+  const product = await serverClient.product.getById({ id: params.id });
+
+  return (
+    <div>
+      <h1>{product.name}</h1>
+      <p>${product.price.toFixed(2)}</p>
+    </div>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+**E-commerce platform with a mixed consumer base:**
+
+- The **public-facing storefront** (Next.js) and **internal admin dashboard** are built in TypeScript and share a monorepo → use **tRPC** for all internal APIs. Instant type safety, no schema maintenance.
+- A **mobile app** built by a third-party team in Swift and Kotlin needs to integrate with your catalog → expose a **REST API** from the same Next.js backend using Route Handlers. Easy to document with OpenAPI.
+- A **partner portal** where enterprise clients need to compose complex queries across products, orders, and inventory without you building bespoke endpoints for each use case → layer a **GraphQL API** on top using graphql-yoga or Apollo Server.
+
+In practice, many production apps use more than one paradigm. tRPC internally, REST or GraphQL externally.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Using tRPC when you need a public API**
+
+tRPC has no stable wire contract. Its HTTP calls are an implementation detail. If a non-TypeScript client — or even a TypeScript client outside your monorepo — needs to consume your API, tRPC forces that consumer to import your server types as a package. This quickly becomes a versioning and deployment problem. Use REST or GraphQL for public-facing APIs.
+
+**2. Defaulting to GraphQL for internal apps**
+
+GraphQL's value scales with the number of distinct clients with different data needs. A single Next.js frontend backed by GraphQL often means you've added a resolver layer, a client-side cache, and a schema to maintain — with zero benefit over direct database calls via Server Components or tRPC. Start simple.
+
+**3. Ignoring N+1 query problems in GraphQL**
+
+GraphQL resolvers run per-field, per-item. Without a DataLoader (or an equivalent batching layer), fetching a list of 50 orders each with a nested `customer` field triggers 51 database queries instead of 2. This is the single most common performance bug in new GraphQL implementations.
+
+```ts
+// ❌ Without DataLoader — triggers N+1 queries
+resolvers: {
+  Order: {
+    customer: (order) => db.user.findUnique({ where: { id: order.userId } }),
+  },
+}
+
+// ✅ With DataLoader — batches into a single query
+import DataLoader from "dataloader";
+
+const userLoader = new DataLoader(async (ids: readonly string[]) => {
+  const users = await db.user.findMany({ where: { id: { in: [...ids] } } });
+  return ids.map((id) => users.find((u) => u.id === id) ?? null);
+});
+
+resolvers: {
+  Order: {
+    customer: (order) => userLoader.load(order.userId),
+  },
+}
+```
+
+**4. Treating REST verbs as purely conventional**
+
+`GET` requests must be idempotent and safe — meaning no side effects and repeatable without consequence. Running a mutation on a `GET` endpoint breaks browser caching, CDN behavior, and link prefetching (Next.js prefetches `<Link>` hrefs on hover). Always use `POST`, `PUT`, `PATCH`, or `DELETE` for state changes.
+
+<Callout type="warn">
+  Never perform writes (database inserts, updates, deletions, emails sent)
+  inside a `GET` handler. Next.js and browsers will prefetch and cache GET
+  requests in ways that can silently trigger those writes multiple times.
+</Callout>
+
+**5. Skipping input validation in tRPC**
+
+tRPC's type inference does not replace runtime validation. Always attach a Zod (or Valibot) schema via `.input()`. Without it, malformed or malicious payloads reach your resolver as `unknown`.
+
+---
+
+## Summary
+
+REST is the right default when your API has multiple consumers, needs to be publicly documented, or is consumed by non-TypeScript clients. GraphQL earns its complexity when diverse clients need flexible, composable queries over a shared data graph. tRPC is the fastest path to a typesafe internal API when your entire stack is TypeScript and lives in one repo — but it's not a public API solution.
+
+In practice, these paradigms aren't mutually exclusive. A mature application often exposes REST or GraphQL externally while using tRPC or Server Components internally. Match the tool to the consumer, not to the trend.

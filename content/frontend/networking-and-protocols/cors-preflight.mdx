@@ -1,0 +1,292 @@
+---
+title: CORS Preflight
+description: A complete guide to how CORS preflight requests work, why browsers send them, and how to handle them correctly in modern web APIs.
+---
+
+## Overview
+
+CORS (Cross-Origin Resource Sharing) is a browser security mechanism that restricts HTTP requests made from one origin (domain, port, or protocol) to a different origin. When your frontend at `https://app.example.com` calls an API at `https://api.example.com`, the browser enforces CORS rules.
+
+A **preflight request** is an automatic `OPTIONS` request the browser sends _before_ the actual request, asking the server: "Are you okay with this kind of request from this origin?" If the server doesn't respond correctly, the browser blocks the real request entirely — and your app breaks.
+
+<Callout type="info">
+  Preflight only applies to "non-simple" requests. Simple requests (basic
+  GET/POST with standard headers) go through without a preflight. More on this
+  in [How It Works](#how-it-works).
+</Callout>
+
+---
+
+## How It Works
+
+### Simple vs. Non-Simple Requests
+
+A request is considered **simple** when it meets all of the following:
+
+- Method is `GET`, `POST`, or `HEAD`
+- Headers are limited to `Accept`, `Accept-Language`, `Content-Language`, or `Content-Type`
+- `Content-Type` is one of: `text/plain`, `multipart/form-data`, or `application/x-www-form-urlencoded`
+
+Anything outside these constraints triggers a preflight. This includes:
+
+- Using `Authorization` or custom headers like `X-Api-Key`
+- Using methods like `PUT`, `PATCH`, or `DELETE`
+- Sending `Content-Type: application/json`
+
+### The Preflight Flow
+
+```
+Browser                             Server
+   |                                   |
+   |-- OPTIONS /api/data ------------> |   ← Preflight request
+   |   Origin: https://app.example.com |
+   |   Access-Control-Request-Method: PUT
+   |   Access-Control-Request-Headers: Authorization, Content-Type
+   |                                   |
+   |<-- 204 No Content ---------------- |   ← Preflight response
+   |   Access-Control-Allow-Origin: https://app.example.com
+   |   Access-Control-Allow-Methods: PUT, DELETE
+   |   Access-Control-Allow-Headers: Authorization, Content-Type
+   |   Access-Control-Max-Age: 86400   |
+   |                                   |
+   |-- PUT /api/data ----------------> |   ← Actual request proceeds
+```
+
+The browser caches the preflight result for the duration specified in `Access-Control-Max-Age`, avoiding redundant `OPTIONS` requests on subsequent calls.
+
+---
+
+## Code Examples
+
+### Handling CORS in a Node.js / Express API
+
+```ts
+// server.ts
+import express from "express";
+import cors from "cors";
+
+const app = express();
+
+const allowedOrigins = [
+  "https://app.example.com",
+  "https://staging.example.com",
+];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (e.g., curl, Postman) or from allowed list
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS blocked for origin: ${origin}`));
+      }
+    },
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Api-Key"],
+    credentials: true, // Required if the client sends cookies or auth headers
+    maxAge: 86400, // Cache preflight response for 24 hours
+  }),
+);
+
+app.use(express.json());
+
+app.get("/api/products", (req, res) => {
+  res.json([{ id: 1, name: "Widget" }]);
+});
+
+app.listen(3000, () => console.log("API running on port 3000"));
+```
+
+### Handling CORS Manually (Without a Library)
+
+If you need fine-grained control or are not using Express:
+
+```ts
+// middleware/cors.ts
+import type { IncomingMessage, ServerResponse } from "http";
+
+const ALLOWED_ORIGIN = "https://app.example.com";
+
+export function applyCors(req: IncomingMessage, res: ServerResponse): boolean {
+  const origin = req.headers.origin;
+
+  if (origin === ALLOWED_ORIGIN) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  }
+
+  // Respond to preflight without executing business logic
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization",
+    );
+    res.setHeader("Access-Control-Max-Age", "86400");
+    res.writeHead(204);
+    res.end();
+    return true; // Signal that the request was a preflight and is fully handled
+  }
+
+  return false;
+}
+```
+
+```ts
+// server.ts
+import http from "http";
+import { applyCors } from "./middleware/cors.js";
+
+const server = http.createServer((req, res) => {
+  const handled = applyCors(req, res);
+  if (handled) return; // Don't continue to route handlers for OPTIONS
+
+  // Normal route handling below
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ status: "ok" }));
+});
+
+server.listen(3000);
+```
+
+### Next.js App Router — Route Handler with CORS Headers
+
+```ts
+// app/api/products/route.ts
+import { NextRequest, NextResponse } from "next/server";
+
+const ALLOWED_ORIGIN = "https://shop.example.com";
+
+function corsHeaders(origin: string | null) {
+  if (origin !== ALLOWED_ORIGIN) return {};
+
+  return {
+    "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Max-Age": "86400",
+  };
+}
+
+// Handle preflight
+export async function OPTIONS(req: NextRequest) {
+  const origin = req.headers.get("origin");
+  return new NextResponse(null, {
+    status: 204,
+    headers: corsHeaders(origin),
+  });
+}
+
+export async function GET(req: NextRequest) {
+  const origin = req.headers.get("origin");
+
+  const products = [
+    { id: 1, name: "Keyboard", price: 129 },
+    { id: 2, name: "Monitor", price: 399 },
+  ];
+
+  return NextResponse.json(products, {
+    headers: corsHeaders(origin),
+  });
+}
+```
+
+<Callout type="warn">
+  In Next.js App Router, you must explicitly export an `OPTIONS` handler in each
+  route file that needs to support preflight. There is no global CORS middleware
+  built into the framework — use `middleware.ts` if you need project-wide CORS
+  handling.
+</Callout>
+
+### Next.js — Global CORS via `middleware.ts`
+
+```ts
+// middleware.ts (at the project root, next to app/)
+import { NextRequest, NextResponse } from "next/server";
+
+const ALLOWED_ORIGIN = "https://shop.example.com";
+
+export function middleware(req: NextRequest) {
+  const origin = req.headers.get("origin") ?? "";
+  const isAllowed = origin === ALLOWED_ORIGIN;
+
+  // Intercept and resolve preflight early
+  if (req.method === "OPTIONS") {
+    return new NextResponse(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": isAllowed ? origin : "",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Max-Age": "86400",
+      },
+    });
+  }
+
+  const response = NextResponse.next();
+
+  if (isAllowed) {
+    response.headers.set("Access-Control-Allow-Origin", origin);
+    response.headers.set("Access-Control-Allow-Credentials", "true");
+  }
+
+  return response;
+}
+
+export const config = {
+  // Apply only to API routes
+  matcher: "/api/:path*",
+};
+```
+
+---
+
+## Real-World Use Case
+
+You're building a headless e-commerce storefront at `https://shop.example.com` that fetches inventory and places orders via a separate REST API hosted at `https://api.example.com`.
+
+Every `POST /orders` call includes a `Content-Type: application/json` body and an `Authorization: Bearer <token>` header — both of which trigger a preflight. Without correct CORS headers on your API, every checkout attempt silently fails for users, even though the API works fine when tested with Postman (which doesn't enforce CORS).
+
+Setting up CORS correctly on the API server — and caching the preflight response with a long `maxAge` — ensures checkout flows work in-browser without adding a round trip for every request.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Using `Access-Control-Allow-Origin: *` with credentials**
+
+Wildcard origins and `credentials: true` are mutually exclusive. The browser will reject the response if you combine them.
+
+```ts
+// ❌ This will fail when the client uses withCredentials or sends cookies
+res.setHeader("Access-Control-Allow-Origin", "*");
+res.setHeader("Access-Control-Allow-Credentials", "true");
+
+// ✅ You must echo the specific requesting origin
+res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
+res.setHeader("Access-Control-Allow-Credentials", "true");
+```
+
+**2. Forgetting to handle `OPTIONS` separately**
+
+Many developers add CORS headers to GET/POST handlers but forget that the preflight `OPTIONS` request hits before those handlers run. The `OPTIONS` request must return a `2xx` response with the correct headers — otherwise the real request never reaches your business logic.
+
+**3. Debugging CORS errors in the wrong place**
+
+CORS errors appear in the browser console but are enforced _by the browser_, not the server. The server may return a `200 OK` but the browser still blocks the response if the CORS headers are missing or incorrect. Always inspect the **response headers** of the `OPTIONS` request in the Network tab, not just the error message.
+
+<Callout type="warn">
+  Never disable CORS entirely in production by reflecting any origin without
+  validation. Always maintain an explicit allowlist of trusted origins.
+</Callout>
+
+**4. Not caching preflight responses**
+
+Omitting `Access-Control-Max-Age` means the browser sends an `OPTIONS` request before _every_ non-simple API call. For an app making frequent API calls, this doubles your request count. Set `maxAge` to at least `3600` (1 hour) in production.
+
+---
+
+## Summary
+
+CORS preflight is an automatic browser security check — an `OPTIONS` request sent before non-simple cross-origin requests to verify the server allows them. Your server must respond with the correct `Access-Control-Allow-*` headers, or the browser will block the actual request. Always maintain an explicit origin allowlist rather than using wildcards, especially when credentials are involved. Handle `OPTIONS` as a distinct case in your route logic or middleware, and use `Access-Control-Max-Age` to cache preflight results and reduce overhead. When debugging, inspect the response headers of the `OPTIONS` request directly in your browser's Network tab.
