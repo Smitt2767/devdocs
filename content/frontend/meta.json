@@ -5,6 +5,19 @@
     "index",
     "rendering-and-browser-pipeline",
     "component-and-ui-architecture",
-    "javascript-runtime-and-async"
+    "state-management-and-data-patterns",
+    "javascript-runtime-and-async",
+    "bundling-and-code-delivery",
+    "caching-and-storage",
+    "networking-and-protocols",
+    "security",
+    "css-and-layout",
+    "browser-observation-apis",
+    "performance-and-core-web-vitals",
+    "memory-and-garbage-collection",
+    "concurrency-and-workers",
+    "accessibility",
+    "devx-and-delivery",
+    "architecture-and-decision-making"
   ]
 }
