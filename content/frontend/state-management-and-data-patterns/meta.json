@@ -1,0 +1,14 @@
+{
+  "title": "State Management & Data Patterns",
+  "pages": [
+    "immutable-data-patterns",
+    "memoization-pitfalls",
+    "race-conditions-ui-state",
+    "optimistic-ui-rollback-strategy",
+    "offline-conflict-resolution",
+    "idempotent-ui-actions",
+    "derived-state-vs-redundant-state",
+    "state-boundaries",
+    "url-as-state"
+  ]
+}

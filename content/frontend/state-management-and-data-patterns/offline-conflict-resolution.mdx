@@ -1,0 +1,341 @@
+---
+title: Offline Conflict Resolution
+description: How to detect, handle, and resolve data conflicts when a client reconnects after operating offline.
+---
+
+## Overview
+
+When a user edits data while offline, and another client edits the same data in the meantime, you end up with a **conflict**: two divergent versions of the same record that must be reconciled before being saved.
+
+Offline conflict resolution is the set of strategies your app uses to decide which version wins — or how to merge them — when the client comes back online.
+
+This matters any time you build apps with offline support: note-taking tools, collaborative editors, field-service apps, or any PWA that caches and queues writes.
+
+---
+
+## How It Works
+
+The core problem is **divergent state**. Think of it like two people editing the same Google Doc while one of them is on a plane with no Wi-Fi. When the plane lands, you can't just blindly overwrite — you need to figure out what changed, where, and whether the changes are compatible.
+
+There are three common resolution strategies:
+
+**1. Last Write Wins (LWW)**
+The write with the latest timestamp wins. Simple, but lossy — the other write is silently discarded.
+
+**2. Server Wins / Client Wins**
+Pick one side unconditionally. Easy to implement, but often wrong for the user.
+
+**3. Merge / Three-Way Merge**
+Compare both the client version and server version against a known common ancestor. Changes that don't overlap are merged automatically; overlapping changes surface a conflict for the user to resolve.
+
+Most robust offline-first apps use a combination: auto-merge where possible, surface conflicts to the user only when necessary.
+
+The mechanism typically relies on:
+
+- **Vector clocks** or **Lamport timestamps** to establish causal ordering
+- **CRDTs** (Conflict-free Replicated Data Types) for data structures that merge automatically
+- **ETags / version numbers** to detect stale writes on the server
+
+---
+
+## Code Examples
+
+### 1. Optimistic writes with version-based conflict detection (Next.js Server Action + SQLite via Drizzle)
+
+```ts
+// lib/db/schema.ts
+import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+
+export const notes = sqliteTable("notes", {
+  id: text("id").primaryKey(),
+  content: text("content").notNull(),
+  version: integer("version").notNull().default(1), // increment on every write
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+});
+```
+
+```tsx
+// app/notes/[id]/actions.ts
+"use server";
+
+import { db } from "@/lib/db";
+import { notes } from "@/lib/db/schema";
+import { eq } from "drizzle-orm";
+
+type SaveResult =
+  | { status: "ok"; version: number }
+  | { status: "conflict"; serverContent: string; serverVersion: number };
+
+export async function saveNote(
+  id: string,
+  content: string,
+  clientVersion: number, // the version the client last saw
+): Promise<SaveResult> {
+  const existing = await db.query.notes.findFirst({
+    where: eq(notes.id, id),
+  });
+
+  if (!existing) throw new Error("Note not found");
+
+  // The client's version is stale — someone else wrote in the meantime
+  if (existing.version !== clientVersion) {
+    return {
+      status: "conflict",
+      serverContent: existing.content,
+      serverVersion: existing.version,
+    };
+  }
+
+  // Safe to write — versions match
+  await db
+    .update(notes)
+    .set({
+      content,
+      version: existing.version + 1,
+      updatedAt: new Date(),
+    })
+    .where(eq(notes.id, id));
+
+  return { status: "ok", version: existing.version + 1 };
+}
+```
+
+```tsx
+// app/notes/[id]/NoteEditor.tsx
+"use client";
+
+import { useState, useTransition } from "react";
+import { saveNote } from "./actions";
+
+interface Props {
+  id: string;
+  initialContent: string;
+  initialVersion: number;
+}
+
+export function NoteEditor({ id, initialContent, initialVersion }: Props) {
+  const [content, setContent] = useState(initialContent);
+  const [version, setVersion] = useState(initialVersion);
+  const [conflict, setConflict] = useState<{
+    serverContent: string;
+    serverVersion: number;
+  } | null>(null);
+  const [isPending, startTransition] = useTransition();
+
+  function handleSave() {
+    startTransition(async () => {
+      const result = await saveNote(id, content, version);
+
+      if (result.status === "conflict") {
+        // Surface the conflict — let the user decide
+        setConflict({
+          serverContent: result.serverContent,
+          serverVersion: result.serverVersion,
+        });
+      } else {
+        setVersion(result.version); // update local version tracker
+        setConflict(null);
+      }
+    });
+  }
+
+  function acceptServerVersion() {
+    if (!conflict) return;
+    setContent(conflict.serverContent);
+    setVersion(conflict.serverVersion);
+    setConflict(null);
+  }
+
+  return (
+    <div>
+      <textarea
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+        rows={12}
+        className="w-full border rounded p-2 font-mono text-sm"
+      />
+
+      <button
+        onClick={handleSave}
+        disabled={isPending}
+        className="mt-2 px-4 py-2 bg-blue-600 text-white rounded"
+      >
+        {isPending ? "Saving…" : "Save"}
+      </button>
+
+      {conflict && (
+        <div className="mt-4 border border-red-400 rounded p-4 bg-red-50">
+          <p className="font-semibold text-red-700">
+            ⚠ Conflict detected — this note was updated elsewhere.
+          </p>
+          <p className="text-sm mt-1 text-gray-700">Server version:</p>
+          <pre className="text-sm bg-white border rounded p-2 mt-1 whitespace-pre-wrap">
+            {conflict.serverContent}
+          </pre>
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={acceptServerVersion}
+              className="px-3 py-1 bg-gray-700 text-white rounded text-sm"
+            >
+              Use server version
+            </button>
+            <button
+              onClick={() => setConflict(null)}
+              className="px-3 py-1 bg-blue-600 text-white rounded text-sm"
+            >
+              Keep my version (overwrite)
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+### 2. Queuing offline writes in IndexedDB and replaying on reconnect
+
+```ts
+// lib/offline-queue.ts
+
+interface QueuedWrite {
+  id: string; // record ID
+  content: string;
+  version: number;
+  queuedAt: number; // timestamp for ordering
+}
+
+const DB_NAME = "offline-queue";
+const STORE = "writes";
+
+function openDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(STORE, { keyPath: "id" });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function enqueueWrite(write: QueuedWrite): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    // Overwrites any previous pending write for the same record ID
+    tx.objectStore(STORE).put(write);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function flushQueue(
+  flushFn: (write: QueuedWrite) => Promise<void>,
+): Promise<void> {
+  const db = await openDB();
+  const writes: QueuedWrite[] = await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+
+  // Sort oldest-first so causal ordering is preserved
+  writes.sort((a, b) => a.queuedAt - b.queuedAt);
+
+  for (const write of writes) {
+    await flushFn(write);
+    // Remove from queue after successful flush
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).delete(write.id);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+}
+```
+
+```tsx
+// app/notes/[id]/useOfflineSync.ts
+"use client";
+
+import { useEffect } from "react";
+import { enqueueWrite, flushQueue } from "@/lib/offline-queue";
+import { saveNote } from "./actions";
+
+export function useOfflineSync() {
+  useEffect(() => {
+    async function flush() {
+      await flushQueue(async (write) => {
+        const result = await saveNote(write.id, write.content, write.version);
+        if (result.status === "conflict") {
+          // In a real app: dispatch to a global conflict inbox
+          console.warn("Conflict on flush for note", write.id, result);
+        }
+      });
+    }
+
+    window.addEventListener("online", flush);
+    // Attempt flush immediately in case we're already online
+    if (navigator.onLine) flush();
+
+    return () => window.removeEventListener("online", flush);
+  }, []);
+}
+```
+
+<Callout type="info">
+  The queue uses `put()` (not `add()`), so if the user edits the same note
+  multiple times while offline, only the latest pending write is kept per
+  record. This avoids replaying stale intermediate states.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+A field technician uses an inspection app on a tablet. They lose signal mid-shift and complete several inspection reports offline. Meanwhile, a supervisor updates one of the same reports in the office.
+
+When the technician reconnects:
+
+- Reports with no server-side changes are flushed silently via the queue.
+- The one report that was edited by both parties triggers a conflict UI, showing the technician the supervisor's version and letting them choose how to proceed.
+- Version numbers ensure neither write silently overwrites the other.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Using wall-clock timestamps as the sole source of truth**
+
+System clocks drift. A client whose clock is 5 minutes ahead will always "win" in a Last Write Wins scheme, even if its data is stale. Use monotonic version counters or vector clocks instead — or at minimum, let the server assign the authoritative timestamp.
+
+**2. Flushing the queue in parallel**
+
+It's tempting to use `Promise.all()` to flush writes concurrently for speed. Don't. If you have two writes to the same record (e.g., from different offline sessions), parallel flushing creates a race condition. Always flush sequentially.
+
+**3. Silently discarding conflicts**
+
+"Server wins" or "client wins" strategies feel convenient but destroy user trust. If a user spent 20 minutes writing offline and their work is silently overwritten, they will churn. Surface conflicts explicitly and give users control.
+
+**4. Not storing the version the client last saw**
+
+To detect a conflict, the server needs to know what version the client was editing _from_. Forgetting to track and send `clientVersion` with every write makes it impossible to distinguish a fresh write from a stale one.
+
+**5. Treating optimistic UI updates as ground truth**
+
+Optimistic updates improve perceived performance, but they must be rolled back cleanly on a conflict or network error. Keep a copy of the pre-optimistic state until the server confirms success.
+
+<Callout type="warn">
+  Never rely on `Date.now()` alone for ordering writes across clients. Two
+  clients can submit conflicting writes within the same millisecond, and clock
+  skew makes this worse on mobile devices.
+</Callout>
+
+---
+
+## Summary
+
+Offline conflict resolution is necessary whenever users can write data without a live server connection. The core challenge is detecting that two versions of the same record have diverged and deciding how to reconcile them. Version numbers or vector clocks on every record make conflicts detectable; an IndexedDB queue lets you replay writes in order once connectivity returns. For data that doesn't need human review, CRDTs can auto-merge. For everything else, surface the conflict to the user with enough context to make an informed choice — never discard their work silently.

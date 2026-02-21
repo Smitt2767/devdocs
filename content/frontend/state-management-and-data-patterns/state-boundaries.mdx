@@ -1,0 +1,276 @@
+---
+title: State Boundaries
+description: A practical guide to deciding when to use local component state, server state, or global client state in modern React and Next.js applications.
+---
+
+## Overview
+
+State management is one of the most consequential architectural decisions in a React application. Get it wrong and you end up with stale data, unnecessary re-renders, prop-drilling nightmares, or a global store bloated with things that never needed to be global.
+
+There are three distinct categories of state:
+
+- **Local state** — owned by a single component, lives and dies with it
+- **Server state** — data that originates on the server, cached and synced on the client
+- **Global (client) state** — shared UI state that multiple components need, but doesn't live on the server
+
+Each has a different job. Mixing them up is the root cause of most state-management pain.
+
+---
+
+## How It Works
+
+Think of your application's state as having a natural "home." The right home for a piece of state is usually the one that requires the least work to keep it correct.
+
+### Local State
+
+`useState` and `useReducer` are scoped to a component tree. When the component unmounts, the state disappears. This is the default choice — reach for it first.
+
+**Best for:** form inputs, toggle open/closed, hover effects, wizard step tracking within a single form.
+
+### Server State
+
+Server state is data you fetch from an API or database. It doesn't truly "live" on the client — the client holds a _cache_ of it. The server is the source of truth. Libraries like TanStack Query (React Query) or SWR manage this cache for you: background refetching, deduplication, stale-while-revalidate strategies.
+
+In Next.js App Router, React Server Components fetch data directly on the server, which often eliminates the need for client-side server state management entirely for read-heavy data.
+
+**Best for:** user profiles, product listings, posts, anything that lives in a database.
+
+### Global Client State
+
+This is shared UI state that has no server representation — it's purely a client-side concern. Theme (dark/light), sidebar collapsed, selected items in a multi-select UI, shopping cart (pre-checkout). Tools: Zustand, Jotai, or React Context for simple cases.
+
+<Callout type="warn">
+  Don't put server data (API responses) into a global store like Zustand. That's
+  what TanStack Query or RSCs are for. Using a global store for server data
+  forces you to manually handle loading, error, refetching, and cache
+  invalidation — work that specialized libraries already do correctly.
+</Callout>
+
+### The Decision Tree
+
+```
+Is this data fetched from a server/database?
+  ├─ YES → Is it read-only or rarely mutated from the client?
+  │         ├─ YES → Fetch in a React Server Component (no client state needed)
+  │         └─ NO  → Use TanStack Query / SWR with mutations
+  └─ NO  → Is it needed by more than one unrelated component subtree?
+            ├─ YES → Global client state (Zustand, Jotai, or Context)
+            └─ NO  → Local state (useState / useReducer)
+```
+
+---
+
+## Code Examples
+
+### 1. Local State — Form Input
+
+```tsx
+// app/components/search-bar.tsx
+"use client";
+
+import { useState } from "react";
+
+export function SearchBar({ onSearch }: { onSearch: (query: string) => void }) {
+  // Input value is ephemeral — no other component needs it
+  const [query, setQuery] = useState("");
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSearch(query);
+      }}
+    >
+      <input
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search products…"
+      />
+      <button type="submit">Search</button>
+    </form>
+  );
+}
+```
+
+### 2. Server State — React Server Component (No Client Cache Needed)
+
+```tsx
+// app/products/page.tsx
+// This is a Server Component by default — no 'use client' directive
+
+import { db } from "@/lib/db";
+import { ProductCard } from "@/components/product-card";
+
+export default async function ProductsPage() {
+  // Data fetched at request time, directly on the server
+  const products = await db.product.findMany({
+    orderBy: { createdAt: "desc" },
+  });
+
+  return (
+    <section>
+      <h1>All Products</h1>
+      <ul>
+        {products.map((product) => (
+          <ProductCard key={product.id} product={product} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+```
+
+<Callout type="info">
+  With RSCs, data fetching happens on the server and the result is streamed to
+  the client as HTML. There's no `useEffect`, no loading spinner wiring, no
+  client bundle cost for the fetch logic.
+</Callout>
+
+### 3. Server State — Client-Side with TanStack Query (for interactive data)
+
+Use this pattern when data needs to stay fresh during user interaction (e.g., a live inventory count, polling dashboard).
+
+```tsx
+// app/components/inventory-status.tsx
+"use client";
+
+import { useQuery } from "@tanstack/react-query";
+
+async function fetchInventory(productId: string) {
+  const res = await fetch(`/api/products/${productId}/inventory`);
+  if (!res.ok) throw new Error("Failed to fetch inventory");
+  return res.json() as Promise<{ count: number; reserved: number }>;
+}
+
+export function InventoryStatus({ productId }: { productId: string }) {
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["inventory", productId],
+    queryFn: () => fetchInventory(productId),
+    staleTime: 30_000, // Consider data fresh for 30 seconds
+    refetchInterval: 60_000, // Poll every 60 seconds
+  });
+
+  if (isLoading) return <span>Checking stock…</span>;
+  if (isError) return <span>Unable to load stock info</span>;
+
+  return <span>{data.count - data.reserved} units available</span>;
+}
+```
+
+### 4. Global Client State — Cart with Zustand
+
+```tsx
+// lib/stores/cart-store.ts
+import { create } from "zustand";
+
+interface CartItem {
+  productId: string;
+  name: string;
+  price: number;
+  quantity: number;
+}
+
+interface CartStore {
+  items: CartItem[];
+  addItem: (item: Omit<CartItem, "quantity">) => void;
+  removeItem: (productId: string) => void;
+  totalItems: () => number;
+}
+
+export const useCartStore = create<CartStore>((set, get) => ({
+  items: [],
+
+  addItem: (incoming) =>
+    set((state) => {
+      const existing = state.items.find(
+        (i) => i.productId === incoming.productId,
+      );
+      if (existing) {
+        // Increment quantity if already in cart
+        return {
+          items: state.items.map((i) =>
+            i.productId === incoming.productId
+              ? { ...i, quantity: i.quantity + 1 }
+              : i,
+          ),
+        };
+      }
+      return { items: [...state.items, { ...incoming, quantity: 1 }] };
+    }),
+
+  removeItem: (productId) =>
+    set((state) => ({
+      items: state.items.filter((i) => i.productId !== productId),
+    })),
+
+  totalItems: () => get().items.reduce((sum, i) => sum + i.quantity, 0),
+}));
+```
+
+```tsx
+// app/components/cart-button.tsx
+"use client";
+
+import { useCartStore } from "@/lib/stores/cart-store";
+
+export function CartButton() {
+  const totalItems = useCartStore((state) => state.totalItems());
+
+  return (
+    <button aria-label={`Cart, ${totalItems} items`}>🛒 {totalItems}</button>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+Consider an e-commerce product detail page:
+
+- **Product data** (title, description, images) → React Server Component fetch. It's read-only and comes from the database. No client state needed.
+- **Inventory count** (updates frequently) → TanStack Query with a short `staleTime` so the number stays accurate during the session.
+- **Selected size/color** → `useState` in the `ProductOptions` component. It's ephemeral, local to that UI section.
+- **Cart contents** → Zustand global store. The cart icon in the header and the "Add to Cart" button in the product page are unrelated in the component tree but both need access to it.
+
+Each piece of state lands in exactly the right home. No RSC is polluted with client cart logic, no global store is bloated with server data.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Putting server data in a global store**
+
+Fetching products in a `useEffect`, storing the result in Zustand, and manually invalidating it on mutation is re-implementing a worse version of TanStack Query. Use the right tool: RSC for static reads, TanStack Query for dynamic reads with mutations.
+
+**2. Making everything global**
+
+A common overreaction to prop-drilling is hoisting all state into a global store. This causes unrelated components to re-render when unrelated state changes and makes it impossible to reason about what causes a re-render. Before reaching for Zustand or Context, ask: "Do two _genuinely unrelated_ component subtrees need this?" If the answer is no, lift state up normally or keep it local.
+
+**3. Using Context for high-frequency updates**
+
+React Context re-renders _every consumer_ when its value changes. Never put frequently-updating state (mouse position, scroll offset, rapidly changing counters) in Context. Use Zustand with selector subscriptions instead — consumers only re-render when the slice they select changes.
+
+```tsx
+// ✅ Fine — reads a stable slice, won't re-render on unrelated cart changes
+const totalItems = useCartStore((state) => state.totalItems());
+
+// ❌ Re-renders on every cart mutation, even if totalItems didn't change
+const { items, totalItems } = useCartStore();
+```
+
+**4. Fetching in Client Components when a Server Component would do**
+
+If you're inside the App Router and writing `useEffect(() => fetch(...))` for data that doesn't require user interaction to trigger, you probably want a Server Component instead. Client-side fetches add waterfall latency, bundle size, and loading states that RSCs eliminate entirely.
+
+<Callout type="warn">
+  `'use client'` is not required for most components in the App Router. Only add
+  it when you genuinely need browser APIs, event handlers, or hooks. Keep your
+  component tree as server-rendered as possible.
+</Callout>
+
+---
+
+## Summary
+
+Local state (`useState`) is the default — use it for anything a single component owns and that disappears when the component unmounts. Server state is data that originates in a database or API; in the App Router, prefer React Server Components for reads and TanStack Query for interactive, frequently-invalidated data. Global client state (Zustand, Jotai) is reserved for shared UI state with no server representation — shopping carts, themes, modals. The most common mistake is treating these categories as interchangeable: server data does not belong in a global store, and not every shared piece of state needs to be global. When in doubt, start with local state and promote it only when necessity demands it.

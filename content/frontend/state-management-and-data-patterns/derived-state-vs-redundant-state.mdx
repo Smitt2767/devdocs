@@ -1,0 +1,223 @@
+---
+title: Derived vs. Redundant State
+description: How to distinguish state that should be computed on the fly from state that genuinely needs to be stored, and why conflating the two causes bugs.
+---
+
+## Overview
+
+Every piece of state you add to a component has a cost: it must be initialized, kept in sync, and can diverge from reality. **Redundant state** is state that can be fully calculated from existing state, props, or server data — storing it separately creates a second source of truth that can go stale.
+
+**Derived state** is the alternative: compute the value directly from its source instead of storing a copy.
+
+The rule of thumb:
+
+> If you can calculate it, don't store it.
+
+## How It Works
+
+React re-renders a component whenever its state or props change. Because the component function re-runs on every render, any value you compute inline is automatically recalculated with the latest data — no `useEffect` required.
+
+Redundant state breaks this flow. You store a value, then have to watch for changes to the source and manually sync the copy. That sync almost always lives in a `useEffect`, which runs _after_ the render — meaning there's at least one render where the stored value is stale.
+
+```
+Source of truth ──► render ──► derived value (always fresh)
+                         ↑
+                    computed inline
+
+Source of truth ──► render ──► stale stored value ──► useEffect ──► re-render
+                                      ↑
+                           (one render with wrong data)
+```
+
+The second flow is harder to reason about, slower, and a common source of subtle bugs.
+
+## Code Examples
+
+### ❌ Redundant State — the problematic pattern
+
+```tsx
+"use client";
+
+import { useState, useEffect } from "react";
+
+interface CartItem {
+  id: string;
+  name: string;
+  price: number;
+  quantity: number;
+}
+
+export function CartSummary({ items }: { items: CartItem[] }) {
+  // ❌ Redundant: totalPrice can be computed from `items`
+  const [totalPrice, setTotalPrice] = useState(0);
+
+  // ❌ Must now manually keep totalPrice in sync
+  useEffect(() => {
+    setTotalPrice(
+      items.reduce((sum, item) => sum + item.price * item.quantity, 0),
+    );
+  }, [items]);
+
+  return <p>Total: ${totalPrice.toFixed(2)}</p>;
+}
+```
+
+The problem: on the first render, `totalPrice` is `0` even if `items` is non-empty. There's a flash of wrong data, and the `useEffect` adds complexity with no benefit.
+
+---
+
+### ✅ Derived State — the correct pattern
+
+```tsx
+"use client";
+
+interface CartItem {
+  id: string;
+  name: string;
+  price: number;
+  quantity: number;
+}
+
+export function CartSummary({ items }: { items: CartItem[] }) {
+  // ✅ Computed inline — always in sync, no extra state, no useEffect
+  const totalPrice = items.reduce(
+    (sum, item) => sum + item.price * item.quantity,
+    0,
+  );
+
+  return <p>Total: ${totalPrice.toFixed(2)}</p>;
+}
+```
+
+---
+
+### ✅ Memoizing expensive derived values
+
+If the derivation is computationally expensive, use `useMemo` — but only then.
+
+```tsx
+"use client";
+
+import { useMemo } from "react";
+
+interface Product {
+  id: string;
+  name: string;
+  tags: string[];
+  price: number;
+}
+
+interface Props {
+  products: Product[];
+  activeTag: string;
+}
+
+export function ProductList({ products, activeTag }: Props) {
+  // ✅ useMemo avoids re-filtering a large array on every render
+  // Only recomputes when `products` or `activeTag` changes
+  const filtered = useMemo(
+    () => products.filter((p) => p.tags.includes(activeTag)),
+    [products, activeTag],
+  );
+
+  return (
+    <ul>
+      {filtered.map((p) => (
+        <li key={p.id}>
+          {p.name} — ${p.price}
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+<Callout type="info">
+  `useMemo` is an optimization, not a correctness tool. Plain inline derivation
+  is correct by default. Add `useMemo` only when profiling shows a real
+  performance issue.
+</Callout>
+
+---
+
+### ✅ Derived state in a Server Component
+
+Server Components never hold state, so derivation is the only option — and it's clean.
+
+```tsx
+// app/orders/page.tsx — Server Component (no 'use client')
+import { getOrders } from "@/lib/data";
+
+export default async function OrdersPage() {
+  const orders = await getOrders();
+
+  // Derived directly — no useState, no useEffect, no stale data
+  const completedCount = orders.filter((o) => o.status === "completed").length;
+  const totalRevenue = orders
+    .filter((o) => o.status === "completed")
+    .reduce((sum, o) => sum + o.total, 0);
+
+  return (
+    <section>
+      <h1>Orders</h1>
+      <p>{completedCount} completed orders</p>
+      <p>Total revenue: ${totalRevenue.toFixed(2)}</p>
+    </section>
+  );
+}
+```
+
+## Real-World Use Case
+
+In an e-commerce checkout flow, you might track `cartItems` (an array of items with quantities) as genuine state. Everything else — item count, subtotal, whether the cart is empty, which items qualify for a discount — is derivable from that array.
+
+Storing those as separate state values means every time a user updates a quantity you must update `cartItems` _and_ remember to recalculate all the derived values. Miss one update and your UI shows a wrong total while the cart data is correct. Derive them instead and the UI is always consistent by construction.
+
+## Common Mistakes / Gotchas
+
+**1. Using `useEffect` to sync state from props**
+
+This is the most common form of redundant state. If a prop changes and you need a "processed" version of it, derive it inline or with `useMemo`. A `useEffect` that watches a prop to update local state will always produce at least one render with the stale value.
+
+```tsx
+// ❌ Don't do this
+useEffect(() => {
+  setFullName(`${firstName} ${lastName}`);
+}, [firstName, lastName]);
+
+// ✅ Do this
+const fullName = `${firstName} ${lastName}`;
+```
+
+**2. Storing filtered or sorted lists as state**
+
+Filtering or sorting an array is cheap. There's no reason to store the result — just derive it on every render (or memoize if the list is very large).
+
+**3. Storing a boolean that's derivable from another value**
+
+```tsx
+// ❌ Redundant — isEmpty can be derived from items.length
+const [isEmpty, setIsEmpty] = useState(true);
+
+// ✅ Derived
+const isEmpty = items.length === 0;
+```
+
+**4. Overusing `useMemo` to avoid "redundant" work**
+
+Memoization has its own overhead. Deriving a value inline is faster than a memoized result for cheap calculations. Profile before optimizing.
+
+<Callout type="warn">
+  `useMemo` does not prevent a value from being recalculated — it only skips
+  recalculation when dependencies haven't changed. It is not a substitute for
+  removing redundant state; it is a performance optimization for expensive
+  derivations.
+</Callout>
+
+**5. Treating server-fetched data as a "source" that needs a local copy**
+
+Don't fetch data, store it in state with `useState`, then derive from that state. With the App Router, fetch in a Server Component and pass the result as props. The props _are_ the source of truth.
+
+## Summary
+
+Derived state is any value you can compute from existing state, props, or fetched data — and computing it inline is always preferable to storing a copy. Redundant state creates multiple sources of truth that must be kept in sync, which almost always involves `useEffect` and produces at least one render with stale data. Use plain inline derivation by default, `useMemo` only when a derivation is provably expensive, and reach for `useState` only when a value cannot be computed from anything else. In Next.js App Router apps, Server Components reinforce this pattern naturally since they hold no state at all.

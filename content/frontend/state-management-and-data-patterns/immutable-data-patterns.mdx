@@ -1,0 +1,257 @@
+---
+title: Immutable Data & Referential Equality
+description: How immutable data patterns and referential equality work in JavaScript and React, and why they matter for performance and predictability.
+---
+
+## Overview
+
+Immutability means never modifying data in place — instead, you produce a new value whenever something changes. Referential equality means two variables are "equal" if they point to the exact same object in memory (not just an object with the same contents).
+
+These two concepts are deeply connected. React's rendering model, memoization hooks, and state management all depend on referential equality checks to decide whether something changed. If you mutate data in place, the reference stays the same — React sees no change and skips re-renders you actually needed. If you always produce new objects, React can do a fast reference check (`===`) instead of a deep comparison.
+
+## How It Works
+
+JavaScript compares primitives by value and objects by reference:
+
+```ts
+// Primitives — compared by value
+42 === 42; // true
+"hello" === "hello"; // true
+
+// Objects — compared by reference
+const a = { name: "Alice" };
+const b = { name: "Alice" };
+a === b; // false — different objects in memory
+
+const c = a;
+c === a; // true — same reference
+```
+
+This matters because React's `useMemo`, `useCallback`, `React.memo`, and state diffing all use `===` under the hood. When you mutate an object, the reference doesn't change:
+
+```ts
+const user = { name: "Alice" };
+user.name = "Bob"; // mutated in place
+// user still points to the same object — reference unchanged
+```
+
+React and state managers can't detect that mutation. Producing a new object makes the change visible:
+
+```ts
+const updatedUser = { ...user, name: "Bob" }; // new reference
+```
+
+## Code Examples
+
+### Immutable State Updates in React
+
+```tsx
+"use client";
+
+import { useState } from "react";
+
+type CartItem = {
+  id: number;
+  name: string;
+  quantity: number;
+};
+
+export default function Cart() {
+  const [items, setItems] = useState<CartItem[]>([
+    { id: 1, name: "Keyboard", quantity: 1 },
+    { id: 2, name: "Monitor", quantity: 2 },
+  ]);
+
+  function incrementQuantity(id: number) {
+    setItems((prev) =>
+      // map always returns a new array — prev is never mutated
+      prev.map(
+        (item) =>
+          item.id === id
+            ? { ...item, quantity: item.quantity + 1 } // new object for changed item
+            : item, // same reference for unchanged items (good for memoization)
+      ),
+    );
+  }
+
+  return (
+    <ul>
+      {items.map((item) => (
+        <li key={item.id}>
+          {item.name} × {item.quantity}
+          <button onClick={() => incrementQuantity(item.id)}>+</button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+### Using `React.memo` with Referential Equality
+
+```tsx
+"use client";
+
+import { memo, useState, useCallback } from "react";
+
+type ProductCardProps = {
+  name: string;
+  onAddToCart: () => void;
+};
+
+// memo does a shallow (referential) comparison of props
+// If onAddToCart is recreated every render, memo is bypassed
+const ProductCard = memo(function ProductCard({
+  name,
+  onAddToCart,
+}: ProductCardProps) {
+  console.log(`Rendering: ${name}`);
+  return (
+    <div>
+      <p>{name}</p>
+      <button onClick={onAddToCart}>Add to Cart</button>
+    </div>
+  );
+});
+
+export default function ProductList() {
+  const [cartCount, setCartCount] = useState(0);
+
+  // useCallback preserves the same function reference between renders
+  // Without it, a new function is created each render → memo sees a new prop → re-renders anyway
+  const handleAdd = useCallback(() => {
+    setCartCount((c) => c + 1);
+  }, []); // empty deps: reference never changes
+
+  return (
+    <div>
+      <p>Cart: {cartCount}</p>
+      <ProductCard name="Mechanical Keyboard" onAddToCart={handleAdd} />
+    </div>
+  );
+}
+```
+
+### Deeply Nested Immutable Updates
+
+```ts
+type AppState = {
+  user: {
+    profile: {
+      address: {
+        city: string;
+      };
+    };
+  };
+};
+
+const state: AppState = {
+  user: {
+    profile: {
+      address: { city: "New York" },
+    },
+  },
+};
+
+// Spread each layer you touch — untouched branches keep their references
+const nextState: AppState = {
+  ...state,
+  user: {
+    ...state.user,
+    profile: {
+      ...state.user.profile,
+      address: {
+        ...state.user.profile.address,
+        city: "San Francisco", // only this value changes
+      },
+    },
+  },
+};
+
+// state.user.profile.address !== nextState.user.profile.address ✓ (changed)
+// state.user === nextState.user // false (correctly updated)
+```
+
+<Callout type="info">
+  For deeply nested updates, consider [Immer](https://immerjs.github.io/immer/).
+  It lets you write mutative-looking code that produces immutable updates under
+  the hood.
+</Callout>
+
+### Immer for Complex Updates
+
+```ts
+import { produce } from "immer";
+
+const nextState = produce(state, (draft) => {
+  // draft looks mutable — Immer intercepts and builds a new immutable object
+  draft.user.profile.address.city = "San Francisco";
+});
+```
+
+## Real-World Use Case
+
+In a dashboard app with dozens of chart components, each chart receives a slice of a large data object as a prop. Without immutable updates, every state change mutates the root object — all charts re-render even when their data didn't change. With immutable updates and `React.memo`, unchanged chart components bail out of re-rendering because their prop references are stable. The dashboard stays fast at scale.
+
+The same principle applies in Zustand, Redux, and Jotai stores — they all rely on reference changes to trigger subscriber updates.
+
+## Common Mistakes / Gotchas
+
+**1. Mutating state directly**
+
+```ts
+// ❌ Wrong — same reference, React won't re-render
+const [user, setUser] = useState({ name: "Alice" });
+user.name = "Bob";
+setUser(user); // React sees the same object reference → no update
+
+// ✅ Correct
+setUser({ ...user, name: "Bob" });
+```
+
+**2. Forgetting that `useCallback`/`useMemo` dependencies control reference stability**
+
+```tsx
+// ❌ This filter function is recreated every render
+// Any component receiving it as a prop will re-render regardless of memo
+const filterActive = (items) => items.filter((i) => i.active);
+
+// ✅ Stable reference — only recreated when dependencies change
+const filterActive = useCallback(
+  (items) => items.filter((i) => i.active),
+  [], // no external deps — stable forever
+);
+```
+
+**3. Confusing shallow and deep equality**
+
+`React.memo` and `useMemo` do **shallow** comparison — they check if each prop reference changed, not if the nested values inside changed. A deeply nested mutation will fool them.
+
+```ts
+const config = { theme: { color: "blue" } };
+config.theme.color = "red"; // mutation — config reference is unchanged
+// useMemo watching config will NOT recompute — it only sees config hasn't changed
+```
+
+**4. Spreading arrays incorrectly**
+
+```ts
+// ❌ This adds an item but the spread is on the wrong level
+const next = [...items];
+next[0].quantity = 5; // still mutating the original object inside the array
+
+// ✅ Spread the object you're changing too
+const next = items.map((item) =>
+  item.id === targetId ? { ...item, quantity: 5 } : item,
+);
+```
+
+<Callout type="warn">
+  Never push, pop, splice, or sort an array that lives in React state. These
+  methods mutate in place. Always use `map`, `filter`, `slice`, or spread to
+  create a new array.
+</Callout>
+
+## Summary
+
+Immutable data patterns and referential equality are two sides of the same coin in React development. JavaScript compares objects by reference, so React uses `===` checks to efficiently detect changes without deep-scanning your entire state tree. By always returning new objects and arrays when state changes — and keeping references stable when data hasn't changed — you give React and memoization tools exactly the signal they need. Mutating in place silently breaks renders and memoization in ways that are hard to debug. For complex nested updates, Immer is a production-ready solution that removes the verbosity of deep spreading while preserving immutability semantics.

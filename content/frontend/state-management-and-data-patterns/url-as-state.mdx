@@ -1,0 +1,266 @@
+---
+title: URL as State
+description: How to use search params and routing state as a first-class state management mechanism in Next.js App Router applications.
+---
+
+## Overview
+
+Most developers reach for `useState` the moment they need to track something — a selected filter, a current page, an open modal. But state stored in a React component disappears the moment the user refreshes the page, copies the URL, or hits the back button.
+
+**URL as state** means encoding application state directly into the URL — either as search parameters (`?tab=reviews&page=2`) or as dynamic route segments (`/products/[category]`). The URL becomes your source of truth.
+
+This pattern is especially powerful in Next.js App Router because Server Components can read search params directly, enabling server-rendered UI that reflects the current state without a client-side hydration round-trip.
+
+<Callout type="info">
+  URL state is inherently shareable, bookmarkable, and survives full page
+  reloads. It's the right default for any state a user might want to link to or
+  return to.
+</Callout>
+
+---
+
+## How It Works
+
+The browser URL is a string, but it carries structured data:
+
+```
+https://example.com/shop?category=shoes&sort=price&page=3
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                         These are search params — key/value pairs
+```
+
+In Next.js App Router:
+
+- **Server Components** receive search params as a prop (`searchParams`) — no hooks, no client JS needed.
+- **Client Components** use the `useSearchParams()` hook to read params and `useRouter()` + `router.push()` / `router.replace()` to update them.
+- Updating a search param triggers a navigation, which re-renders the relevant Server Components with the new params — essentially a free server-driven state update.
+
+The key mental model: **a URL change is a navigation, not a re-render**. Next.js's soft navigation makes this feel instant, but the Server Component subtree does re-execute with new inputs.
+
+---
+
+## Code Examples
+
+### Reading search params in a Server Component
+
+```tsx
+// app/shop/page.tsx
+// This is a Server Component by default — no 'use client' needed.
+
+interface ShopPageProps {
+  searchParams: {
+    category?: string;
+    sort?: "price" | "rating";
+    page?: string;
+  };
+}
+
+export default async function ShopPage({ searchParams }: ShopPageProps) {
+  const category = searchParams.category ?? "all";
+  const sort = searchParams.sort ?? "rating";
+  const page = Number(searchParams.page ?? "1");
+
+  // Fetch data server-side using the URL params directly
+  const products = await fetchProducts({ category, sort, page });
+
+  return (
+    <main>
+      <h1>Browsing: {category}</h1>
+      <ProductGrid products={products} />
+      <Pagination currentPage={page} />
+    </main>
+  );
+}
+```
+
+<Callout type="warn">
+  `searchParams` in Server Components is a plain object — not a
+  `URLSearchParams` instance. Access values with dot notation, not `.get()`.
+</Callout>
+
+---
+
+### Updating search params from a Client Component
+
+```tsx
+// app/shop/_components/SortSelector.tsx
+"use client";
+
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
+
+const SORT_OPTIONS = [
+  { label: "Top Rated", value: "rating" },
+  { label: "Lowest Price", value: "price" },
+];
+
+export function SortSelector() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  function handleSortChange(newSort: string) {
+    // Create a mutable copy of the current params — never mutate the original
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("sort", newSort);
+    // Reset to page 1 when sort changes so the user doesn't land on an invalid page
+    params.set("page", "1");
+
+    // replace() avoids polluting browser history for filter changes
+    router.replace(`${pathname}?${params.toString()}`);
+  }
+
+  const currentSort = searchParams.get("sort") ?? "rating";
+
+  return (
+    <div>
+      {SORT_OPTIONS.map((option) => (
+        <button
+          key={option.value}
+          onClick={() => handleSortChange(option.value)}
+          aria-pressed={currentSort === option.value}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+```
+
+---
+
+### Building a shareable URL helper
+
+When multiple components update search params independently, you need to merge params rather than overwrite them. Extract this into a utility:
+
+```ts
+// lib/search-params.ts
+
+/**
+ * Merges a partial update into existing search params.
+ * Preserves params not mentioned in the update.
+ * Deletes a key if its value is null.
+ */
+export function mergeSearchParams(
+  current: URLSearchParams,
+  updates: Record<string, string | null>,
+): string {
+  const next = new URLSearchParams(current.toString());
+
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === null) {
+      next.delete(key);
+    } else {
+      next.set(key, value);
+    }
+  }
+
+  return next.toString();
+}
+```
+
+```tsx
+// Usage in a component
+"use client";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
+import { mergeSearchParams } from "@/lib/search-params";
+
+export function CategoryFilter({ category }: { category: string }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+
+  function selectCategory(cat: string) {
+    const qs = mergeSearchParams(searchParams, { category: cat, page: "1" });
+    router.replace(`${pathname}?${qs}`);
+  }
+
+  return <button onClick={() => selectCategory(category)}>{category}</button>;
+}
+```
+
+---
+
+### Using `router.push` vs `router.replace`
+
+```tsx
+"use client";
+import { useRouter } from "next/navigation";
+
+// push() — adds a new history entry (back button returns to previous state)
+// Use for meaningful navigation: changing a tab, going to a new page
+router.push(`/shop?page=${nextPage}`);
+
+// replace() — overwrites current history entry (back button skips this)
+// Use for filter/sort changes the user doesn't need to "undo" one by one
+router.replace(`/shop?sort=price`);
+```
+
+---
+
+## Real-World Use Case
+
+An e-commerce product listing page needs filters for category, price range, and sort order, plus pagination. Without URL state:
+
+- Refreshing the page resets all filters.
+- You can't share a filtered view with a colleague.
+- The back button doesn't restore the previous filter state.
+
+With URL state, the URL `https://shop.example.com/products?category=shoes&maxPrice=100&sort=price&page=2` fully describes the UI. A customer support agent can paste this URL directly to a user, a user can bookmark a filtered search, and analytics can track which filter combinations are popular.
+
+The Server Component reads the params on each navigation and fetches only the matching products — no client-side filtering, no extra API calls from the browser.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Mutating `searchParams` directly**
+
+`useSearchParams()` returns a read-only `URLSearchParams` object. Calling `.set()` on it throws. Always create a copy first:
+
+```ts
+// ❌ Wrong
+searchParams.set("sort", "price");
+
+// ✅ Correct
+const params = new URLSearchParams(searchParams.toString());
+params.set("sort", "price");
+```
+
+---
+
+**2. Using `push` for every param update**
+
+Using `router.push()` for filter changes adds an entry to the browser history for every keystroke or click. Users end up pressing back 15 times to leave the page. Use `router.replace()` for transient UI state like filters and sort order. Reserve `push()` for navigations the user should be able to undo with the back button (pagination, tab changes).
+
+---
+
+**3. Forgetting to wrap `useSearchParams()` in a Suspense boundary**
+
+`useSearchParams()` in a Client Component causes Next.js to deopts that component out of static rendering. Any page using it must be wrapped in `<Suspense>` or the entire page falls back to dynamic rendering without a helpful error:
+
+```tsx
+// app/shop/page.tsx
+import { Suspense } from "react";
+import { SortSelector } from "./_components/SortSelector";
+
+export default function ShopPage() {
+  return (
+    <Suspense fallback={<div>Loading filters…</div>}>
+      <SortSelector />
+    </Suspense>
+  );
+}
+```
+
+---
+
+**4. Storing ephemeral UI state in the URL**
+
+Not everything belongs in the URL. An open/closed dropdown, a tooltip's visibility, or an animation state are ephemeral — they don't need to be shareable or survive a refresh. Use `useState` for those. Reserve URL state for anything a user might want to bookmark, share, or return to.
+
+---
+
+## Summary
+
+URL state treats the browser URL as a first-class store for application state, making it shareable, bookmarkable, and server-readable by default. In Next.js App Router, Server Components consume `searchParams` directly as a prop, while Client Components read and write params via `useSearchParams()` and `useRouter()`. Always copy search params before mutating them, choose between `push` and `replace` deliberately, and wrap Client Components using `useSearchParams()` in `<Suspense>`. Limit URL state to things users would meaningfully want to link to or restore — keep ephemeral UI state in local component state.

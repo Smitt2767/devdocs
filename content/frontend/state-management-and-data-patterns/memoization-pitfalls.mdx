@@ -1,0 +1,319 @@
+---
+title: Memoization Pitfalls
+description: A practical guide to common memoization mistakes in React, with a deep focus on the stale closure problem and how to avoid it.
+---
+
+## Overview
+
+Memoization in React — via `useMemo`, `useCallback`, and `React.memo` — is a performance optimization tool. It caches computed values or function references so React skips expensive recalculations on re-renders.
+
+Used correctly, memoization reduces unnecessary work. Used incorrectly, it introduces subtle bugs that are hard to trace, wastes memory, and sometimes makes performance _worse_.
+
+The most dangerous pitfall is the **stale closure problem**: a memoized function or value captures a snapshot of variables from a previous render, leading to logic that silently operates on outdated data.
+
+---
+
+## How It Works
+
+### Closures in JavaScript
+
+Every function in JavaScript forms a closure — it captures references to variables from the scope where it was defined. In a React component, each render creates a new scope with fresh values for `props`, `state`, and local variables.
+
+```tsx
+function Counter() {
+  const [count, setCount] = useState(0);
+
+  // This function closes over the `count` from *this specific render*
+  function logCount() {
+    console.log(count);
+  }
+}
+```
+
+On each render, `logCount` is recreated with the current `count`. That's the expected behavior.
+
+### What Memoization Does to Closures
+
+`useCallback` and `useMemo` deliberately **prevent** recreation across renders. That's the point. But if you memoize a function and its dependency array doesn't include every value it reads, the function retains the closed-over values from the render when it was _last created_ — not the current render.
+
+```tsx
+const handleSubmit = useCallback(() => {
+  // `formData` here is from the render when this callback was last created
+  submitForm(formData);
+}, []); // ❌ formData is missing from deps — stale closure
+```
+
+Every time `handleSubmit` is called, it submits whatever `formData` was when the component first mounted.
+
+---
+
+## Code Examples
+
+### Example 1: The Classic Stale Closure Bug
+
+```tsx
+"use client";
+
+import { useState, useCallback } from "react";
+
+export default function SearchForm() {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<string[]>([]);
+
+  // ❌ BUG: `query` is stale after the first render
+  const handleSearch = useCallback(async () => {
+    const data = await fetch(`/api/search?q=${query}`).then((r) => r.json());
+    setResults(data);
+  }, []); // empty deps — query never updates inside this callback
+
+  return (
+    <div>
+      <input
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search..."
+      />
+      <button onClick={handleSearch}>Search</button>
+      <ul>
+        {results.map((r) => (
+          <li key={r}>{r}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+**What happens:** The user types "react hooks", but `handleSearch` always searches for `""` because `query` is stale.
+
+**Fix — add `query` to the dependency array:**
+
+```tsx
+const handleSearch = useCallback(async () => {
+  const data = await fetch(`/api/search?q=${query}`).then((r) => r.json());
+  setResults(data);
+}, [query]); // ✅ recreates the callback whenever query changes
+```
+
+---
+
+### Example 2: Stale Closure Inside `setInterval`
+
+```tsx
+"use client";
+
+import { useState, useEffect, useRef } from "react";
+
+export default function LiveTimer() {
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      // ❌ `seconds` is always 0 here — stale closure
+      setSeconds(seconds + 1);
+    }, 1000);
+
+    return () => clearInterval(id);
+  }, []); // interval callback captured `seconds = 0` at mount
+
+  return <p>Elapsed: {seconds}s</p>;
+}
+```
+
+The timer shows `1` forever because `seconds + 1` is always `0 + 1`.
+
+**Fix — use the functional updater form:**
+
+```tsx
+useEffect(() => {
+  const id = setInterval(() => {
+    // ✅ React passes the *current* state value into the updater
+    setSeconds((prev) => prev + 1);
+  }, 1000);
+
+  return () => clearInterval(id);
+}, []);
+```
+
+The functional updater `prev => prev + 1` doesn't close over `seconds` at all — React injects the real current value.
+
+---
+
+### Example 3: `useRef` as an Escape Hatch for Callbacks
+
+When you need a stable function reference (e.g., passed to a third-party library) but it must always see fresh state:
+
+```tsx
+"use client";
+
+import { useState, useCallback, useRef, useEffect } from "react";
+
+export default function Analytics() {
+  const [userId, setUserId] = useState<string | null>(null);
+
+  // Keep a ref that always points to the latest userId
+  const userIdRef = useRef(userId);
+  useEffect(() => {
+    userIdRef.current = userId;
+  }, [userId]);
+
+  // Stable reference — never changes, but reads fresh userId via the ref
+  const trackEvent = useCallback((event: string) => {
+    if (!userIdRef.current) return;
+    fetch("/api/track", {
+      method: "POST",
+      body: JSON.stringify({ userId: userIdRef.current, event }),
+    });
+  }, []); // ✅ stable reference, no stale closure
+
+  return <button onClick={() => trackEvent("button_click")}>Track</button>;
+}
+```
+
+<Callout type="info">
+  This `useRef` + `useEffect` pattern is sometimes called a "ref callback" or
+  "event handler ref". React's upcoming compiler may handle this automatically,
+  but for now it's the correct manual approach.
+</Callout>
+
+---
+
+### Example 4: Over-Memoization Anti-Pattern
+
+Not every value needs `useMemo`. Over-use creates maintenance burden and can actually slow things down.
+
+```tsx
+// ❌ Pointless — this computation is trivially cheap
+const fullName = useMemo(
+  () => `${firstName} ${lastName}`,
+  [firstName, lastName],
+);
+
+// ✅ Just compute it inline
+const fullName = `${firstName} ${lastName}`;
+```
+
+Reserve `useMemo` for genuinely expensive calculations — filtering/sorting large arrays, complex data transformations, or when referential equality matters for child component optimization.
+
+---
+
+## Real-World Use Case
+
+**E-commerce product filtering:** A product listing page has 2,000 items and lets users filter by category, price range, and rating. The filtered result is expensive to compute.
+
+```tsx
+// app/products/page.tsx (Server Component fetches data)
+// app/products/ProductList.tsx ('use client' for interactive filtering)
+
+"use client";
+
+import { useState, useMemo } from "react";
+import type { Product } from "@/types";
+
+interface Props {
+  products: Product[];
+}
+
+export function ProductList({ products }: Props) {
+  const [category, setCategory] = useState("all");
+  const [maxPrice, setMaxPrice] = useState(1000);
+
+  // ✅ Expensive filter only re-runs when inputs actually change
+  const filtered = useMemo(() => {
+    return products.filter(
+      (p) =>
+        (category === "all" || p.category === category) && p.price <= maxPrice,
+    );
+  }, [products, category, maxPrice]);
+
+  return (
+    <>
+      {/* filter controls */}
+      <ul>
+        {filtered.map((p) => (
+          <li key={p.id}>
+            {p.name} — ${p.price}
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+```
+
+The filter won't re-run on unrelated state changes (e.g., a modal opening elsewhere in the tree).
+
+---
+
+## Common Mistakes / Gotchas
+
+### 1. Incomplete Dependency Arrays
+
+The most common cause of stale closures. If your `useCallback` or `useMemo` reads a value, that value **must** be in the dependency array.
+
+```tsx
+// ❌ discount is read but not declared as a dependency
+const totalPrice = useMemo(() => basePrice - discount, [basePrice]);
+
+// ✅
+const totalPrice = useMemo(() => basePrice - discount, [basePrice, discount]);
+```
+
+<Callout type="warn">
+  Use the `eslint-plugin-react-hooks` rule `exhaustive-deps`. It catches missing
+  dependencies automatically and should be treated as an error, not a warning.
+</Callout>
+
+---
+
+### 2. Using `useCallback` Without `React.memo` on the Child
+
+`useCallback` stabilizes a function reference. But unless the child component is wrapped in `React.memo`, it re-renders anyway — making your `useCallback` pointless.
+
+```tsx
+// ❌ Stable callback, but ChildComponent re-renders regardless
+<ChildComponent onClick={useCallback(() => doThing(), [])} />;
+
+// ✅ Only meaningful when the child opts out of re-renders
+const MemoizedChild = React.memo(ChildComponent);
+<MemoizedChild onClick={useCallback(() => doThing(), [])} />;
+```
+
+---
+
+### 3. Memoizing Inside Loops or Conditionals
+
+Hooks must be called unconditionally at the top level of a component. Trying to memoize inside a loop is a rules violation and won't work as expected.
+
+```tsx
+// ❌ Illegal — breaks the Rules of Hooks
+items.map((item) => {
+  const value = useMemo(() => transform(item), [item]); // NEVER do this
+  return value;
+});
+
+// ✅ Extract into a child component that memoizes internally
+function TransformedItem({ item }: { item: Item }) {
+  const value = useMemo(() => transform(item), [item]);
+  return <li>{value}</li>;
+}
+```
+
+---
+
+### 4. Forgetting That Object/Array Literals Always Break Referential Equality
+
+```tsx
+// ❌ A new object is created on every render — memo on the child is bypassed
+<Chart config={{ color: "blue", size: 12 }} />;
+
+// ✅ Stabilize the reference
+const chartConfig = useMemo(() => ({ color: "blue", size: 12 }), []);
+<Chart config={chartConfig} />;
+```
+
+---
+
+## Summary
+
+Memoization in React is a targeted tool, not a default. The stale closure problem occurs when a memoized function or value closes over outdated state or props because the dependency array was incomplete — the fix is always to audit your deps or use the functional updater form of state setters. Reach for `useRef` when you need a permanently stable function reference that still reads fresh values. Avoid memoizing cheap computations or using `useCallback` without pairing it with `React.memo` on the receiving component. When in doubt, let the `exhaustive-deps` ESLint rule guide you — it catches the majority of stale closure bugs before they reach production.

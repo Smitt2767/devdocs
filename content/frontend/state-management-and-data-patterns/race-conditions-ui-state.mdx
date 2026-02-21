@@ -1,0 +1,230 @@
+---
+title: Race Conditions in UI State
+description: How to identify, prevent, and fix race conditions that corrupt UI state in React applications.
+---
+
+## Overview
+
+A race condition in UI state happens when two or more asynchronous operations are in-flight simultaneously, and the order in which they complete determines what your UI shows — not the order in which they were triggered. The result is stale data overwriting fresh data, loading states getting stuck, or UI flickering between states unexpectedly.
+
+This is one of the most common bugs in frontend applications, and it almost always shows up around data fetching, debounced inputs, or concurrent user actions.
+
+## How It Works
+
+Imagine a search input. The user types "re", triggering a fetch. Before it resolves, they type "rea", triggering another fetch. If the second fetch resolves first, and then the first fetch resolves, the UI will show results for "re" — even though the user typed "rea".
+
+```
+User types "re"   → Fetch A starts
+User types "rea"  → Fetch B starts
+Fetch B resolves  → UI shows results for "rea" ✅
+Fetch A resolves  → UI shows results for "re"  ❌ (stale data wins)
+```
+
+The bug isn't in the fetch itself — it's in unconditionally calling `setState` when any fetch resolves, without checking whether that response is still relevant.
+
+The two primary fixes are:
+
+- **Abort signals** — cancel in-flight requests when a new one starts
+- **Ignore flags** — track whether the effect is still active before committing state
+
+## Code Examples
+
+### Using `AbortController` (preferred for fetch)
+
+```tsx
+// app/search/page.tsx
+"use client";
+
+import { useState, useEffect } from "react";
+
+interface Result {
+  id: number;
+  name: string;
+}
+
+export default function SearchPage() {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Result[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!query.trim()) {
+      setResults([]);
+      return;
+    }
+
+    const controller = new AbortController();
+    setLoading(true);
+
+    async function fetchResults() {
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`, {
+          signal: controller.signal, // pass the signal to fetch
+        });
+        const data: Result[] = await res.json();
+        setResults(data);
+      } catch (err) {
+        if ((err as Error).name === "AbortError") {
+          // This fetch was intentionally cancelled — not a real error
+          return;
+        }
+        console.error("Search failed:", err);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    fetchResults();
+
+    return () => {
+      // When query changes, abort the previous in-flight request
+      controller.abort();
+    };
+  }, [query]);
+
+  return (
+    <div>
+      <input
+        type="search"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search..."
+      />
+      {loading && <p>Loading…</p>}
+      <ul>
+        {results.map((r) => (
+          <li key={r.id}>{r.name}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+### Using an ignore flag (for non-cancellable async work)
+
+When you can't abort the underlying operation (e.g., a third-party SDK call), use a boolean flag to ignore stale responses.
+
+```tsx
+"use client";
+
+import { useState, useEffect } from "react";
+
+interface UserProfile {
+  id: string;
+  displayName: string;
+  avatarUrl: string;
+}
+
+export default function ProfileCard({ userId }: { userId: string }) {
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+
+  useEffect(() => {
+    let ignored = false; // tracks whether this effect run is still current
+
+    async function loadProfile() {
+      const data = await someThirdPartySDK.getUser(userId);
+
+      if (!ignored) {
+        // Only update state if this effect hasn't been superseded
+        setProfile(data);
+      }
+    }
+
+    loadProfile();
+
+    return () => {
+      ignored = true; // mark this run as stale when userId changes
+    };
+  }, [userId]);
+
+  if (!profile) return <p>Loading profile…</p>;
+
+  return (
+    <div>
+      <img src={profile.avatarUrl} alt={profile.displayName} />
+      <h2>{profile.displayName}</h2>
+    </div>
+  );
+}
+```
+
+### Server Component approach (avoids the problem entirely)
+
+For data that doesn't require client-side interactivity, use a Server Component. Since fetching happens on the server during render, there's no concurrent fetch lifecycle to manage.
+
+```tsx
+// app/products/[id]/page.tsx
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+}
+
+async function getProduct(id: string): Promise<Product> {
+  const res = await fetch(`https://api.example.com/products/${id}`, {
+    next: { revalidate: 60 },
+  });
+  if (!res.ok) throw new Error("Product not found");
+  return res.json();
+}
+
+export default async function ProductPage({
+  params,
+}: {
+  params: { id: string };
+}) {
+  const product = await getProduct(params.id);
+
+  return (
+    <main>
+      <h1>{product.name}</h1>
+      <p>${product.price.toFixed(2)}</p>
+    </main>
+  );
+}
+```
+
+<Callout type="info">
+  Prefer Server Components for initial data loading whenever possible. Moving
+  the fetch to the server eliminates the entire class of race condition bugs for
+  that data.
+</Callout>
+
+## Real-World Use Case
+
+In a dashboard with a user dropdown — where selecting a user loads their orders — rapid switching between users can cause a slower request for User A to overwrite the freshly-loaded data for User B. The `AbortController` pattern in the first example handles this exactly: each time `userId` changes, the previous fetch is cancelled and only the latest response commits to state.
+
+## Common Mistakes / Gotchas
+
+**1. Assuming fetch order matches trigger order.**
+Network responses arrive in non-deterministic order. A request triggered 500ms ago can resolve after one triggered 100ms ago. Never assume "the last fetch I started will be the last one to finish."
+
+**2. Forgetting to handle `AbortError` separately.**
+When you abort a fetch, it throws an error with `name === 'AbortError'`. If your `catch` block unconditionally sets an error state, you'll show a spurious error message to the user. Always check for abort before treating something as a failure.
+
+**3. Putting the cleanup flag in the wrong scope.**
+The `ignored` flag must be declared _inside_ the `useEffect` callback, not outside it. If declared outside, all effect runs share the same flag and flipping it in one cleanup will affect all concurrent runs.
+
+```tsx
+// ❌ Wrong — `ignored` is shared across renders
+let ignored = false
+useEffect(() => { ... }, [userId])
+
+// ✅ Correct — each effect run gets its own `ignored`
+useEffect(() => {
+  let ignored = false
+  ...
+  return () => { ignored = true }
+}, [userId])
+```
+
+**4. Applying `AbortController` to non-fetch async work.**
+`controller.abort()` only works with the Fetch API and APIs that accept an `AbortSignal`. For Promises that don't support signals (SDK calls, `setTimeout`, third-party libraries), use the ignore-flag pattern instead.
+
+**5. Ignoring race conditions in loading state.**
+It's not just the data that races — `setLoading(false)` from a stale request can prematurely hide a spinner while the current request is still in-flight. Manage loading state within the same guarded block as data state.
+
+## Summary
+
+Race conditions in UI state occur when multiple async operations compete to update the same state, and the last-to-resolve wins regardless of relevance. The two reliable fixes are `AbortController` for native fetch calls and ignore flags for non-cancellable async work. Server Components sidestep this problem entirely by moving fetching out of the client lifecycle. Always handle `AbortError` explicitly to avoid false error states. When in doubt, model your async state transitions carefully — each effect cleanup should invalidate any pending work from that run.

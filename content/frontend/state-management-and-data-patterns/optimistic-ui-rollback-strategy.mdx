@@ -1,0 +1,171 @@
+---
+title: Optimistic UI Rollback
+description: How to implement optimistic UI updates with safe rollback handling in React and Next.js App Router using useOptimistic and server actions.
+---
+
+## Overview
+
+Optimistic UI is a pattern where you update the UI _immediately_ on user interaction — before the server confirms the change. If the server responds with an error, you **roll back** the UI to its previous state.
+
+This creates the illusion of instant feedback. Users don't wait for a round trip to complete before seeing a result. The rollback strategy is the safety net: when something goes wrong, you restore the original state and surface the error cleanly.
+
+## How It Works
+
+Think of it like writing a message on a whiteboard before asking for approval. You show the result immediately. If the approver says no, you erase it and tell the user why.
+
+In React 19 / Next.js App Router, the `useOptimistic` hook handles this pattern natively:
+
+1. The current server-confirmed state is your **ground truth**.
+2. `useOptimistic` creates a _temporary_ version of that state, displayed while the async action is in-flight.
+3. When the server action settles:
+   - **Success** → React revalidates server data; the optimistic state is replaced by the fresh server state.
+   - **Error** → React discards the optimistic state and reverts to the last confirmed state automatically.
+
+Your job is to catch the error and communicate it to the user.
+
+## Code Example
+
+### Optimistic Todo List with Rollback
+
+```tsx
+// app/todos/page.tsx
+import { getTodos } from "@/lib/db";
+import TodoList from "./todo-list";
+
+export default async function TodosPage() {
+  const todos = await getTodos();
+  return <TodoList initialTodos={todos} />;
+}
+```
+
+```tsx
+// app/todos/todo-list.tsx
+"use client";
+
+import { useOptimistic, useRef, useState, useTransition } from "react";
+import { addTodo } from "@/app/actions/todo-actions";
+
+type Todo = { id: string; text: string; pending?: boolean };
+
+export default function TodoList({ initialTodos }: { initialTodos: Todo[] }) {
+  const [todos, setTodos] = useState<Todo[]>(initialTodos);
+  const [error, setError] = useState<string | null>(null);
+  const [isPending, startTransition] = useTransition();
+
+  const [optimisticTodos, addOptimisticTodo] = useOptimistic(
+    todos,
+    (currentTodos: Todo[], newTodoText: string) => [
+      ...currentTodos,
+      // Temporary entry — marked as pending so you can style it differently
+      { id: crypto.randomUUID(), text: newTodoText, pending: true },
+    ],
+  );
+
+  const formRef = useRef<HTMLFormElement>(null);
+
+  async function handleSubmit(formData: FormData) {
+    const text = formData.get("text") as string;
+    if (!text.trim()) return;
+
+    setError(null);
+    formRef.current?.reset();
+
+    startTransition(async () => {
+      // Show the optimistic entry immediately
+      addOptimisticTodo(text);
+
+      try {
+        // Call the server action — this is the real mutation
+        const created = await addTodo(text);
+        // On success, replace local state with the confirmed server record
+        setTodos((prev) => [...prev, created]);
+      } catch (err) {
+        // useOptimistic auto-reverts when the transition ends with an error,
+        // but we also need to tell the user what happened
+        setError("Failed to add todo. Please try again.");
+      }
+    });
+  }
+
+  return (
+    <div>
+      {error && (
+        <p role="alert" className="text-red-500 text-sm mb-2">
+          {error}
+        </p>
+      )}
+
+      <ul>
+        {optimisticTodos.map((todo) => (
+          <li key={todo.id} className={todo.pending ? "opacity-50 italic" : ""}>
+            {todo.text} {todo.pending && "(saving…)"}
+          </li>
+        ))}
+      </ul>
+
+      <form ref={formRef} action={handleSubmit}>
+        <input name="text" placeholder="New todo" required />
+        <button type="submit" disabled={isPending}>
+          Add
+        </button>
+      </form>
+    </div>
+  );
+}
+```
+
+```ts
+// app/actions/todo-actions.ts
+"use server";
+
+import { db } from "@/lib/db";
+import { revalidatePath } from "next/cache";
+
+export async function addTodo(text: string) {
+  // Simulate a flaky network or validation failure for testing rollback:
+  // if (Math.random() < 0.3) throw new Error("DB write failed");
+
+  const todo = await db.todo.create({ data: { text } });
+  revalidatePath("/todos");
+  return todo;
+}
+```
+
+<Callout type="info">
+  `useOptimistic` automatically reverts the optimistic state when the enclosing
+  `startTransition` callback throws or rejects. You don't need to manually undo
+  the update — just catch the error and set a message.
+</Callout>
+
+## Real-World Use Case
+
+In a project management app, a user drags a task card from "In Progress" to "Done." You want the card to snap to the new column instantly, not after a 300ms server round trip. With optimistic UI, the card moves immediately. If the server rejects the update (e.g., permissions error, stale state conflict), the card snaps back to its original column and a toast notification explains why.
+
+The same pattern applies to: comment posting, like/bookmark toggles, cart quantity changes, and inline field editing.
+
+## Common Mistakes / Gotchas
+
+**1. Not wrapping the server call in `startTransition`**
+
+`useOptimistic` only works correctly when mutations are wrapped in `startTransition`. Without it, React won't know when the async work finishes, and the automatic revert won't trigger on error.
+
+**2. Forgetting to sync confirmed state back**
+
+`useOptimistic` shows a _temporary_ layer on top of your real state. If your server action succeeds but you don't update the underlying state (e.g., via `setTodos` or `revalidatePath`), the optimistic entry disappears and nothing replaces it. Always ensure your ground-truth state is updated on success.
+
+**3. Relying solely on optimistic IDs**
+
+The temporary `id` (e.g., `crypto.randomUUID()`) you assign to an optimistic item is not the real database ID. If you use that ID for subsequent operations (edit, delete) before the server responds, you'll send invalid references. Wait for the confirmed record before allowing further mutations on that item.
+
+**4. Silent rollbacks**
+
+Auto-revert with no user feedback is confusing. Always pair a rollback with a visible error message or toast. Users need to know their action didn't go through.
+
+<Callout type="warn">
+  Never use the optimistic ID for follow-up mutations. Replace it with the
+  server-confirmed ID before allowing edits or deletes on the new record.
+</Callout>
+
+## Summary
+
+Optimistic UI rollback improves perceived performance by showing changes before the server confirms them. React's `useOptimistic` hook manages the temporary state layer and automatically reverts it if an error occurs inside a `startTransition`. Your responsibility is to catch errors, restore any local state explicitly, and surface feedback to the user. The ground-truth state — the one `useOptimistic` falls back to — must always reflect the last server-confirmed snapshot. Used correctly, this pattern makes apps feel instantaneous while remaining safe and consistent.
