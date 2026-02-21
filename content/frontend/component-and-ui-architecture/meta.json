@@ -5,7 +5,6 @@
     "server-components",
     "edge-rendering",
     "micro-frontend-orchestration",
-    "module-federation",
     "shadow-dom",
     "error-boundaries",
     "component-design-patterns"

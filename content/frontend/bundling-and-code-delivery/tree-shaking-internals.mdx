@@ -1,0 +1,276 @@
+---
+title: Tree Shaking Internals
+description: How modern bundlers eliminate dead code at build time, and how to write modules that tree shake correctly.
+---
+
+## Overview
+
+Tree shaking is the process by which a bundler statically analyzes your import/export graph and removes any exported code that is never imported anywhere in your application. The result is a smaller bundle — sometimes dramatically smaller — because unused utilities, components, and library exports never make it to production.
+
+The term comes from the mental model of shaking a dependency tree: everything that falls off (unreachable exports) gets discarded.
+
+Tree shaking is not magic. It has strict prerequisites, and code that looks clean can silently opt out of it.
+
+---
+
+## How It Works
+
+Tree shaking relies on **ES Modules (ESM)** — specifically the static nature of `import` and `export` statements. Unlike CommonJS `require()`, ESM imports are resolved at parse time, not runtime. This means a bundler like Rollup, esbuild, or Webpack 5 can build a complete graph of what uses what before executing a single line of code.
+
+### The Static Analysis Phase
+
+When you write:
+
+```ts
+import { formatDate } from "./utils";
+```
+
+The bundler knows at build time:
+
+- Which file is being imported
+- Which specific binding (`formatDate`) is being used
+- Whether any other file imports the bindings that were _not_ used (`formatCurrency`, `slugify`, etc.)
+
+If `formatCurrency` is never imported anywhere, it is marked as **dead code** and excluded from the output.
+
+### Side Effects: The Escape Hatch (and the Trap)
+
+A module is considered to have **side effects** if importing it does something beyond exporting values — like patching `Array.prototype`, registering a global event listener, or writing to a shared store.
+
+Bundlers conservatively keep any module that might have side effects, even if none of its exports are used. You control this with the `sideEffects` field in `package.json`.
+
+```json
+{
+  "name": "my-ui-library",
+  "sideEffects": false
+}
+```
+
+Setting `"sideEffects": false` tells the bundler: every file in this package is safe to drop if its exports go unused. You can also allowlist specific files:
+
+```json
+{
+  "sideEffects": ["./src/polyfills.ts", "*.css"]
+}
+```
+
+### Scope Hoisting
+
+After dead code is removed, bundlers like Rollup flatten the remaining modules into a single scope (scope hoisting). This eliminates module wrapper overhead and enables further minification by giving the minifier a complete view of all variable references.
+
+---
+
+## Code Examples
+
+### ✅ Tree-Shakeable Utility Module
+
+```ts
+// src/utils/format.ts
+
+// Each function is a named export — the bundler can include only what's imported.
+export function formatDate(date: Date): string {
+  return new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  }).format(date);
+}
+
+export function formatCurrency(amount: number, currency = "USD"): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency,
+  }).format(amount);
+}
+
+export function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^\w-]/g, "");
+}
+```
+
+```tsx
+// app/products/page.tsx
+// Only formatCurrency is imported — formatDate and slugify are tree-shaken out.
+import { formatCurrency } from "@/utils/format";
+
+export default function ProductsPage() {
+  const price = 4999;
+
+  return (
+    <main>
+      <p>Price: {formatCurrency(price)}</p>
+    </main>
+  );
+}
+```
+
+---
+
+### ❌ Non-Tree-Shakeable Pattern: Namespace Re-export from an Object
+
+```ts
+// ❌ utils/index.ts — exports an object, not named bindings
+// Bundlers cannot statically determine which properties of an object are used.
+const utils = {
+  formatDate,
+  formatCurrency,
+  slugify,
+};
+
+export default utils;
+```
+
+```ts
+// ❌ Consuming it
+import utils from "@/utils";
+utils.formatCurrency(4999); // Entire utils object is bundled — all three functions included
+```
+
+Switch to named exports so the bundler can analyze usage per-export.
+
+---
+
+### Verifying Tree Shaking with Rollup (local analysis)
+
+```bash
+# Install rollup locally
+npm install --save-dev rollup
+
+# Analyze your bundle — look for "unused" in the output
+npx rollup src/index.ts --format esm --file dist/bundle.js
+```
+
+For a full report, use `rollup-plugin-visualizer`:
+
+```bash
+npm install --save-dev rollup-plugin-visualizer
+```
+
+```ts
+// rollup.config.ts
+import { defineConfig } from "rollup";
+import { visualizer } from "rollup-plugin-visualizer";
+
+export default defineConfig({
+  input: "src/index.ts",
+  output: { file: "dist/bundle.js", format: "esm" },
+  plugins: [
+    visualizer({
+      filename: "bundle-stats.html",
+      open: true, // Opens in browser after build
+      gzipSize: true,
+    }),
+  ],
+});
+```
+
+---
+
+### Next.js App Router: Tree Shaking in Practice
+
+Next.js uses Turbopack (or Webpack 5 in stable) and tree shakes by default when you use ESM imports. Server Components help further because unused imports on the server never reach the client bundle at all.
+
+```tsx
+// app/dashboard/page.tsx
+// This is a Server Component — heavy server-only dependencies don't ship to the client.
+import { db } from "@/lib/db"; // Never in the client bundle
+import { formatCurrency } from "@/utils/format"; // Only this named export is bundled
+
+export default async function DashboardPage() {
+  const revenue = await db.query("SELECT SUM(amount) FROM orders");
+
+  return (
+    <section>
+      <h1>Revenue</h1>
+      <p>{formatCurrency(revenue.rows[0].sum)}</p>
+    </section>
+  );
+}
+```
+
+<Callout type="info">
+  Server Components act as a natural tree-shaking boundary. Any import used only
+  in a Server Component is excluded from the client JavaScript bundle entirely,
+  regardless of `sideEffects` config.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+You're building a design system package (`@acme/ui`) with 80 components. If you export everything from a single barrel file without `"sideEffects": false`, an app that imports only `<Button>` will bundle all 80 components.
+
+Setting `"sideEffects": false` in your library's `package.json`, using named exports, and publishing an ESM build (`"module"` field in `package.json`) ensures consumers only pay for what they use.
+
+```json
+// package.json of @acme/ui
+{
+  "name": "@acme/ui",
+  "main": "dist/index.cjs.js",
+  "module": "dist/index.esm.js", // ESM build — required for tree shaking
+  "exports": {
+    ".": {
+      "import": "./dist/index.esm.js",
+      "require": "./dist/index.cjs.js"
+    }
+  },
+  "sideEffects": false
+}
+```
+
+---
+
+## Common Mistakes / Gotchas
+
+### 1. Publishing a CommonJS-Only Library
+
+If your library only ships a `main` (CJS) build, consumers **cannot tree shake it**. CommonJS `require()` is dynamic — bundlers must include the entire module. Always publish an ESM build alongside CJS.
+
+<Callout type="warn">
+  If `"module"` or `"exports"` with `"import"` is absent from your library's
+  `package.json`, tree shaking will not work for consumers — even if their
+  bundler supports it.
+</Callout>
+
+### 2. Barrel Files with Side Effects
+
+A barrel file like `export * from './components'` can break tree shaking if any re-exported module has a side effect (or if `"sideEffects"` is not declared). The bundler may pull in entire modules to be safe.
+
+Prefer granular imports in performance-critical paths:
+
+```ts
+// ✅ Granular import
+import { Button } from "@acme/ui/button";
+
+// ⚠️ Barrel import — safe only if the library declares "sideEffects": false
+import { Button } from "@acme/ui";
+```
+
+### 3. Dynamic `import()` Prevents Static Analysis of That Import
+
+```ts
+// ❌ The bundler cannot statically determine which export is used
+const mod = await import("./utils");
+const fn = mod[someVariable];
+```
+
+The entire `./utils` module will be included. Use static imports wherever possible, and reserve dynamic `import()` for route-level code splitting.
+
+### 4. Forgetting That `'use client'` Boundaries Re-bundle
+
+In Next.js, anything imported into a Client Component (`'use client'`) is included in the client bundle. A large utility file imported into a Client Component will be bundled even if only one function is used — unless it uses named exports and `"sideEffects": false`.
+
+<Callout type="warn">
+  Don't import server-only modules (like database clients or `fs`) into Client
+  Components. Use `import 'server-only'` at the top of server-exclusive modules
+  to get a build-time error if they're accidentally imported on the client.
+</Callout>
+
+---
+
+## Summary
+
+Tree shaking works by statically analyzing ES Module imports and exports to eliminate code that is never referenced. It requires ESM — CommonJS modules cannot be tree shaken. The `sideEffects` field in `package.json` is the key signal that tells bundlers it is safe to drop unused exports. Named exports are always preferable to default object exports for maximum shake-ability. In Next.js, Server Components provide an additional layer of dead code elimination by keeping server-only imports out of the client bundle entirely.

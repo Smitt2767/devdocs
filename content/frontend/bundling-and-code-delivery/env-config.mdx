@@ -1,0 +1,255 @@
+---
+title: Env Config
+description: How to manage environment variables in Next.js, including the difference between build-time and runtime config and how to use each correctly.
+---
+
+## Overview
+
+Environment variables let you change application behavior across environments — local, staging, production — without modifying code. In Next.js, there are two distinct categories: **build-time** variables (baked into the JavaScript bundle during `next build`) and **runtime** variables (read from the process environment when the server actually runs).
+
+Confusing these two is one of the most common sources of "why is my env var undefined?" bugs. Understanding the boundary between them will save you hours of debugging.
+
+---
+
+## How It Works
+
+### Build-Time Variables
+
+During `next build`, Next.js uses a bundler (based on Webpack/Turbopack) to statically replace references to specific environment variables with their literal values. This happens at compile time — the actual `process.env` object is never accessed by the client at runtime.
+
+Only variables prefixed with `NEXT_PUBLIC_` are included in the client bundle. Everything else is stripped out.
+
+```
+NEXT_PUBLIC_API_URL=https://api.example.com  ← included in client bundle
+DATABASE_URL=postgres://...                  ← server-only, never sent to browser
+```
+
+When you write:
+
+```ts
+const url = process.env.NEXT_PUBLIC_API_URL;
+```
+
+The bundler literally replaces this with:
+
+```ts
+const url = "https://api.example.com";
+```
+
+The string is frozen at build time. If you change the env var after building, the client won't see the new value.
+
+### Runtime Variables
+
+Server-side code (Route Handlers, Server Components, Server Actions, middleware) reads variables directly from `process.env` at request time — not from the compiled bundle. This means you can change them between deployments or inject them via your hosting platform without rebuilding.
+
+<Callout type="info">
+  On platforms like Vercel, environment variables set in the dashboard are
+  injected at runtime for server code. You do **not** need to rebuild when
+  changing non-`NEXT_PUBLIC_` variables.
+</Callout>
+
+### The Rule of Thumb
+
+| Variable type         | Prefix         | Available in    | Resolved at |
+| --------------------- | -------------- | --------------- | ----------- |
+| Public client config  | `NEXT_PUBLIC_` | Client + Server | Build time  |
+| Server secrets/config | _(none)_       | Server only     | Runtime     |
+
+---
+
+## Code Examples
+
+### Defining Variables
+
+```bash
+# .env.local (gitignored — for local development only)
+NEXT_PUBLIC_API_URL=http://localhost:3000/api
+DATABASE_URL=postgres://user:password@localhost:5432/mydb
+STRIPE_SECRET_KEY=sk_test_abc123
+```
+
+```bash
+# .env.production (committed — non-sensitive production defaults)
+NEXT_PUBLIC_API_URL=https://api.example.com
+```
+
+<Callout type="warn">
+  Never put secrets (API keys, DB credentials) in `NEXT_PUBLIC_` variables. They
+  will be embedded in the JavaScript bundle and visible to anyone who opens
+  DevTools.
+</Callout>
+
+### Accessing a Build-Time Variable on the Client
+
+```tsx
+// app/components/ApiStatus.tsx
+// No 'use client' needed — but this also works in Client Components
+export default function ApiStatus() {
+  // This value is frozen at build time
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+
+  return (
+    <p className="text-sm text-gray-500">
+      Connected to: <code>{apiUrl}</code>
+    </p>
+  );
+}
+```
+
+### Accessing a Runtime Variable in a Server Component
+
+```tsx
+// app/dashboard/page.tsx
+// This is a Server Component by default — no 'use client'
+import { getUserData } from "@/lib/db";
+
+export default async function DashboardPage() {
+  // process.env.DATABASE_URL is read at request time, never exposed to client
+  const user = await getUserData(process.env.DATABASE_URL!);
+
+  return <main>Welcome, {user.name}</main>;
+}
+```
+
+### Centralizing and Validating Env Vars
+
+Accessing raw `process.env` strings throughout your codebase is brittle. A better pattern is to parse and validate all variables in one place at startup using a library like [`zod`](https://zod.dev/).
+
+```ts
+// lib/env.ts
+import { z } from "zod";
+
+const envSchema = z.object({
+  // Runtime — server only
+  DATABASE_URL: z.string().url(),
+  STRIPE_SECRET_KEY: z.string().min(1),
+
+  // Build-time — safe to expose
+  NEXT_PUBLIC_API_URL: z.string().url(),
+});
+
+// This throws at startup if any variable is missing or malformed
+export const env = envSchema.parse({
+  DATABASE_URL: process.env.DATABASE_URL,
+  STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY,
+  NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
+});
+```
+
+```tsx
+// app/api/checkout/route.ts
+import { env } from "@/lib/env";
+import Stripe from "stripe";
+
+const stripe = new Stripe(env.STRIPE_SECRET_KEY); // typed, validated string
+
+export async function POST(request: Request) {
+  const session = await stripe.checkout.sessions.create({
+    mode: "payment",
+    success_url: `${env.NEXT_PUBLIC_API_URL}/success`,
+    cancel_url: `${env.NEXT_PUBLIC_API_URL}/cancel`,
+    line_items: [{ price: "price_abc123", quantity: 1 }],
+  });
+
+  return Response.json({ url: session.url });
+}
+```
+
+<Callout type="info">
+  The [`t3-env`](https://env.t3.gg/) library is purpose-built for this pattern
+  in Next.js and handles the client/server split automatically.
+</Callout>
+
+### Runtime Config for Docker / Self-Hosted Deployments
+
+When self-hosting with Docker, you often need variables that are only known at container startup (e.g., the database host varies per environment). Since build-time variables are frozen, you need to handle this differently for `NEXT_PUBLIC_` values.
+
+One reliable approach: expose a small runtime config endpoint and fetch it once on app load.
+
+```ts
+// app/api/config/route.ts
+// Serves safe, non-secret public config at runtime
+export async function GET() {
+  return Response.json({
+    apiUrl: process.env.API_URL, // no NEXT_PUBLIC_ prefix — resolved at runtime
+  });
+}
+```
+
+```tsx
+// app/providers/ConfigProvider.tsx
+"use client";
+
+import { createContext, useContext, useEffect, useState } from "react";
+
+interface AppConfig {
+  apiUrl: string;
+}
+
+const ConfigContext = createContext<AppConfig | null>(null);
+
+export function ConfigProvider({ children }: { children: React.ReactNode }) {
+  const [config, setConfig] = useState<AppConfig | null>(null);
+
+  useEffect(() => {
+    fetch("/api/config")
+      .then((res) => res.json())
+      .then(setConfig);
+  }, []);
+
+  if (!config) return null; // or a loading state
+
+  return (
+    <ConfigContext.Provider value={config}>{children}</ConfigContext.Provider>
+  );
+}
+
+export const useConfig = () => {
+  const ctx = useContext(ConfigContext);
+  if (!ctx) throw new Error("useConfig must be used within ConfigProvider");
+  return ctx;
+};
+```
+
+---
+
+## Real-World Use Case
+
+In a SaaS application, you have three environments: local dev, staging, and production. Your Stripe keys, database URL, and analytics ID all differ per environment.
+
+- `STRIPE_SECRET_KEY` lives only on the server and is injected by your hosting platform at runtime — it never touches the client bundle and can be rotated without a redeploy.
+- `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` is safe to expose and is baked in at build time so the Stripe.js client can initialize.
+- `DATABASE_URL` changes between staging and production. Because it's a server-only runtime variable, you deploy the same Docker image to both environments and inject the correct URL via environment — no rebuild needed.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Using `NEXT_PUBLIC_` for secrets**
+Any variable prefixed `NEXT_PUBLIC_` is embedded in the JS bundle. A user can find it in the browser's network tab or source. Only use this prefix for values you'd be comfortable putting in a public GitHub repo.
+
+**2. Expecting `NEXT_PUBLIC_` vars to update without a rebuild**
+If you change `NEXT_PUBLIC_API_URL` in your hosting dashboard and redeploy without rebuilding, the old value will still be in the bundle. You must trigger a full `next build` to pick up new `NEXT_PUBLIC_` values.
+
+**3. Accessing server-only variables in Client Components**
+
+```tsx
+"use client";
+
+// ❌ This will be undefined at runtime — DATABASE_URL is stripped from the client bundle
+const db = process.env.DATABASE_URL;
+```
+
+If you need data in a Client Component, fetch it from a Server Component or Route Handler and pass it as a prop.
+
+**4. Not validating env vars at startup**
+Accessing `process.env.STRIPE_SECRET_KEY` directly means a missing variable silently becomes `undefined`, causing cryptic errors deep in your code at runtime. Always validate and parse your env vars early (see the `zod` example above).
+
+**5. Committing `.env.local` to source control**
+`.env.local` is for local secrets. It should always be in `.gitignore`. Use `.env.example` (with placeholder values, no secrets) as a committed reference for other developers.
+
+---
+
+## Summary
+
+Next.js splits environment variables into two categories: `NEXT_PUBLIC_` variables are inlined into the client bundle at build time and cannot change without a rebuild, while unprefixed variables are server-only and read from `process.env` at runtime. Never put secrets in `NEXT_PUBLIC_` variables. Validate all environment variables at startup using a schema library like `zod` or `t3-env` to catch configuration errors early. For self-hosted deployments where runtime flexibility is needed even for client-visible config, serve a lightweight `/api/config` endpoint instead of relying on build-time embedding.

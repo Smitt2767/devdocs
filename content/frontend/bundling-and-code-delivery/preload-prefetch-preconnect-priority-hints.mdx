@@ -1,0 +1,322 @@
+---
+title: Preload, Prefetch, Preconnect & Priority Hints
+description: A practical guide to browser resource hints and priority hints for optimizing how and when assets are fetched in modern web apps.
+---
+
+## Overview
+
+Browsers are smart about loading resources — but they don't always know what _you_ know about your app. Resource hints (`preload`, `prefetch`, `preconnect`) and the Fetch Priority API let you give the browser explicit instructions on what to load, when to load it, and how urgently to treat it.
+
+Used correctly, these tools can meaningfully reduce Time to First Byte (TTFB), Largest Contentful Paint (LCP), and interaction latency. Used incorrectly, they increase network contention and hurt performance.
+
+---
+
+## How It Works
+
+### `preload`
+
+`preload` tells the browser: **"You will definitely need this resource for the current page — fetch it now, at high priority."**
+
+It's declarative. The browser fetches the resource early in the page lifecycle, before the parser would normally discover it. It does **not** execute or apply the resource — it only fetches and caches it.
+
+Use it for: critical fonts, LCP images, key CSS files loaded via JavaScript, or scripts that are late in the DOM but needed immediately.
+
+```html
+<!-- Preload a critical font -->
+<link
+  rel="preload"
+  href="/fonts/inter.woff2"
+  as="font"
+  type="font/woff2"
+  crossorigin
+/>
+
+<!-- Preload the LCP hero image -->
+<link rel="preload" href="/images/hero.webp" as="image" />
+```
+
+The `as` attribute is required. It tells the browser the resource type so it can apply the correct content security policy, accept headers, and request priority.
+
+<Callout type="warn">
+  Omitting `as` causes the browser to fetch the resource at a very low priority
+  — effectively defeating the purpose of `preload`.
+</Callout>
+
+---
+
+### `prefetch`
+
+`prefetch` tells the browser: **"The user might need this resource soon — fetch it when you're idle."**
+
+It's speculative and low-priority. The browser fetches the resource in the background and stores it in the HTTP cache for future use — typically for the _next_ navigation.
+
+Use it for: resources needed on the next likely page a user will visit.
+
+```html
+<!-- Prefetch a page the user is likely to navigate to -->
+<link rel="prefetch" href="/dashboard" />
+
+<!-- Prefetch a JS chunk for the next route -->
+<link rel="prefetch" href="/_next/static/chunks/dashboard.js" as="script" />
+```
+
+<Callout type="info">
+  Next.js automatically prefetches `<Link>` components when they enter the viewport. You rarely need to add `prefetch` manually in Next.js apps unless you're handling dynamic navigation outside of `<Link>`.
+</Callout>
+
+---
+
+### `preconnect`
+
+`preconnect` tells the browser: **"I will fetch resources from this origin soon — open the TCP connection, TLS handshake, and DNS lookup now."**
+
+It doesn't fetch any specific file. It warms up the connection to a third-party origin so that when you do request a resource, the connection overhead is already paid.
+
+Use it for: Google Fonts, CDN origins, analytics, third-party APIs.
+
+```html
+<!-- Warm up the Google Fonts origin -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+```
+
+`crossorigin` is needed when the resource will be fetched with CORS (e.g., fonts).
+
+---
+
+### `dns-prefetch` (Honorable Mention)
+
+A lighter-weight fallback to `preconnect`. It only resolves the DNS — no TCP or TLS. Use it for origins you'll connect to less urgently, or as a fallback for older browsers.
+
+```html
+<link rel="dns-prefetch" href="https://cdn.example.com" />
+```
+
+---
+
+### Priority Hints (`fetchpriority`)
+
+The `fetchpriority` attribute is a newer API that lets you nudge the browser's internal priority queue for individual resources. Values are `high`, `low`, or `auto` (default).
+
+It works on `<img>`, `<link>`, `<script>`, and `fetch()` calls.
+
+```html
+<!-- Boost the LCP image — tell the browser this is the most important image -->
+<img
+  src="/images/hero.webp"
+  alt="Product hero"
+  fetchpriority="high"
+  width="1200"
+  height="600"
+/>
+
+<!-- Demote a below-the-fold image -->
+<img
+  src="/images/footer-banner.webp"
+  alt="Footer banner"
+  fetchpriority="low"
+  width="800"
+  height="200"
+/>
+```
+
+For `fetch()`:
+
+```ts
+// High-priority API call for above-the-fold content
+const response = await fetch("/api/featured-products", {
+  priority: "high",
+});
+
+// Low-priority analytics ping
+await fetch("/api/analytics/pageview", {
+  priority: "low",
+  keepalive: true,
+});
+```
+
+<Callout type="info">
+  `fetchpriority` is supported in all modern browsers. It does not change *what*
+  gets fetched, only the order and bandwidth allocation.
+</Callout>
+
+---
+
+## Code Examples
+
+### Next.js App Router: Adding Resource Hints in `<head>`
+
+In Next.js App Router, use the `<head>` export in your root layout or add hints via the built-in `next/font` and `<Image>` components.
+
+```tsx
+// app/layout.tsx
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
+  title: "My App",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <head>
+        {/* Preconnect to CDN used for product images */}
+        <link rel="preconnect" href="https://cdn.mystore.com" />
+
+        {/* Preload the critical above-the-fold font */}
+        <link
+          rel="preload"
+          href="/fonts/inter-var.woff2"
+          as="font"
+          type="font/woff2"
+          crossOrigin="anonymous"
+        />
+      </head>
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+---
+
+### Next.js: LCP Image with `priority` Prop
+
+The `next/image` `priority` prop internally injects a `<link rel="preload">` and sets `fetchpriority="high"` for you.
+
+```tsx
+// app/page.tsx
+import Image from "next/image";
+
+export default function HomePage() {
+  return (
+    <main>
+      {/*
+        priority=true:
+        - Adds <link rel="preload"> for this image
+        - Sets fetchpriority="high"
+        - Disables lazy loading
+        Use ONLY on the above-the-fold LCP image.
+      */}
+      <Image
+        src="/images/hero.webp"
+        alt="Summer collection hero"
+        width={1440}
+        height={600}
+        priority
+      />
+
+      {/* Below-the-fold images should NOT have priority */}
+      <Image
+        src="/images/category-shoes.webp"
+        alt="Shoe category"
+        width={600}
+        height={400}
+      />
+    </main>
+  );
+}
+```
+
+---
+
+### Programmatic Prefetch on Hover
+
+```tsx
+// components/NavLink.tsx
+"use client";
+
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+
+interface NavLinkProps {
+  href: string;
+  children: React.ReactNode;
+}
+
+export function NavLink({ href, children }: NavLinkProps) {
+  const router = useRouter();
+
+  return (
+    <Link
+      href={href}
+      // Prefetch the route chunk when the user hovers — earlier than viewport entry
+      onMouseEnter={() => router.prefetch(href)}
+    >
+      {children}
+    </Link>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+**E-commerce product listing page:**
+
+Your store's homepage has a large hero banner (LCP element), loads product images below the fold, fetches product data from a CDN API, and links to a `/cart` page users frequently visit.
+
+Here's how you'd apply each hint:
+
+- `preconnect` to your image CDN and API origin to eliminate connection setup latency.
+- `preload` the hero banner image (or use `<Image priority>`) to hit it before the browser parses far enough to discover it naturally.
+- `fetchpriority="low"` on below-the-fold product thumbnails so they don't compete with the hero for bandwidth.
+- `prefetch` the `/cart` route chunk, since most active shoppers will navigate there.
+- `priority: 'high'` on the `fetch()` call for above-the-fold featured products data.
+
+This combination can reduce LCP by 200–600ms on real-world connections.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Overusing `preload`**
+
+Preloading too many resources forces the browser to fetch everything at high priority, which means nothing gets prioritized. Reserve `preload` for 1–3 truly critical resources per page (the LCP image, a critical font, or a render-blocking script).
+
+<Callout type="warn">
+  Chrome DevTools will show a warning in the console if you preload a resource
+  that isn't used within a few seconds of page load. This indicates wasted
+  bandwidth.
+</Callout>
+
+**2. Preloading fonts without `crossorigin`**
+
+Fonts are always fetched with CORS. If you omit `crossorigin` on a font preload, the browser will fetch the font twice — once for the preload hint and once when the CSS rule is applied.
+
+```html
+<!-- Wrong: missing crossorigin -->
+<link rel="preload" href="/fonts/inter.woff2" as="font" />
+
+<!-- Correct -->
+<link
+  rel="preload"
+  href="/fonts/inter.woff2"
+  as="font"
+  type="font/woff2"
+  crossorigin
+/>
+```
+
+**3. Using `priority` on every `next/image`**
+
+The `priority` prop on `next/image` should only be set on the single LCP image. Setting it on multiple images is equivalent to marking everything as important — which the browser treats as nothing being important.
+
+**4. Confusing `prefetch` scope**
+
+`prefetch` stores resources in the HTTP cache for _future navigations_. It won't help resources needed on the _current_ page — use `preload` for that.
+
+**5. Skipping `preconnect` for third-party origins**
+
+A request to `fonts.googleapis.com` or your analytics host involves DNS + TCP + TLS — easily 100–300ms on a cold connection. Not preconnecting to these origins on your critical rendering path is a common, easy-to-fix LCP regression.
+
+---
+
+## Summary
+
+`preload` fetches a critical resource for the current page immediately at high priority — use it sparingly for LCP images, critical fonts, or late-discovered scripts. `prefetch` speculatively fetches resources for future navigations during idle time. `preconnect` warms up the network connection to third-party origins without fetching a specific resource. Priority hints (`fetchpriority`) let you fine-tune the browser's internal queue for individual images, scripts, and `fetch()` calls. Together, these tools give you precise control over the browser's network scheduler — but the key is restraint: hinting everything is the same as hinting nothing.

@@ -1,0 +1,319 @@
+---
+title: "Code Splitting"
+description: A guide to code splitting strategies and dynamic import chunking in modern React and Next.js applications.
+---
+
+## Overview
+
+Code splitting is the practice of breaking your JavaScript bundle into smaller chunks that are loaded on demand rather than all at once. Instead of shipping one massive bundle to the browser, you deliver only the code needed for the current page or interaction.
+
+This matters because bundle size directly affects Time to Interactive (TTI). A 500KB bundle that parses and executes before users can interact with your app is a real performance problem. Code splitting solves this by deferring non-critical JavaScript.
+
+In Next.js App Router, route-level splitting happens automatically — each segment in your `app/` directory creates its own chunk. But within a route, you still need to split heavy components, third-party libraries, and conditionally rendered UI manually.
+
+---
+
+## How It Works
+
+When you use a dynamic `import()`, the bundler (webpack or Turbopack) treats the imported module as a separate chunk. That chunk gets its own hashed filename (e.g., `vendor-chart-a3f2c1.js`) and is only fetched when the `import()` call is reached at runtime.
+
+Think of it like a restaurant menu: instead of bringing every dish to the table when you sit down, the kitchen only prepares what you order. The rest stays in the kitchen until requested.
+
+There are three core splitting strategies:
+
+**Route-level splitting** — Automatic in Next.js App Router. Each `page.tsx` is its own entry point.
+
+**Component-level splitting** — You explicitly split a heavy component using `next/dynamic` or React's `lazy()` + `Suspense`.
+
+**Vendor/library splitting** — You isolate large third-party libraries (charts, editors, date pickers) so they don't block the initial render.
+
+The bundler uses the import graph to figure out shared modules and creates common chunks to avoid duplicating code across splits.
+
+---
+
+## Code Examples
+
+### 1. Dynamic Import with `next/dynamic`
+
+Use `next/dynamic` in the App Router for component-level splitting with a loading fallback.
+
+```tsx
+// app/dashboard/page.tsx
+import dynamic from "next/dynamic";
+
+// This component and its dependencies are excluded from the initial bundle.
+// They load only when DashboardChart renders on screen.
+const DashboardChart = dynamic(
+  () => import("@/components/dashboard/DashboardChart"),
+  {
+    loading: () => <div className="h-64 animate-pulse bg-muted rounded-lg" />,
+    ssr: false, // Disable SSR for canvas/WebGL-based chart libraries
+  },
+);
+
+export default function DashboardPage() {
+  return (
+    <main className="p-6">
+      <h1 className="text-2xl font-semibold mb-4">Sales Overview</h1>
+      {/* Chart chunk is fetched only when this component mounts */}
+      <DashboardChart />
+    </main>
+  );
+}
+```
+
+```tsx
+// components/dashboard/DashboardChart.tsx
+"use client";
+
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+} from "recharts";
+
+const data = [
+  { month: "Jan", revenue: 4200 },
+  { month: "Feb", revenue: 5800 },
+  { month: "Mar", revenue: 7100 },
+  { month: "Apr", revenue: 6300 },
+];
+
+export default function DashboardChart() {
+  return (
+    <ResponsiveContainer width="100%" height={300}>
+      <LineChart data={data}>
+        <XAxis dataKey="month" />
+        <YAxis />
+        <Tooltip />
+        <Line
+          type="monotone"
+          dataKey="revenue"
+          stroke="#6366f1"
+          strokeWidth={2}
+        />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+```
+
+<Callout type="info">
+  `ssr: false` is useful for libraries that depend on browser APIs (`window`,
+  `document`, `canvas`). Rendering them on the server will throw errors.
+</Callout>
+
+---
+
+### 2. Conditional Splitting — Load Only When Needed
+
+A modal editor that loads a rich-text library only when the user opens it.
+
+```tsx
+// components/PostEditor.tsx
+"use client";
+
+import { useState } from "react";
+import dynamic from "next/dynamic";
+
+// RichTextEditor (~180KB) is not loaded until the modal opens
+const RichTextEditor = dynamic(() => import("@/components/RichTextEditor"), {
+  loading: () => (
+    <p className="text-sm text-muted-foreground">Loading editor…</p>
+  ),
+});
+
+export function PostEditor() {
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <>
+      <button
+        onClick={() => setIsOpen(true)}
+        className="px-4 py-2 bg-primary text-white rounded"
+      >
+        Edit Post
+      </button>
+
+      {isOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center">
+          <div className="bg-white rounded-xl p-6 w-full max-w-2xl">
+            {/* RichTextEditor chunk is fetched on first render of this block */}
+            <RichTextEditor />
+            <button
+              onClick={() => setIsOpen(false)}
+              className="mt-4 text-sm underline"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+```
+
+---
+
+### 3. Named Export Splitting
+
+When a module exports multiple components, import only the one you need.
+
+```tsx
+// components/icons/HeavyIconLibrary.tsx
+// Imagine this file re-exports 500 SVG icons
+
+// ❌ Pulls in the entire icon library
+import { ArrowRight } from "@/components/icons/HeavyIconLibrary";
+
+// ✅ Dynamic import of a named export — only the ArrowRight chunk loads
+const ArrowRight = dynamic(() =>
+  import("@/components/icons/HeavyIconLibrary").then((mod) => mod.ArrowRight),
+);
+```
+
+---
+
+### 4. Webpack Magic Comments (Custom Chunk Names)
+
+When you need to group related dynamic imports into one named chunk:
+
+```tsx
+// These two imports will be bundled into a single 'analytics' chunk
+const AnalyticsGraph = dynamic(
+  () =>
+    import(/* webpackChunkName: "analytics" */ "@/components/AnalyticsGraph"),
+);
+
+const AnalyticsTable = dynamic(
+  () =>
+    import(/* webpackChunkName: "analytics" */ "@/components/AnalyticsTable"),
+);
+```
+
+<Callout type="info">
+  Turbopack (Next.js 15+) does not yet support all webpack magic comments. Use
+  these only if you're explicitly using webpack.
+</Callout>
+
+---
+
+### 5. React `lazy` + `Suspense` (Outside Next.js)
+
+In plain React apps or inside Server Components that need client-side lazy loading:
+
+```tsx
+// app/reports/page.tsx
+import { Suspense, lazy } from "react";
+
+// lazy() works the same as dynamic() without the Next.js-specific options
+const ReportViewer = lazy(() => import("@/components/ReportViewer"));
+
+export default function ReportsPage() {
+  return (
+    <Suspense
+      fallback={<div className="h-96 animate-pulse bg-muted rounded" />}
+    >
+      <ReportViewer />
+    </Suspense>
+  );
+}
+```
+
+<Callout type="warn">
+  `React.lazy` only works with default exports. For named exports, use the `.then((mod) => mod.NamedExport)` pattern shown above.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+**E-commerce product page with a 3D viewer**
+
+A product detail page needs a 3D model viewer powered by Three.js (~600KB). Loading this on every product page visit would devastate performance for users who never interact with the viewer.
+
+The solution: render a static product image server-side. Lazy-load the `ThreeJSViewer` component client-side only when the user clicks "View in 3D". This keeps the initial bundle lean and the 3D chunk is fetched only on demand, with no penalty for the majority of users.
+
+```tsx
+// app/products/[slug]/page.tsx
+import { Suspense } from "react";
+import dynamic from "next/dynamic";
+import { getProduct } from "@/lib/products";
+import ProductImage from "@/components/ProductImage";
+
+const ThreeDViewer = dynamic(() => import("@/components/ThreeDViewer"), {
+  ssr: false,
+  loading: () => (
+    <div className="h-80 flex items-center justify-center text-sm">
+      Loading 3D viewer…
+    </div>
+  ),
+});
+
+export default async function ProductPage({
+  params,
+}: {
+  params: { slug: string };
+}) {
+  const product = await getProduct(params.slug);
+
+  return (
+    <section className="grid grid-cols-2 gap-8 p-8">
+      <div>
+        {/* Static image is part of the initial SSR payload */}
+        <ProductImage src={product.imageUrl} alt={product.name} />
+        {/* 3D viewer chunk only fetches when this component is rendered client-side */}
+        <ThreeDViewer modelUrl={product.modelUrl} />
+      </div>
+      <div>
+        <h1 className="text-3xl font-bold">{product.name}</h1>
+        <p className="mt-2 text-muted-foreground">{product.description}</p>
+      </div>
+    </section>
+  );
+}
+```
+
+---
+
+## Common Mistakes / Gotchas
+
+**Splitting too aggressively**
+Splitting every small component adds HTTP request overhead that outweighs the benefit. Aim to split components whose JavaScript payload exceeds ~30–50KB (minified + gzipped). Tiny components should stay in the main bundle.
+
+**Forgetting `ssr: false` for browser-only libraries**
+Libraries that reference `window`, `document`, `navigator`, or `canvas` at module evaluation time will crash during SSR. Always set `ssr: false` with `next/dynamic` for these. Common offenders: chart libraries, map SDKs, WebRTC utilities.
+
+**Defining dynamic imports inside render**
+Defining `dynamic()` calls inside a component function causes them to re-evaluate on every render, defeating the purpose and causing remounts.
+
+```tsx
+// ❌ Dynamic import defined inside the component — recreates on every render
+export function MyPage() {
+  const HeavyComponent = dynamic(() => import("@/components/Heavy")); // Wrong
+  return <HeavyComponent />;
+}
+
+// ✅ Define it at module scope
+const HeavyComponent = dynamic(() => import("@/components/Heavy"));
+
+export function MyPage() {
+  return <HeavyComponent />;
+}
+```
+
+**Not providing a meaningful loading fallback**
+`loading: () => null` causes layout shift. Always provide a skeleton or placeholder that matches the rough dimensions of the loaded component.
+
+**Expecting instant loads after the first visit**
+Dynamically imported chunks are cached by the browser after the first fetch. Subsequent navigations load them from cache. If you're seeing repeated network requests in testing, check that caching headers are set correctly on your hosting platform.
+
+---
+
+## Summary
+
+Code splitting reduces initial bundle size by deferring non-critical JavaScript until it's actually needed. In Next.js App Router, route-level splitting is automatic, but component-level splitting requires explicit use of `next/dynamic` or `React.lazy`. The most impactful targets are large third-party libraries, conditionally rendered UI, and features below the fold. Always define dynamic imports at module scope, provide loading fallbacks to prevent layout shift, and use `ssr: false` for browser-only dependencies. Measure before and after with tools like `@next/bundle-analyzer` to verify the splits are having the intended effect.
