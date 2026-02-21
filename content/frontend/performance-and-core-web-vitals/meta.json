@@ -1,4 +1,10 @@
 {
   "title": "Performance & Core Web Vitals",
-  "pages": []
+  "pages": [
+    "first-input-delay",
+    "interaction-to-next-paint",
+    "cumulative-layout-shift",
+    "largest-contentful-paint",
+    "lighthouse-ci-integration"
+  ]
 }

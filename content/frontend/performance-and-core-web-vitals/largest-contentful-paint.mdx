@@ -1,0 +1,261 @@
+---
+title: Largest Contentful Paint
+description: A guide to understanding, measuring, and optimizing the Largest Contentful Paint (LCP) Core Web Vital in modern web applications.
+---
+
+## Overview
+
+Largest Contentful Paint (LCP) measures how long it takes for the largest visible content element on the page to render within the viewport. It's one of Google's Core Web Vitals and directly correlates with how fast a page _feels_ to a user.
+
+The "largest element" is typically a hero image, a large block of text, a video poster, or an `<img>` inside a banner. The browser tracks candidate elements as the page loads and records the timestamp of the last (largest) one before the user first interacts with the page.
+
+**Score thresholds:**
+
+- ✅ Good: ≤ 2.5s
+- ⚠️ Needs Improvement: 2.5s – 4.0s
+- ❌ Poor: > 4.0s
+
+<Callout type="info">
+  LCP is measured from when the page first starts loading (navigation start),
+  not from when JavaScript executes.
+</Callout>
+
+---
+
+## How It Works
+
+The browser's rendering pipeline emits `largest-contentful-paint` performance entries via the PerformanceObserver API as it paints increasingly large elements. Once the user scrolls, clicks, or presses a key, the browser stops recording new candidates and locks in the final LCP value.
+
+LCP is affected by four main delay categories:
+
+1. **Time to First Byte (TTFB)** — How long the server takes to respond.
+2. **Resource load delay** — How long before the browser starts fetching the LCP resource (image, font, etc.).
+3. **Resource load duration** — How long the resource itself takes to download.
+4. **Element render delay** — Time between the resource finishing and the element being painted.
+
+Optimizing LCP means attacking each of these delays in sequence. A fast server means nothing if the LCP image is discovered late in a render-blocking stylesheet chain.
+
+---
+
+## Code Examples
+
+### 1. Measuring LCP in the Browser
+
+```ts
+// Observe LCP entries using the PerformanceObserver API
+const observer = new PerformanceObserver((entryList) => {
+  const entries = entryList.getEntries();
+
+  // The last entry is always the most recent (largest) candidate
+  const lastEntry = entries[entries.length - 1];
+
+  console.log("LCP element:", lastEntry.element);
+  console.log("LCP time (ms):", lastEntry.startTime);
+});
+
+observer.observe({ type: "largest-contentful-paint", buffered: true });
+```
+
+<Callout type="info">
+  Pass `buffered: true` so you catch LCP entries that fired before your observer
+  was registered.
+</Callout>
+
+---
+
+### 2. Optimizing the LCP Image in Next.js (App Router)
+
+The most common LCP element is a hero image. Use Next.js `<Image>` with `priority` to preload it immediately.
+
+```tsx
+// app/page.tsx
+import Image from "next/image";
+import heroImage from "@/public/hero.jpg";
+
+export default function HomePage() {
+  return (
+    <main>
+      {/*
+        priority: tells Next.js to inject a <link rel="preload"> for this image.
+        This eliminates resource load delay — the browser fetches it as early as possible.
+      */}
+      <Image
+        src={heroImage}
+        alt="A panoramic view of the product dashboard"
+        width={1440}
+        height={600}
+        priority
+        sizes="100vw"
+        className="w-full object-cover"
+      />
+      <h1>Welcome to Acme</h1>
+    </main>
+  );
+}
+```
+
+<Callout type="warn">
+  Only use `priority` on the single above-the-fold LCP image. Applying it to
+  multiple images defeats the purpose and wastes bandwidth.
+</Callout>
+
+---
+
+### 3. Avoiding a Late-Discovered LCP Image
+
+When a background image is set via CSS, the browser can't discover it until the stylesheet is parsed and the element is rendered. This significantly delays LCP.
+
+```tsx
+// ❌ Bad — browser discovers this image late, after CSS is parsed and applied
+// styles.css: .hero { background-image: url('/hero.jpg'); }
+
+// ✅ Good — browser discovers this immediately during HTML parsing
+import Image from "next/image";
+
+export default function HeroBanner() {
+  return (
+    <section className="relative h-[600px]">
+      <Image
+        src="/hero.jpg"
+        alt="Hero banner"
+        fill
+        priority
+        className="object-cover"
+      />
+    </section>
+  );
+}
+```
+
+---
+
+### 4. Improving TTFB with Next.js Streaming
+
+If your page is server-rendered and the LCP element depends on a slow data fetch, streaming lets the browser receive and start rendering the shell (including preload hints) before all data is ready.
+
+```tsx
+// app/dashboard/page.tsx
+import { Suspense } from "react";
+import { HeroBanner } from "@/components/HeroBanner"; // static, renders immediately
+import { RecentOrders } from "@/components/RecentOrders"; // async, streams in later
+
+export default function DashboardPage() {
+  return (
+    <main>
+      {/* HeroBanner is the LCP element — it streams out first */}
+      <HeroBanner />
+
+      {/* RecentOrders fetches data; wrapped in Suspense so it doesn't block HeroBanner */}
+      <Suspense fallback={<p>Loading orders…</p>}>
+        <RecentOrders />
+      </Suspense>
+    </main>
+  );
+}
+```
+
+```tsx
+// app/components/HeroBanner.tsx
+import Image from "next/image";
+
+// No async data dependency — renders synchronously in the first chunk
+export function HeroBanner() {
+  return (
+    <div className="relative h-[500px] w-full">
+      <Image
+        src="/marketing/hero.jpg"
+        alt="Dashboard overview"
+        fill
+        priority
+        sizes="100vw"
+        className="object-cover"
+      />
+    </div>
+  );
+}
+```
+
+---
+
+### 5. Adding a Fetch Priority Hint for Images Outside Next.js `<Image>`
+
+When you can't use Next.js `<Image>` (e.g., in a third-party embed or a plain `<img>` tag), use the `fetchpriority` attribute.
+
+```html
+<!-- Tell the browser this is the most important resource on the page -->
+<img
+  src="/hero.jpg"
+  alt="Hero"
+  width="1440"
+  height="600"
+  fetchpriority="high"
+  decoding="async"
+/>
+```
+
+---
+
+## Real-World Use Case
+
+**E-commerce product listing page:**
+
+An online store's category page has a large promotional banner at the top. Without optimization, the banner image is loaded in a `<div>` with a CSS `background-image`, discovered only after the stylesheet processes. LCP scores 4.8s.
+
+After switching to an `<Image priority>` component, the image is preloaded in the `<head>` before any JavaScript or CSS executes. Combined with server-side rendering via the App Router, the page delivers HTML with the preload hint in the first TCP packet. LCP drops to 1.9s.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Not marking the LCP image as `priority`**
+
+This is the single most impactful mistake. Without it, the browser discovers the image only after layout and treats it as a normal resource. Always identify your LCP element and apply `priority` (or `fetchpriority="high"`).
+
+**2. Using CSS background images for the LCP element**
+
+CSS background images are render-blocking discovery problems. The browser must download the CSS, parse it, build the CSSOM, and apply styles before it even knows this image exists. Use an `<img>` or Next.js `<Image>` instead.
+
+**3. Serving oversized images without responsive `sizes`**
+
+Even a `priority` image hurts LCP if it's 3MB. Always specify the `sizes` attribute and ensure your image CDN or Next.js Image Optimization serves appropriately sized variants. A full-width hero on mobile doesn't need a 1440px image.
+
+```tsx
+// ✅ sizes tells the browser which breakpoint variant to download
+<Image
+  src="/hero.jpg"
+  alt="Hero"
+  fill
+  priority
+  sizes="(max-width: 768px) 100vw, (max-width: 1200px) 80vw, 1440px"
+/>
+```
+
+**4. Blocking LCP with render-blocking scripts or stylesheets**
+
+A `<script>` without `async` or `defer` in `<head>` pauses HTML parsing. The browser never sees your LCP image until the script finishes. Audit your `<head>` for synchronous scripts and move third-party tags to load asynchronously.
+
+**5. Measuring LCP only in the lab (Lighthouse)**
+
+Lighthouse runs in a controlled environment. Real User Monitoring (RUM) data via the `PerformanceObserver` API or tools like Vercel Speed Insights, Sentry, or `web-vitals` npm package reflects actual user experience across devices and network conditions.
+
+```ts
+import { onLCP } from "web-vitals";
+
+// Sends real LCP data from actual users to your analytics endpoint
+onLCP((metric) => {
+  fetch("/api/vitals", {
+    method: "POST",
+    body: JSON.stringify({
+      name: metric.name, // "LCP"
+      value: metric.value, // milliseconds
+      rating: metric.rating, // "good" | "needs-improvement" | "poor"
+    }),
+  });
+});
+```
+
+---
+
+## Summary
+
+LCP measures how quickly the largest above-the-fold element becomes visible to users and is a key signal for perceived load performance. The four levers to pull are TTFB, resource discovery timing, resource download speed, and render delay. In Next.js App Router applications, the highest-impact fix is almost always adding `priority` to the hero `<Image>` component, combined with streaming to unblock the LCP element from slow data dependencies. Always validate with real-user data using the `PerformanceObserver` API or the `web-vitals` library — Lighthouse scores alone can be misleading.

@@ -1,0 +1,252 @@
+---
+title: First Input Delay
+description: A guide to understanding, measuring, and eliminating First Input Delay (FID) to improve interactivity in web applications.
+---
+
+## Overview
+
+First Input Delay (FID) measures the time from when a user first interacts with your page — clicking a button, tapping a link, pressing a key — to the time the browser is actually able to begin processing that interaction.
+
+FID is a Core Web Vital. A good FID score is **under 100ms**. Anything above 300ms is considered poor and will negatively affect user experience and search rankings.
+
+<Callout type="info">
+  As of March 2024, Google replaced FID with **Interaction to Next Paint (INP)**
+  as an official Core Web Vital. FID only measures the delay of the *first*
+  interaction, while INP measures responsiveness across *all* interactions. You
+  should optimize for both during the transition period, but prioritize INP
+  going forward.
+</Callout>
+
+FID is caused by the browser's main thread being busy — typically parsing and executing large JavaScript bundles — when the user tries to interact with the page.
+
+---
+
+## How It Works
+
+Browsers are single-threaded. While the main thread is executing JavaScript (parsing a large bundle, running a framework hydration pass, executing a third-party script), it cannot respond to user input.
+
+When a user clicks during this blocked period, the browser queues the event. FID is the length of that wait — from the moment the input arrives to the moment the browser picks it up.
+
+Think of it like calling a customer service line during peak hours. The phone rings immediately (the click is registered), but you're placed on hold until an agent is free (the main thread finishes its current task).
+
+The key contributors to high FID:
+
+- Large JavaScript bundles that take a long time to parse and execute
+- Long tasks (any task over 50ms) on the main thread during page load
+- Third-party scripts (analytics, ads, chat widgets) that monopolize the thread
+- Eager hydration of large React component trees
+
+---
+
+## Code Examples
+
+### Diagnosing FID with the Web Vitals Library
+
+Install the library:
+
+```bash
+npm install web-vitals
+```
+
+Report FID (and INP) from your Next.js app using the `instrumentation` pattern or a client component:
+
+```tsx
+// app/_components/WebVitalsReporter.tsx
+"use client";
+
+import { useEffect } from "react";
+import { onFID, onINP, onCLS, onLCP, onFCP } from "web-vitals";
+
+function sendToAnalytics(metric: { name: string; value: number; id: string }) {
+  // Replace with your analytics endpoint
+  navigator.sendBeacon("/api/vitals", JSON.stringify(metric));
+}
+
+export function WebVitalsReporter() {
+  useEffect(() => {
+    onFID(sendToAnalytics); // first interaction delay
+    onINP(sendToAnalytics); // all interaction delays (INP successor)
+    onCLS(sendToAnalytics);
+    onLCP(sendToAnalytics);
+    onFCP(sendToAnalytics);
+  }, []);
+
+  return null;
+}
+```
+
+```tsx
+// app/layout.tsx
+import { WebVitalsReporter } from "./_components/WebVitalsReporter";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        {children}
+        {/* Renders nothing visually, just attaches listeners */}
+        <WebVitalsReporter />
+      </body>
+    </html>
+  );
+}
+```
+
+---
+
+### Breaking Up Long Tasks with `scheduler.yield()`
+
+Long synchronous tasks block the main thread. Break them into smaller chunks so the browser can process input events in between.
+
+```ts
+// lib/processLargeDataset.ts
+
+export async function processProductCatalog(
+  products: Product[],
+): Promise<ProcessedProduct[]> {
+  const results: ProcessedProduct[] = [];
+
+  for (let i = 0; i < products.length; i++) {
+    results.push(enrichProduct(products[i]));
+
+    // Yield to the main thread every 50 items
+    // This allows queued user input events to be processed
+    if (i % 50 === 0) {
+      await yieldToMain();
+    }
+  }
+
+  return results;
+}
+
+function yieldToMain(): Promise<void> {
+  // scheduler.yield() is the modern API (Chrome 115+)
+  // Fall back to a setTimeout(0) promise for broader support
+  if ("scheduler" in globalThis && "yield" in (globalThis as any).scheduler) {
+    return (globalThis as any).scheduler.yield();
+  }
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+```
+
+---
+
+### Deferring Non-Critical Third-Party Scripts in Next.js
+
+Third-party scripts are a leading cause of main thread congestion. Use Next.js `<Script>` with the right loading strategy.
+
+```tsx
+// app/layout.tsx
+import Script from "next/script";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        {children}
+
+        {/* strategy="lazyOnload" defers until the browser is idle */}
+        {/* Use this for non-critical scripts: chat widgets, analytics */}
+        <Script
+          src="https://cdn.example.com/chat-widget.js"
+          strategy="lazyOnload"
+        />
+
+        {/* strategy="afterInteractive" loads after hydration — good for tag managers */}
+        <Script
+          src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"
+          strategy="afterInteractive"
+        />
+      </body>
+    </html>
+  );
+}
+```
+
+<Callout type="warn">
+  Never use `strategy="beforeInteractive"` for third-party scripts unless they
+  are absolutely required before the page renders (e.g., a consent management
+  platform). It blocks the main thread during the critical load window.
+</Callout>
+
+---
+
+### Lazy Loading Heavy Client Components
+
+Avoid eagerly loading large client-side bundles that trigger hydration work during the initial load.
+
+```tsx
+// app/dashboard/page.tsx
+import dynamic from "next/dynamic";
+
+// This heavy chart component is only loaded when it enters the viewport
+// It won't block the main thread during initial page load
+const RevenueChart = dynamic(() => import("@/components/RevenueChart"), {
+  loading: () => <div className="h-64 animate-pulse bg-muted rounded-md" />,
+  ssr: false, // Skip server rendering for canvas/WebGL-heavy components
+});
+
+export default function DashboardPage() {
+  return (
+    <main>
+      <h1>Dashboard</h1>
+      {/* User can interact with the page while this loads in the background */}
+      <RevenueChart />
+    </main>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+An e-commerce storefront loads a product listing page. The page looks fully rendered, so the user immediately clicks "Add to Cart." But nothing happens for 400ms — a jarring experience that erodes trust.
+
+The cause: a large third-party A/B testing script is executing on the main thread during hydration, blocking all input processing.
+
+The fix involves three steps:
+
+1. Move the A/B testing script to `strategy="afterInteractive"` so it runs after hydration completes.
+2. Code-split the cart sidebar using `dynamic()` so its hydration cost is deferred.
+3. Add `yieldToMain()` calls inside any data transformation that runs at startup.
+
+After these changes, the "Add to Cart" button responds within 60ms of a click.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Confusing FID with TBT or TTI**
+
+Total Blocking Time (TBT) and Time to Interactive (TTI) are lab metrics — you measure them in Lighthouse. FID is a _field metric_ — it's measured from real user interactions. A good Lighthouse score does not guarantee a good FID score. Always collect real-user FID data via `web-vitals`.
+
+**2. Ignoring FID because the page "looks fast"**
+
+FID only fires after a user _interacts_. Pages with heavy skeleton loaders or animations can appear fast while the main thread is completely blocked. Visually complete ≠ interactively ready.
+
+**3. Not accounting for low-end devices**
+
+FID issues that don't appear on a developer's MacBook Pro are often severe on mid-range Android phones. JavaScript execution time on a budget device can be 4–6x slower. Always test with CPU throttling enabled in DevTools (4x or 6x slowdown) before declaring a page "fixed."
+
+**4. Assuming hydration is free**
+
+React hydration in large apps is a significant main thread task. If a user clicks a button before hydration completes, the click handler doesn't exist yet — the input is queued. Use Partial Prerendering, `Suspense`, and `dynamic()` to hydrate only what's needed above the fold first.
+
+**5. Loading all third-party scripts with `strategy="beforeInteractive"`**
+
+This is the single fastest way to destroy your FID score. Reserve `beforeInteractive` for scripts that genuinely must run before any HTML is parsed. In practice, very few scripts need this.
+
+---
+
+## Summary
+
+First Input Delay measures how long a user waits for the browser to respond to their first interaction, caused by main thread congestion during page load. The primary culprits are large JavaScript bundles, eager hydration, and blocking third-party scripts. Fix FID by breaking up long tasks with `yieldToMain()`, deferring non-critical scripts with Next.js `<Script strategy="lazyOnload">`, and lazy-loading heavy components with `dynamic()`. Always measure FID with real-user data via the `web-vitals` library, not just Lighthouse scores. With Google's transition to INP as a Core Web Vital, treat FID improvements as a foundation for broader interaction responsiveness work.

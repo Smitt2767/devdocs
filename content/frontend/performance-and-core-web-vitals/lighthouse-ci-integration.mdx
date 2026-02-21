@@ -1,0 +1,210 @@
+---
+title: Lighthouse CI Integration
+description: How to set up and run Lighthouse CI in your pipeline to automate performance, accessibility, and best-practice audits on every deploy.
+---
+
+## Overview
+
+Lighthouse CI (LHCI) is an open-source toolchain that runs Google Lighthouse audits automatically in your CI/CD pipeline. Instead of manually checking performance scores in DevTools, LHCI gates your builds against defined thresholds — catching regressions before they reach production.
+
+It measures Core Web Vitals (LCP, CLS, INP), accessibility, SEO, and best practices across every pull request.
+
+## How It Works
+
+LHCI spins up your app (or points to a deployed URL), runs multiple Lighthouse audits against one or more routes, and compares the results against an `assert` configuration you define. If a score or metric falls below your threshold, the CI step fails.
+
+Results can be uploaded to:
+
+- **LHCI Server** — a self-hosted dashboard for historical trend tracking
+- **Temporary public storage** — a free, ephemeral Lighthouse CI storage endpoint useful for quick setups
+
+The typical flow is:
+
+1. Build your app
+2. Start a local server (or use a deployed preview URL)
+3. Run `lhci autorun`
+4. Assert thresholds pass
+5. Upload results to storage
+
+## Code Examples
+
+### 1. Install and Initialize
+
+```bash
+npm install --save-dev @lhci/cli
+npx lhci wizard
+```
+
+The wizard generates a `lighthouserc.js` config file. You can also create it manually:
+
+### 2. `lighthouserc.js` Configuration
+
+```js
+// lighthouserc.js
+/** @type {import('@lhci/cli').LighthouseRcConfig} */
+export default {
+  ci: {
+    collect: {
+      // Start a static server pointing to the Next.js export or build output
+      staticDistDir: "./.next",
+      // Or use a live URL:
+      // url: ['https://preview.myapp.com', 'https://preview.myapp.com/about'],
+      numberOfRuns: 3, // Run 3 times and median the results
+    },
+    assert: {
+      preset: "lighthouse:no-pwa", // Skip PWA checks for non-PWA apps
+      assertions: {
+        "categories:performance": ["error", { minScore: 0.85 }],
+        "categories:accessibility": ["error", { minScore: 0.9 }],
+        "categories:best-practices": ["warn", { minScore: 0.9 }],
+        "categories:seo": ["warn", { minScore: 0.85 }],
+        // Assert specific Core Web Vitals
+        "largest-contentful-paint": ["error", { maxNumericValue: 2500 }],
+        "cumulative-layout-shift": ["error", { maxNumericValue: 0.1 }],
+      },
+    },
+    upload: {
+      target: "temporary-public-storage", // swap for 'lhci' when self-hosting
+    },
+  },
+};
+```
+
+<Callout type="info">
+  `error` causes the CI step to fail. `warn` records the issue but keeps the
+  pipeline green. Use `error` for metrics that directly impact user experience.
+</Callout>
+
+### 3. GitHub Actions Workflow
+
+```yaml
+# .github/workflows/lighthouse.yml
+name: Lighthouse CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  lighthouse:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Next.js app
+        run: npm run build
+        env:
+          # Provide any env vars your build needs
+          NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
+
+      - name: Run Lighthouse CI
+        run: npx lhci autorun
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+```
+
+<Callout type="info">
+  `LHCI_GITHUB_APP_TOKEN` is optional but enables inline PR status checks and
+  score annotations directly on the GitHub pull request. Install the [Lighthouse
+  CI GitHub App](https://github.com/apps/lighthouse-ci) to generate it.
+</Callout>
+
+### 4. Auditing Specific App Router Routes
+
+If you're running against a live preview URL (e.g., Vercel preview deployments), skip `staticDistDir` and use `url` instead:
+
+```js
+// lighthouserc.js (preview URL variant)
+export default {
+  ci: {
+    collect: {
+      url: [
+        "https://my-app-git-feat-xyz.vercel.app/",
+        "https://my-app-git-feat-xyz.vercel.app/products",
+        "https://my-app-git-feat-xyz.vercel.app/checkout",
+      ],
+      numberOfRuns: 3,
+    },
+    assert: {
+      assertions: {
+        "categories:performance": ["error", { minScore: 0.85 }],
+        "categories:accessibility": ["error", { minScore: 0.9 }],
+      },
+    },
+    upload: {
+      target: "temporary-public-storage",
+    },
+  },
+};
+```
+
+### 5. Self-Hosted LHCI Server (Optional)
+
+For historical trend tracking, run your own LHCI server:
+
+```bash
+# Start the server (e.g., on a VPS or internal service)
+npm install -g @lhci/server
+lhci server --storage.storageMethod=sql \
+  --storage.sqlDialect=sqlite \
+  --storage.sqlDatabasePath=./lhci.db
+```
+
+Then update your `upload` config:
+
+```js
+upload: {
+  target: 'lhci',
+  serverBaseUrl: 'https://lhci.mycompany.internal',
+  token: process.env.LHCI_BUILD_TOKEN,
+},
+```
+
+## Real-World Use Case
+
+An e-commerce team ships a redesigned product listing page. Without LHCI, a developer accidentally imports a large unoptimized image library, dropping the LCP score from 1.8s to 4.2s. With LHCI asserting `largest-contentful-paint` below 2500ms, the PR fails immediately, the issue is caught in review, and the regression never reaches production.
+
+The same pipeline also flags a missing `aria-label` on a new filter button, surfacing an accessibility violation before QA even looks at the branch.
+
+## Common Mistakes / Gotchas
+
+**1. Running only one Lighthouse pass**
+
+Lighthouse results vary between runs due to network and CPU noise. Always set `numberOfRuns: 3` (or higher) so LHCI uses the median result. A single run can give a misleadingly high or low score.
+
+**2. Auditing the dev server instead of a production build**
+
+Running `next dev` produces unoptimized output. Always run `next build` and audit the production build or a production-like preview URL. Dev mode scores are meaningless for real performance budgets.
+
+**3. Setting thresholds too strict too early**
+
+Starting with `minScore: 0.95` on a legacy codebase will break every build immediately. Start at your current baseline, commit to it, and raise thresholds incrementally. Use `warn` for metrics you're actively improving.
+
+**4. Ignoring route coverage**
+
+Only auditing the homepage gives a false sense of security. Add your highest-traffic and most complex routes (e.g., `/products/[slug]`, `/checkout`) to the `url` array to get meaningful coverage.
+
+**5. Forgetting authentication-gated routes**
+
+LHCI can't log in by default. For authenticated pages, either use a test account with a seeded session cookie via the `puppeteerScript` option, or restrict audits to public routes only.
+
+<Callout type="warn">
+  Never audit `localhost` from a remote CI runner — the server won't be
+  reachable. Use `staticDistDir` for static exports or deploy to a preview
+  environment and use its public URL.
+</Callout>
+
+## Summary
+
+Lighthouse CI automates performance and accessibility auditing directly in your pull request pipeline. You define thresholds in `lighthouserc.js`, run `lhci autorun` as a CI step, and fail builds that regress on Core Web Vitals or other metrics. Always audit a production build or a live preview URL — never the dev server. Run at least three passes per route to get stable median scores, and cover your most critical routes beyond just the homepage.

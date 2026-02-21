@@ -1,0 +1,250 @@
+---
+title: Interaction to Next Paint
+description: A guide to understanding, measuring, and optimizing Interaction to Next Paint (INP), the Core Web Vital that measures runtime responsiveness.
+---
+
+## Overview
+
+Interaction to Next Paint (INP) is a Core Web Vital that measures how quickly your page visually responds to user interactions — clicks, taps, and keyboard input. It replaced First Input Delay (FID) as an official Core Web Vital in March 2024.
+
+Where FID only measured the delay before the browser _started_ processing an interaction, INP measures the full duration: from when the user interacts to when the next frame is actually painted on screen.
+
+**Scoring thresholds:**
+
+- ✅ Good: ≤ 200ms
+- ⚠️ Needs Improvement: 201–500ms
+- ❌ Poor: > 500ms
+
+INP matters because a page that loads fast but feels sluggish when clicked will still rank poorly in Google Search and frustrate users.
+
+---
+
+## How It Works
+
+Every time a user interacts with the page, the browser goes through three phases:
+
+1. **Input delay** — time from interaction to when the event handler starts running (often caused by long tasks blocking the main thread).
+2. **Processing time** — time spent running your JavaScript event handlers.
+3. **Presentation delay** — time for the browser to recalculate styles, lay out, and paint the next frame.
+
+INP = input delay + processing time + presentation delay
+
+The browser records all interactions during the page's lifetime and reports the _worst_ one (with a small outlier allowance for long sessions). This means a single slow click can tank your INP score.
+
+```
+User clicks button
+       │
+       ▼
+[Input Delay] → Main thread free → [JS Handler Runs] → [Style/Layout/Paint]
+       └──────────────────── INP ──────────────────────┘
+```
+
+The main thread is the bottleneck. Long tasks (>50ms) block event handlers from starting, which inflates input delay.
+
+---
+
+## Code Examples
+
+### Diagnosing INP with PerformanceObserver
+
+Use the `event` entry type to observe slow interactions in the field:
+
+```ts
+// Run this in your analytics bootstrap — fires in the browser only
+const observer = new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    // Cast to PerformanceEventTiming to access processingStart
+    const eventEntry = entry as PerformanceEventTiming;
+
+    if (eventEntry.duration > 200) {
+      console.warn("Slow interaction detected", {
+        eventType: eventEntry.name, // e.g. "click", "keydown"
+        duration: eventEntry.duration, // total INP duration in ms
+        inputDelay: eventEntry.processingStart - eventEntry.startTime,
+        processingTime: eventEntry.processingEnd - eventEntry.processingStart,
+        presentationDelay:
+          eventEntry.duration -
+          (eventEntry.processingEnd - eventEntry.startTime),
+      });
+
+      // Send to your analytics pipeline
+      sendToAnalytics({
+        metric: "INP",
+        value: eventEntry.duration,
+        type: eventEntry.name,
+      });
+    }
+  }
+});
+
+observer.observe({ type: "event", buffered: true, durationThreshold: 16 });
+```
+
+### Using the `web-vitals` Library (Recommended)
+
+The `web-vitals` library handles all the edge cases for you:
+
+```bash
+npm install web-vitals
+```
+
+```ts
+// lib/vitals.ts
+import { onINP } from "web-vitals/attribution";
+
+onINP(({ value, attribution }) => {
+  const { eventType, eventTarget, eventTime, loadState } = attribution;
+
+  console.log(`INP: ${value}ms`);
+  console.log(`Triggered by: ${eventType} on`, eventTarget);
+  console.log(`Load state at interaction: ${loadState}`); // e.g. "complete", "loading"
+
+  // Report to your observability tool (Datadog, Grafana, custom endpoint, etc.)
+  navigator.sendBeacon(
+    "/api/vitals",
+    JSON.stringify({
+      metric: "INP",
+      value,
+      eventType,
+      eventTarget,
+      loadState,
+    }),
+  );
+});
+```
+
+### Fixing High Input Delay — Breaking Up Long Tasks
+
+The most common INP problem is a long task blocking the main thread before your event handler runs. Use `scheduler.yield()` (or `setTimeout` fallback) to yield back to the browser:
+
+```ts
+// Before: one long synchronous task blocks the main thread
+function handleFilterChange(query: string) {
+  const results = runExpensiveFilter(query); // 300ms — blocks everything
+  renderResults(results);
+}
+
+// After: yield to the browser mid-task so pending interactions can start sooner
+async function handleFilterChange(query: string) {
+  // Do the first cheap part synchronously (update UI state, show spinner)
+  showLoadingSpinner();
+
+  // Yield — allows the browser to paint the spinner and handle other inputs
+  await yieldToMain();
+
+  // Now do the expensive work
+  const results = runExpensiveFilter(query);
+  renderResults(results);
+}
+
+// Yield helper — uses scheduler.yield() when available, falls back to setTimeout
+function yieldToMain(): Promise<void> {
+  if ("scheduler" in window && "yield" in (window as any).scheduler) {
+    return (window as any).scheduler.yield();
+  }
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+```
+
+### Deferring Non-Critical Work with `requestIdleCallback`
+
+Don't run analytics, logging, or prefetch logic synchronously in click handlers:
+
+```ts
+button.addEventListener("click", () => {
+  // Critical update — runs immediately
+  updateCartCount();
+
+  // Non-critical side effects — deferred until the browser is idle
+  requestIdleCallback(() => {
+    logClickEvent("add-to-cart");
+    prefetchCheckoutPage();
+  });
+});
+```
+
+### Next.js App Router — Avoiding Hydration-Induced INP Spikes
+
+Heavy synchronous hydration blocks the main thread right after load, causing the first interactions to have a huge input delay. Split interactive islands with `dynamic()`:
+
+```tsx
+// app/product/[id]/page.tsx
+import dynamic from "next/dynamic";
+import { ProductDetails } from "@/components/ProductDetails"; // Server Component — no JS
+
+// Lazy-load the heavy interactive widget — only hydrates when needed
+const ReviewsCarousel = dynamic(() => import("@/components/ReviewsCarousel"), {
+  loading: () => <p>Loading reviews...</p>,
+  ssr: false, // Skip SSR for this component entirely if it's not needed for SEO
+});
+
+export default function ProductPage({ params }: { params: { id: string } }) {
+  return (
+    <main>
+      <ProductDetails id={params.id} />
+      {/* ReviewsCarousel JS won't block hydration of the rest of the page */}
+      <ReviewsCarousel productId={params.id} />
+    </main>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+**E-commerce product filter page**
+
+A user lands on a category page and immediately clicks a price filter. The page has finished loading visually, but a 400ms JavaScript bundle is still executing to hydrate the filter component. The click sits in a queue — input delay alone is 380ms, pushing INP to ~430ms (Needs Improvement).
+
+**Fix applied:**
+
+1. The filter component is split into a Server Component (renders the static markup) and a small Client Component (`'use client'`) that only handles the actual interaction logic.
+2. The expensive product-ranking algorithm in the click handler is moved off the main thread into a Web Worker.
+3. Non-critical side effects (analytics, personalization pings) are deferred with `requestIdleCallback`.
+
+Result: INP drops to ~90ms.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Confusing INP with FID or LCP**
+
+FID only measured the _first_ interaction's input delay. INP measures _all_ interactions, worst-case. LCP measures load speed. A perfect LCP score does not protect you from a poor INP score — they test completely different things.
+
+**2. Ignoring presentation delay**
+
+Developers optimize their event handler JS but forget about style/layout recalculation. Triggering expensive CSS changes (e.g., changing `width`, `height`, `top`, `left` instead of `transform`) after a click adds significant presentation delay. Prefer `transform` and `opacity` for animations — they run on the compositor thread and don't block INP.
+
+```ts
+// ❌ Triggers layout — expensive presentation delay
+element.style.width = "200px";
+
+// ✅ Compositor-only — doesn't affect INP presentation delay
+element.style.transform = "scaleX(1.5)";
+```
+
+**3. Over-hydrating with unnecessary `'use client'` in Next.js**
+
+Marking a parent component `'use client'` pulls its entire subtree into the client bundle. This inflates the JS that must execute during hydration, increasing the risk of long tasks that cause input delay on first interaction. Push `'use client'` as far down the component tree as possible.
+
+<Callout type="warn">
+  A component only needs `'use client'` if it uses browser APIs, React hooks, or
+  event listeners. Static display components should always remain Server
+  Components.
+</Callout>
+
+**4. Not testing INP in the field**
+
+Chrome DevTools' Performance panel shows interaction timing in lab conditions, but INP is a _field metric_ — it varies by device, network, and user behavior. Always collect real-user monitoring (RUM) data using `web-vitals` or a third-party tool. Lab scores can look fine while field INP is poor on low-end Android devices.
+
+**5. Forgetting interactions that happen during page load**
+
+If a user clicks before the page has fully hydrated (`loadState: "loading"`), input delay can be enormous. Use `attribution.loadState` from `web-vitals` to identify this and prioritize hydrating interactive elements earlier.
+
+---
+
+## Summary
+
+INP measures the full visual response time of user interactions — input delay, processing time, and presentation delay combined. It replaced FID as a Core Web Vital in 2024 and uses the worst interaction across the page's lifetime as its score. The main causes of poor INP are long tasks blocking the main thread, heavy hydration in JavaScript-heavy frameworks, and expensive style/layout operations triggered by event handlers. Fix strategies include breaking up long tasks with `scheduler.yield()`, deferring non-critical work with `requestIdleCallback`, using Web Workers for CPU-heavy logic, and minimizing client-side JavaScript through Server Components. Always validate INP improvements with real-user monitoring, not just lab tooling.

@@ -1,0 +1,251 @@
+---
+title: Cumulative Layout Shift
+description: A guide to understanding, measuring, and eliminating unexpected layout shifts that hurt user experience and Core Web Vitals scores.
+---
+
+## Overview
+
+Cumulative Layout Shift (CLS) is a Core Web Vitals metric that measures how much visible content unexpectedly moves during page load. A low CLS score means your layout is stable — elements appear where users expect them and stay there. A high CLS score means things are jumping around, causing users to misclick, lose their reading position, or feel like the page is broken.
+
+Google uses CLS as a ranking signal. Beyond SEO, it's a direct measure of perceived quality. A score below **0.1** is considered good. Above **0.25** is poor.
+
+CLS is calculated as:
+
+```
+CLS = layout shift score = impact fraction × distance fraction
+```
+
+Every unexpected shift during the page's lifespan accumulates into your total CLS score.
+
+---
+
+## How It Works
+
+The browser assigns a **layout shift score** each time a visible element moves without user interaction. Two factors determine the score:
+
+- **Impact fraction**: the proportion of the viewport affected by the shift
+- **Distance fraction**: how far the element moved relative to the viewport
+
+These individual shift scores are grouped into **session windows** (gaps of less than 1 second, capped at 5 seconds), and your CLS is the largest session window score.
+
+A shift is only penalized if it's _unexpected_ — meaning it wasn't triggered by a user gesture like a click or a keyboard input. Animations triggered by user interaction are excluded.
+
+<Callout type="info">
+  CLS measures the *entire lifespan* of the page, not just the initial load.
+  Lazy-loaded content, infinite scroll, and cookie banners that appear late can
+  all contribute to CLS.
+</Callout>
+
+---
+
+## Code Examples
+
+### 1. Reserve Space for Images with `width` and `height`
+
+The most common CLS culprit is images without explicit dimensions. Without them, the browser has no idea how much space to reserve, so it collapses the space to zero and then expands it when the image loads.
+
+```tsx
+// app/components/ProductImage.tsx
+
+// ❌ Bad — no dimensions, causes layout shift
+// <img src={product.imageUrl} alt={product.name} />
+
+// ✅ Good — browser reserves exact space before image loads
+export function ProductImage({ src, alt }: { src: string; alt: string }) {
+  return (
+    <img
+      src={src}
+      alt={alt}
+      width={600} // intrinsic width in pixels
+      height={400} // intrinsic height in pixels
+      style={{ width: "100%", height: "auto" }} // responsive scaling
+    />
+  );
+}
+```
+
+If you're using Next.js `<Image>`, this is handled automatically — but you still must provide `width` and `height` (or use `fill` with a sized container).
+
+```tsx
+// app/components/ProductCard.tsx
+import Image from "next/image";
+
+export function ProductCard({
+  name,
+  imageUrl,
+}: {
+  name: string;
+  imageUrl: string;
+}) {
+  return (
+    <div className="relative w-full aspect-[3/2]">
+      {" "}
+      {/* aspect-ratio reserves space */}
+      <Image
+        src={imageUrl}
+        alt={name}
+        fill
+        sizes="(max-width: 768px) 100vw, 50vw"
+        className="object-cover"
+      />
+    </div>
+  );
+}
+```
+
+---
+
+### 2. Reserve Space for Dynamic / Async Content
+
+When content loads asynchronously (e.g., from an API), the surrounding layout shifts as new elements appear. Use skeleton placeholders or fixed-height containers to hold space.
+
+```tsx
+// app/components/UserProfile.tsx
+"use client";
+
+import { useEffect, useState } from "react";
+
+type Profile = { name: string; bio: string; avatarUrl: string };
+
+export function UserProfile({ userId }: { userId: string }) {
+  const [profile, setProfile] = useState<Profile | null>(null);
+
+  useEffect(() => {
+    fetch(`/api/users/${userId}`)
+      .then((res) => res.json())
+      .then(setProfile);
+  }, [userId]);
+
+  // ✅ Skeleton has the same dimensions as the real content
+  if (!profile) {
+    return (
+      <div className="flex items-center gap-4">
+        <div className="w-12 h-12 rounded-full bg-gray-200 animate-pulse" />
+        <div className="flex flex-col gap-2">
+          <div className="w-32 h-4 bg-gray-200 rounded animate-pulse" />
+          <div className="w-48 h-3 bg-gray-200 rounded animate-pulse" />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-4">
+      <img
+        src={profile.avatarUrl}
+        alt={profile.name}
+        width={48}
+        height={48}
+        className="rounded-full"
+      />
+      <div>
+        <p className="font-semibold">{profile.name}</p>
+        <p className="text-sm text-gray-500">{profile.bio}</p>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### 3. Avoid Late-Injected Banners and Ads
+
+Cookie banners, notification bars, and ad slots that appear _above existing content_ are major CLS sources. Either render them server-side (so they're in the initial HTML) or position them so they don't push other content.
+
+```tsx
+// app/components/CookieBanner.tsx
+// ✅ Use fixed positioning so the banner overlays content rather than pushing it
+
+export function CookieBanner({ show }: { show: boolean }) {
+  if (!show) return null;
+
+  return (
+    <div
+      // fixed to the bottom of the viewport — does NOT shift document flow
+      className="fixed bottom-0 left-0 right-0 z-50 bg-white border-t shadow-lg p-4 flex justify-between items-center"
+      role="dialog"
+      aria-label="Cookie consent"
+    >
+      <p className="text-sm">We use cookies to improve your experience.</p>
+      <button className="ml-4 px-4 py-2 bg-black text-white text-sm rounded">
+        Accept
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
+### 4. Stabilize Web Fonts with `font-display: optional` or `swap`
+
+Fonts that load late cause the browser to re-render text with new metrics, shifting surrounding elements.
+
+```tsx
+// app/layout.tsx
+import { Inter } from "next/font/google";
+
+// next/font automatically applies font-display: swap and self-hosts the font
+// to eliminate layout shifts from third-party font loading
+const inter = Inter({
+  subsets: ["latin"],
+  display: "swap", // shows fallback font immediately, swaps when loaded
+});
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en" className={inter.className}>
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+<Callout type="tip">
+  Use `display: "optional"` instead of `"swap"` if you want zero CLS from fonts.
+  The browser only uses the custom font if it loads within a very short window;
+  otherwise it sticks with the fallback. You lose font consistency but gain a
+  perfect CLS score.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+On an e-commerce product listing page, you render a grid of product cards. Each card contains an image fetched from a CDN, a product name, and a price. Without explicit image dimensions, every image that loads causes the cards below to jump down the page. A user about to click "Add to Cart" clicks the wrong product because the layout shifted at the last moment.
+
+Fix it by adding `width` and `height` to every product image and wrapping them in an `aspect-ratio` container. Combine this with Next.js `<Image>` and `fill` to get responsive images with zero layout shift out of the box.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Forgetting that CLS applies after load too**
+Most developers focus on load-time CLS, but sticky headers that appear on scroll, chat widgets that inject late, or carousels that load slides asynchronously all cause post-load shifts. Measure CLS across real user interactions, not just in Lighthouse.
+
+**2. Using `aspect-ratio` CSS without understanding browser support fallbacks**
+`aspect-ratio` is well-supported in modern browsers, but if you need to support older environments, use the padding-top hack (`padding-top: 66.67%` on a relative container) as a fallback. Mixing both without a clear strategy causes inconsistent behavior.
+
+**3. Skeleton loaders with wrong dimensions**
+A skeleton that's 10px shorter than the real content still causes a 10px layout shift when the real content appears. Measure your real content height and match it exactly in the skeleton, or use `min-height` to ensure the container never shrinks.
+
+**4. Dynamically injected `<script>` tags that resize the page**
+Third-party scripts (analytics, A/B testing, ads) often inject DOM nodes after the page loads. These frequently cause large CLS spikes that are invisible in development. Use the Performance panel in Chrome DevTools to record a real session and catch these shifts.
+
+<Callout type="warn">
+  Lighthouse measures CLS in a lab environment with a single page load.
+  Real-world CLS (measured via Chrome User Experience Report or web-vitals.js)
+  is often significantly higher because it captures all interactions and scroll
+  behavior. Always validate with field data.
+</Callout>
+
+---
+
+## Summary
+
+CLS measures unexpected layout instability throughout a page's entire lifespan, not just during the initial load. The most common causes are unsized images, late-injected UI elements, and dynamically loaded content that displaces existing content. You can eliminate most CLS by reserving exact space for images with `width`/`height` attributes or `aspect-ratio` containers, using skeleton loaders that match real content dimensions, and positioning banners with `fixed` or `sticky` CSS rather than injecting them into document flow. Next.js `<Image>` and `next/font` handle the two biggest CLS sources automatically when used correctly. Always validate your CLS score with real field data, since lab tools like Lighthouse only capture a fraction of what real users experience.
