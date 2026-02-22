@@ -5,6 +5,7 @@ import type { Metadata, Viewport } from "next";
 import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 import { colors } from "@/lib/colors";
+import { cn } from "@/lib/cn";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -32,12 +33,16 @@ export const viewport: Viewport = {
 
 export default function Layout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={inter.className} suppressHydrationWarning>
+    <html
+      lang="en"
+      className={cn(inter.className, "dark")}
+      suppressHydrationWarning
+    >
       <head>
         <link rel="manifest" href="/site.webmanifest" />
       </head>
       <body className="flex flex-col min-h-screen">
-        <RootProvider>
+        <RootProvider theme={{ forcedTheme: "dark" }}>
           <Analytics />
           <SpeedInsights />
           {children}
