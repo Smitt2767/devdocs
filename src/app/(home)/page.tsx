@@ -42,7 +42,7 @@ export default async function HomePage() {
   const totalArticles = sections.reduce((sum, s) => sum + s.count, 0);
 
   return (
-    <main className="min-h-screen bg-background text-foreground font-mono">
+    <main className="min-h-screen bg-background text-foreground">
       <header className="sticky top-0 z-50 w-full border-b border-white/6 bg-background/80 backdrop-blur-xl backdrop-saturate-150">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3 md:px-6 md:py-4">
           <Logo />

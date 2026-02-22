@@ -14,7 +14,7 @@ export default function DocsError({ error, reset }: Props) {
   }, [error]);
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-6 font-mono">
+    <div className="flex flex-col items-center justify-center min-h-[60vh] text-center px-6">
       <p className="text-subtle text-[10px] tracking-[0.3em] uppercase mb-6">
         Error
       </p>
