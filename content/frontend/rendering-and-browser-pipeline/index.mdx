@@ -7,7 +7,7 @@ description: How browsers turn HTML, CSS, and JavaScript into pixels — and how
 
 This section covers the full stack from raw bytes to painted pixels. Understanding the rendering pipeline is foundational — performance bugs, layout shifts, and hydration mismatches all trace back to misunderstanding how the browser and React coordinate work.
 
-Topics span two layers: the **browser's internal pipeline** (critical rendering path, compositing, GPU acceleration, paint vs layout) and **React's rendering model** (fiber architecture, reconciliation, hydration, concurrent features, streaming SSR).
+Topics span two layers: the **browser's internal pipeline** (critical rendering path, compositing, paint vs layout) and **React's rendering model** (fiber architecture, reconciliation, hydration, concurrent features, streaming SSR).
 
 ## What's covered
 
@@ -15,10 +15,12 @@ Topics span two layers: the **browser's internal pipeline** (critical rendering 
 
 **Streaming SSR** — How React 18 streams HTML in chunks so users see content before the full server response completes.
 
-**Concurrent Rendering & Time Slicing** — How React schedules and prioritizes rendering work to keep UIs responsive under heavy load, and how time slicing breaks long renders into interruptible units.
+**Concurrent Rendering** — How React schedules and prioritizes rendering work — including time slicing and interruptible renders — to keep UIs responsive under heavy load.
 
 **Fiber Architecture & Reconciliation** — The internal data structure React uses to represent the component tree, how the reconciler diffs trees to determine the minimal set of DOM changes, and why this model enables concurrent features.
 
-**Browser internals** — The critical rendering path, render-blocking resources, compositing layers, and how CSS properties map to GPU-accelerated work.
+**Browser Compositing Layers** — How browsers promote elements to GPU-accelerated compositor layers, which CSS properties trigger layout vs paint vs composite, and how to use `will-change` and `transform`/`opacity` correctly for smooth animations.
 
-**Render waterfalls** — How sequential data fetching chains compound latency and how to break them with parallel fetches and Suspense.
+**Critical Rendering Path** — The browser's pipeline from bytes to pixels: parsing, CSSOM construction, render tree, layout, paint, and composite — and how render-blocking resources stall it.
+
+**Render Waterfalls** — How sequential data fetching chains compound latency and how to break them with parallel fetches and Suspense.

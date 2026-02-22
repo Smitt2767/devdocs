@@ -7,7 +7,6 @@
     "module-federation",
     "preload-prefetch-preconnect-priority-hints",
     "bundle-analysis-dependency-auditing",
-    "monorepo-tooling",
-    "env-config"
+    "monorepo-tooling"
   ]
 }

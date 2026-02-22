@@ -7,14 +7,12 @@
     "selective-hydration",
     "streaming-ssr",
     "concurrent-rendering",
-    "time-slicing",
     "reconciliation-algorithm",
     "fiber-architecture",
     "critical-rendering-path",
     "render-blocking-resources",
     "browser-compositing-layers",
     "paint-vs-composite-vs-layout",
-    "gpu-acceleration-in-css",
     "render-waterfalls"
   ]
 }

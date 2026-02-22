@@ -7,7 +7,6 @@
     "indexed-db",
     "service-worker-lifecycle-traps",
     "offline-conflict-resolution",
-    "http-caching-hierarchy",
     "cdn-cache-purging"
   ]
 }
