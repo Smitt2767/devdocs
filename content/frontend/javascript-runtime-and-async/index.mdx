@@ -1,0 +1,20 @@
+---
+title: Overview
+description: The JavaScript engine and async execution model that sits beneath all your application code — event loop, task scheduling, and async coordination patterns.
+---
+
+## Overview
+
+JavaScript is single-threaded, but it handles concurrency through an event-driven model that most developers use without fully understanding. This section covers the runtime internals that govern when your code runs, what blocks it, and how async operations coordinate without threads.
+
+## What's covered
+
+**Event Loop, Macrotasks & Microtasks** — The execution model that powers all JavaScript async behavior. Why microtasks (Promises, `queueMicrotask`) always run before the next macrotask (setTimeout, I/O), and what this means for rendering and interaction timing.
+
+**Task Starvation & Scheduler Priorities** — How deeply nested microtasks can starve the render loop, and how the browser's scheduler (and React's own scheduler) assign priority to different types of work.
+
+**AbortController & Streaming Fetch** — Cancelling in-flight requests with `AbortController`, and reading streaming responses with `ReadableStream` — the foundation of streaming SSR on the client.
+
+**WebSockets vs SSE vs Long Polling** — The three approaches to real-time server-to-client communication, with their respective trade-offs in connection overhead, browser support, and infrastructure complexity.
+
+**Promise Combinators & Error Propagation** — `Promise.all`, `Promise.allSettled`, `Promise.race`, and `Promise.any` — when each is appropriate and how unhandled rejections propagate through async chains.

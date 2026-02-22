@@ -1,8 +1,1 @@
-{
-  "title": "Memory & Garbage Collection",
-  "pages": [
-    "browser-memory-leak-detection",
-    "detached-dom-nodes",
-    "garbage-collection-timing"
-  ]
-}
+{"title":"Memory & Garbage Collection","pages":["index","browser-memory-leak-detection","detached-dom-nodes","garbage-collection-timing"]}

@@ -1,0 +1,22 @@
+---
+title: Overview
+description: Building UIs that work for all users — covering the browser and assistive technology mechanics underneath ARIA, focus, and keyboard interaction.
+---
+
+## Overview
+
+Accessibility is often treated as a checklist applied at the end of development. This section treats it as a systems problem: understanding how assistive technologies consume the browser's accessibility tree, what ARIA actually does under the hood, and how SPA navigation patterns break screen reader expectations in ways that aren't obvious.
+
+## What's covered
+
+**Accessibility Tree** — The parallel tree structure the browser builds from the DOM for assistive technologies to consume. How roles, names, states, and properties map from HTML elements to accessible objects, and why the accessibility tree often diverges from the visual DOM.
+
+**ARIA Live Regions Internals** — How `aria-live`, `aria-atomic`, and `aria-relevant` tell screen readers to announce dynamic content changes. Why `polite` vs `assertive` matters, and the common patterns that cause live regions to announce nothing, or announce too much.
+
+**Pointer Events** — The unified event model that covers mouse, touch, and stylus input. How `pointer-events: none` interacts with assistive technology hit testing, and how to handle multi-touch without breaking single-touch or keyboard workflows.
+
+**Focus Management in SPAs** — Route changes in client-side apps don't move focus or announce page changes to screen readers the way full page loads do. Covers the focus management strategies that bridge this gap correctly.
+
+**Keyboard Navigation Patterns** — `tabindex` values and their effects, managing focus within composite widgets (menus, dialogs, tabs), the roving tabindex pattern, and the ARIA Authoring Practices Guide patterns that define expected keyboard behavior.
+
+**Color Contrast & Reduced Motion** — WCAG contrast requirements (AA vs AAA), computing contrast ratios, and supporting `prefers-reduced-motion` for users with vestibular disorders who experience motion sickness from animations.

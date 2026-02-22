@@ -1,0 +1,24 @@
+---
+title: Overview
+description: How code travels from your editor to the browser — build tooling, bundle optimization, and delivery infrastructure.
+---
+
+## Overview
+
+The gap between writing code and users running it is larger than it seems. Bundlers, module systems, CDNs, and resource hints all shape what gets downloaded, in what order, and how fast. This section covers the tooling and strategies that sit between your source files and the browser.
+
+## What's covered
+
+**Tree Shaking Internals** — How bundlers use static analysis of ES module imports to eliminate dead code, what prevents tree shaking (side effects, CommonJS, dynamic imports), and how to verify it's working.
+
+**Code Splitting Strategies** — Route-level, component-level, and vendor splitting. How `next/dynamic` and `React.lazy` work, when to use each, and how to avoid splitting too aggressively.
+
+**Module Federation** — Sharing code between independently deployed applications at runtime — the backbone of micro-frontend architectures. Covers Webpack 5 and Vite plugin approaches.
+
+**Preload / Prefetch / Preconnect / Priority Hints** — The full set of browser resource hints, what each one does, and how to use them without inadvertently hurting performance by competing with critical resources.
+
+**Bundle Analysis & Dependency Auditing** — Using `@next/bundle-analyzer`, `source-map-explorer`, and `depcheck` to find bloat, duplicate dependencies, and unused packages.
+
+**Monorepo Tooling** — Structuring a monorepo with pnpm workspaces and Turborepo — task pipelines, remote caching, and the most common configuration mistakes.
+
+**Environment Configuration** — Managing environment variables safely across local, preview, and production — including what gets exposed to the client bundle and what must stay server-side.

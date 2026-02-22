@@ -1,4 +1,1 @@
-{
-  "title": "Concurrency & Workers",
-  "pages": ["web-workers-vs-service-workers"]
-}
+{"title":"Concurrency & Workers","pages":["index","web-workers-vs-service-workers"]}

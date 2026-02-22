@@ -1,6 +1,7 @@
 {
   "title": "State Management & Data Patterns",
   "pages": [
+    "index",
     "immutable-data-patterns",
     "memoization-pitfalls",
     "race-conditions-ui-state",

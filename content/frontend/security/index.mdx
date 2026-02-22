@@ -1,0 +1,22 @@
+---
+title: Overview
+description: Attack vectors and mitigations most relevant to frontend engineers — from XSS and CSRF to supply chain risks and secrets management.
+---
+
+## Overview
+
+Security in frontend engineering is often misunderstood as "just use HTTPS." In practice, frontend code runs in the most hostile environment in software — the user's browser — where any injected script has full access to the DOM, cookies, and network. This section covers the attack classes that directly target frontend code and the mitigations that actually work.
+
+## What's covered
+
+**CSRF vs XSS Mitigation** — The two most common web attack classes. Cross-Site Request Forgery exploits the browser's automatic cookie sending; Cross-Site Scripting exploits injected script execution. Both require different mitigations and are often confused.
+
+**Content Security Policy** — A browser-enforced allowlist that restricts what scripts, styles, and resources a page can load. The primary defense against XSS once an injection vulnerability exists.
+
+**Trusted Types** — A browser API that locks down the DOM sinks (`innerHTML`, `eval`, `document.write`) that XSS attacks target, enforcing that only explicitly trusted values can flow into dangerous APIs.
+
+**Prototype Pollution** — How attackers inject properties onto `Object.prototype` through crafted input, causing unexpected behavior in downstream code that reads inherited properties.
+
+**Dependency & Supply Chain Risks** — The risk of malicious or compromised npm packages in your dependency tree — typosquatting, maintainer account takeovers, and auditing strategies.
+
+**Secrets Management** — What must never be in a frontend bundle, how environment variable prefixes work in Next.js, and how to safely pass server-side configuration to the client.

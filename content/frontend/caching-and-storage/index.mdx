@@ -1,0 +1,24 @@
+---
+title: Overview
+description: Caching at every layer of the stack — HTTP headers, CDN edges, service workers, and client-side storage APIs.
+---
+
+## Overview
+
+Caching is one of the highest-leverage performance tools available — and one of the most common sources of hard-to-diagnose bugs. Serving stale data, busting the wrong cache layer, or missing an offline scenario entirely are all caching failures. This section covers the mechanisms at each layer and how they interact.
+
+## What's covered
+
+**HTTP Caching Strategies** — `Cache-Control` directives (`max-age`, `stale-while-revalidate`, `no-store`), `ETag` and `Last-Modified` for conditional requests, and when to use each strategy.
+
+**HTTP Caching Hierarchy** — How browser cache, service worker cache, and CDN cache layer on top of each other, and which one wins in each scenario.
+
+**Cache Invalidation Strategies** — The hardest problem in caching. Versioned URLs, cache tags, surrogate keys, and the trade-offs of time-based vs event-based invalidation.
+
+**CDN Cache Purging** — How to reliably invalidate content at the edge after a deploy, without serving stale responses or triggering a thundering herd on the origin.
+
+**Service Worker Lifecycle Traps** — The confusing lifecycle states (installing, waiting, active) that cause developers to ship a new service worker and wonder why users still see old content.
+
+**IndexedDB** — The browser's built-in structured storage database — async, transactional, and indexed. When to use it over `localStorage`, and the API patterns that make it manageable.
+
+**Offline Conflict Resolution** — What happens when a user writes data offline and the network comes back. Last-write-wins, server-wins, CRDT-based merging, and UI patterns for surfacing conflicts.

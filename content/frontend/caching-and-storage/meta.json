@@ -1,12 +1,1 @@
-{
-  "title": "Caching & Storage",
-  "pages": [
-    "cache-invalidation-strategies",
-    "http-caching-strategies",
-    "indexed-db",
-    "service-worker-lifecycle-traps",
-    "offline-conflict-resolution",
-    "http-caching-hierarchy",
-    "cdn-cache-purging"
-  ]
-}
+{"title":"Caching & Storage","pages":["index","cache-invalidation-strategies","http-caching-strategies","indexed-db","service-worker-lifecycle-traps","offline-conflict-resolution","http-caching-hierarchy","cdn-cache-purging"]}

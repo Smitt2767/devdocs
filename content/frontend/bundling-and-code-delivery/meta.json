@@ -1,12 +1,1 @@
-{
-  "title": "Bundling & Code Delivery",
-  "pages": [
-    "tree-shaking-internals",
-    "code-splitting-strategies",
-    "module-federation",
-    "preload-prefetch-preconnect-priority-hints",
-    "bundle-analysis-dependency-auditing",
-    "monorepo-tooling",
-    "env-config"
-  ]
-}
+{"title":"Bundling & Code Delivery","pages":["index","tree-shaking-internals","code-splitting-strategies","module-federation","preload-prefetch-preconnect-priority-hints","bundle-analysis-dependency-auditing","monorepo-tooling","env-config"]}

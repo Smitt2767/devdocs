@@ -1,0 +1,24 @@
+---
+title: Overview
+description: Measurable, user-impacting performance — from individual Core Web Vitals metrics to budgets and CI enforcement.
+---
+
+## Overview
+
+Core Web Vitals are Google's standardized metrics for user experience quality. They're used in search ranking, but more importantly they represent real dimensions of how users experience your site: loading speed, visual stability, and interaction responsiveness. This section covers each metric in depth and the infrastructure for tracking and enforcing them.
+
+## What's covered
+
+**Largest Contentful Paint (LCP)** — Time until the largest visible content element finishes rendering. The primary loading speed metric. Covers what elements qualify, what commonly delays LCP (render-blocking resources, slow servers, unoptimized images), and how to improve it.
+
+**Cumulative Layout Shift (CLS)** — A score of unexpected layout movement during the page's lifetime. Covers how the score is calculated, the most common causes (images without dimensions, dynamic content injection, web fonts), and how to eliminate them.
+
+**Interaction to Next Paint (INP)** — The current responsiveness metric, replacing FID. Measures the latency from user interaction to the next paint across the entire session. Covers long tasks, input delay, and main thread congestion.
+
+**First Input Delay (FID)** — The predecessor to INP. Measures the delay before the browser can respond to the first user interaction. Still relevant for understanding browser scheduling.
+
+**Lighthouse CI Integration** — Running Lighthouse audits automatically on every PR, defining score thresholds, and failing builds that regress on performance or accessibility.
+
+**RUM vs Synthetic Monitoring** — Real User Monitoring collects field data from actual users; synthetic monitoring runs automated tests in controlled conditions. Both are necessary for a complete picture.
+
+**Performance Budgets** — Setting enforceable limits on bundle size, metric values, and third-party script weight — and integrating those limits into CI so regressions are caught before deploy.

@@ -1,0 +1,18 @@
+---
+title: Overview
+description: The browser's built-in observer APIs for tracking DOM changes, element visibility, and performance — without polling.
+---
+
+## Overview
+
+Before Observer APIs, developers used `setInterval` polling and scroll event listeners to detect DOM changes and element visibility. These approaches are expensive — they run on the main thread, fire far too frequently, and force synchronous layout reads. The browser's Observer APIs replace all of this with efficient, asynchronous, browser-scheduled callbacks.
+
+## What's covered
+
+**IntersectionObserver Internals** — How the browser tracks element visibility relative to a viewport or ancestor without triggering layout recalculation. The basis of lazy loading, infinite scroll, and analytics impression tracking — and the threshold and rootMargin options that control it.
+
+**MutationObserver Cost** — How `MutationObserver` detects DOM changes and where it gets expensive: observing large subtrees, processing many mutations per callback, and the synchronous nature of `characterData` records. How to scope observations to minimize overhead.
+
+**PerformanceObserver API** — The standard interface for subscribing to browser performance entries — paint timing, navigation timing, resource timing, and long tasks — without polling `performance.getEntries()`.
+
+**Long Tasks API** — How the browser reports tasks that block the main thread for more than 50ms. The foundation of Total Blocking Time (TBT) measurement, and how to use it to identify INP regressions before users report them.

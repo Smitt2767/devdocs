@@ -1,12 +1,1 @@
-{
-  "title": "Performance & Core Web Vitals",
-  "pages": [
-    "first-input-delay",
-    "interaction-to-next-paint",
-    "cumulative-layout-shift",
-    "largest-contentful-paint",
-    "lighthouse-ci-integration",
-    "rum-vs-synthetic-monitoring",
-    "performance-budgets"
-  ]
-}
+{"title":"Performance & Core Web Vitals","pages":["index","first-input-delay","interaction-to-next-paint","cumulative-layout-shift","largest-contentful-paint","lighthouse-ci-integration","rum-vs-synthetic-monitoring","performance-budgets"]}

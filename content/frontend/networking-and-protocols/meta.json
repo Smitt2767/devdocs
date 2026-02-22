@@ -1,11 +1,1 @@
-{
-  "title": "Networking & Protocols",
-  "pages": [
-    "http3-and-quic",
-    "cors-preflight",
-    "samesite-cookie-modes",
-    "api-paradigms",
-    "authentication-flows",
-    "rate-limiting-client"
-  ]
-}
+{"title":"Networking & Protocols","pages":["index","http3-and-quic","cors-preflight","samesite-cookie-modes","api-paradigms","authentication-flows","rate-limiting-client"]}
