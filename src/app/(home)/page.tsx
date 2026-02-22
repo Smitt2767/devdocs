@@ -50,14 +50,6 @@ export default async function HomePage() {
           <Logo />
           <div className="flex items-center gap-6">
             <Link
-              href={githubUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs text-[#a0a0a0] hover:text-[#ebebeb] transition-colors tracking-wide"
-            >
-              GitHub
-            </Link>
-            <Link
               href="/docs/frontend"
               className="text-xs text-[#a0a0a0] hover:text-[#ebebeb] transition-colors tracking-wide"
             >
