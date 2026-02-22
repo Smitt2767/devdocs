@@ -1,12 +1,10 @@
-import { Logo } from "@/components/Logo";
 import { getFrontendSections } from "@/lib/getFrontendSections";
-import { gitConfig } from "@/lib/layout.shared";
-import { Metadata } from "next";
 import Link from "next/link";
+import { Logo } from "@/components/Logo";
+import type { Metadata } from "next";
 
-const githubUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
-
-const baseUrl = process.env.NEXT_PUBLIC_SITE_URL;
+const githubUrl = "https://github.com/smitt2767/devdocs";
+const baseUrl = process.env.NEXT_PUBLIC_SITE_URL!;
 
 export const metadata: Metadata = {
   title: "devdocs - Frontend Engineering Handbook",
@@ -44,7 +42,7 @@ export default async function HomePage() {
 
   return (
     <main className="min-h-screen bg-[#121212] text-white font-mono">
-      {/* Sticky nav with glacier (frosted glass) effect */}
+      {/* Sticky nav with frosted glass effect */}
       <header className="sticky top-0 z-50 w-full border-b border-white/6 bg-[#121212]/80 backdrop-blur-xl backdrop-saturate-150">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3 md:px-6 md:py-4">
           <Logo />
@@ -53,13 +51,13 @@ export default async function HomePage() {
               href={githubUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-xs text-[#a0a0a0] hover:text-[#ebebeb] transition-colors tracking-wide"
+              className="text-xs text-[#a3a3a3] hover:text-white transition-colors tracking-wide"
             >
               GitHub
             </Link>
             <Link
               href="/docs/frontend"
-              className="text-xs text-[#a0a0a0] hover:text-[#ebebeb] transition-colors tracking-wide"
+              className="text-xs text-[#a3a3a3] hover:text-white transition-colors tracking-wide"
             >
               browse →
             </Link>
@@ -70,15 +68,15 @@ export default async function HomePage() {
       <div className="relative max-w-3xl mx-auto px-6 py-6 md:py-24">
         {/* Hero */}
         <section className="mb-20">
-          <p className="text-[10px] text-[#888] tracking-[0.3em] uppercase mb-6">
+          <p className="text-[10px] text-[#555] tracking-[0.3em] uppercase mb-6">
             Frontend Engineering
           </p>
-          <h1 className="text-4xl md:text-5xl font-black tracking-tight leading-[1.1] mb-6 text-[#e8e8e8]">
+          <h1 className="text-4xl md:text-5xl font-black tracking-tight leading-[1.1] mb-6 text-white">
             The why behind
             <br />
-            <span className="text-[#666]">the how.</span>
+            <span className="text-[#555]">the how.</span>
           </h1>
-          <p className="text-[#aaa] text-sm leading-relaxed max-w-sm">
+          <p className="text-[#a3a3a3] text-sm leading-relaxed max-w-sm">
             {sections.length} categories &middot; {totalArticles} articles. A
             personal reference built to understand browser internals, rendering
             pipelines, and system-level thinking — not just copy patterns.
@@ -87,11 +85,11 @@ export default async function HomePage() {
 
         <div className="border-t border-[#1e1e1e] mb-12" />
 
-        <p className="text-[10px] text-[#777] tracking-[0.25em] uppercase mb-6">
+        <p className="text-[10px] text-[#555] tracking-[0.25em] uppercase mb-6">
           Frontend
         </p>
 
-        <ul className="space-y-0 divide-y divide-[#161616]">
+        <ul className="space-y-0 divide-y divide-[#1e1e1e]">
           {sections.map((section, i) => (
             <li key={section.slug}>
               <Link
@@ -100,22 +98,22 @@ export default async function HomePage() {
               >
                 <div className="flex items-center gap-4">
                   <span
-                    className="text-[#999] text-[10px] w-5 tabular-nums select-none"
+                    className="text-[#555] text-[10px] w-5 tabular-nums select-none"
                     aria-hidden="true"
                   >
                     {String(i + 1).padStart(2, "0")}
                   </span>
-                  <span className="text-[#999] text-sm group-hover:text-[#f0f0f0] transition-colors duration-150">
+                  <span className="text-[#a3a3a3] text-sm group-hover:text-white transition-colors duration-150">
                     {section.label}
                   </span>
                 </div>
 
                 <div className="flex items-center gap-4">
-                  <span className="text-[#777] text-[10px] tabular-nums group-hover:text-[#aaa] transition-colors">
+                  <span className="text-[#555] text-[10px] tabular-nums group-hover:text-[#a3a3a3] transition-colors">
                     {section.count}
                   </span>
                   <span
-                    className="text-[#555] text-sm group-hover:text-[#888] transition-colors shrink-0 font-semibold"
+                    className="text-[#555] text-sm group-hover:text-[#a3a3a3] transition-colors shrink-0 font-semibold"
                     aria-hidden="true"
                   >
                     →
@@ -128,11 +126,11 @@ export default async function HomePage() {
 
         {/* Footer */}
         <footer className="border-t border-[#1e1e1e] mt-20 pt-8 flex items-center justify-between">
-          <span className="text-[#777] text-[10px] tracking-[0.2em] uppercase">
+          <span className="text-[#555] text-[10px] tracking-[0.2em] uppercase">
             Always learning
           </span>
           <span
-            className="text-[#777] text-[10px] font-mono"
+            className="text-[#555] text-[10px] font-mono"
             aria-hidden="true"
           >
             {new Date().getFullYear()}
