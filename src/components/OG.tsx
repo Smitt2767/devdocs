@@ -1,4 +1,5 @@
 import React from "react";
+import { colors } from "@/lib/colors";
 
 export function OgLogo() {
   return (
@@ -10,26 +11,26 @@ export function OgLogo() {
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
       >
-        <rect width="32" height="32" fill="#0a0a0a" rx="6" />
+        <rect width="32" height="32" fill={colors.logoBg} rx="6" />
 
         <path
           d="M16 6L23.8564 10.5V19.5L16 24L8.14359 19.5V10.5L16 6Z"
-          fill="url(#gradient)"
-          stroke="#5b4cff"
+          fill="url(#og-gradient)"
+          stroke={colors.brand}
           strokeWidth="1.5"
         />
 
         <defs>
           <linearGradient
-            id="gradient"
+            id="og-gradient"
             x1="8"
             y1="6"
             x2="23"
             y2="24"
             gradientUnits="userSpaceOnUse"
           >
-            <stop offset="0%" stopColor="#5b4cff" stopOpacity="0.3" />
-            <stop offset="100%" stopColor="#00d2ff" stopOpacity="0.2" />
+            <stop offset="0%" stopColor={colors.brand} stopOpacity="0.3" />
+            <stop offset="100%" stopColor={colors.accent} stopOpacity="0.2" />
           </linearGradient>
         </defs>
 
@@ -39,27 +40,28 @@ export function OgLogo() {
           fontFamily="monospace"
           fontSize="14"
           fontWeight="bold"
-          fill="#ffffff"
+          fill={colors.foreground}
           textAnchor="middle"
         >
           D
         </text>
       </svg>
-      {/* devdocs text */}
+
       <span
         style={{
           fontWeight: "bold",
           fontSize: "1.6rem",
           letterSpacing: "-0.025em",
+          display: "flex",
         }}
       >
-        <span style={{ color: "#ffffff" }}>dev</span>
+        <span style={{ color: colors.foreground }}>dev</span>
         <span
           style={{
-            backgroundImage: "linear-gradient(to right, #5b4cff, #00d2ff)",
+            backgroundImage: `linear-gradient(to right, ${colors.brand}, ${colors.accent})`,
             WebkitBackgroundClip: "text",
             backgroundClip: "text",
-            display: "block",
+            color: "transparent",
           }}
         >
           docs
@@ -70,17 +72,9 @@ export function OgLogo() {
 }
 
 export function OgTitle({ children }: { children: React.ReactNode }) {
-  return <span style={{ color: "#5b4cff" }}>{children}</span>;
+  return <span style={{ color: colors.brand }}>{children}</span>;
 }
 
 export function OgDescription({ children }: { children: React.ReactNode }) {
-  return (
-    <span
-      style={{
-        color: "#ebebeb",
-      }}
-    >
-      {children}
-    </span>
-  );
+  return <span style={{ color: colors.muted }}>{children}</span>;
 }
