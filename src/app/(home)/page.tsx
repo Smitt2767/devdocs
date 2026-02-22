@@ -1,3 +1,4 @@
+import { Logo } from "@/components/Logo";
 import { Metadata } from "next";
 import Link from "next/link";
 
@@ -98,9 +99,7 @@ export default function HomePage() {
       <div className="relative max-w-3xl mx-auto px-6 py-6 md:py-28">
         {/* Nav */}
         <nav className="flex items-center justify-between mb-24">
-          <span className="text-xs text-[#ebebeb] tracking-[0.2em] uppercase">
-            DEVDOCS
-          </span>
+          <Logo />
           <Link
             href="/docs/frontend"
             className="text-xs text-[#a0a0a0] hover:text-[#ebebeb] transition-colors tracking-wide"

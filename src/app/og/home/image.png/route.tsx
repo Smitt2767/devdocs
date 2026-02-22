@@ -8,7 +8,7 @@ export async function GET() {
     <DefaultImage
       title="devdocs"
       description="A curated reference of frontend engineering concepts. Built to understand the why, not just the how."
-      site="DEVDOCS"
+      site="devdocs"
       primaryColor="#5b4cff"
       primaryTextColor="#00d2ff"
     />,
