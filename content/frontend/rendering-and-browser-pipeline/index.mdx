@@ -1,0 +1,22 @@
+---
+title: Overview
+description: How browsers turn HTML, CSS, and JavaScript into pixels — and how React's rendering model maps onto that pipeline.
+---
+
+## Overview
+
+This section covers the full stack from raw bytes to painted pixels. Understanding the rendering pipeline is foundational — performance bugs, layout shifts, and hydration mismatches all trace back to misunderstanding how the browser and React coordinate work.
+
+Topics span two layers: the **browser's internal pipeline** (critical rendering path, compositing, GPU acceleration, paint vs layout) and **React's rendering model** (fiber architecture, reconciliation, hydration, concurrent features, streaming SSR).
+
+## What's covered
+
+**Hydration & SSR** — How server-rendered HTML gets "activated" on the client, and how partial and selective hydration reduce the cost of that activation.
+
+**Streaming SSR** — How React 18 streams HTML in chunks so users see content before the full server response completes.
+
+**Concurrent Rendering** — How React schedules and prioritizes rendering work to keep UIs responsive under heavy load.
+
+**Browser internals** — The critical rendering path, render-blocking resources, compositing layers, and how CSS properties map to GPU-accelerated work.
+
+**Render waterfalls** — How sequential data fetching chains compound latency and how to break them with parallel fetches and Suspense.
