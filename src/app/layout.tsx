@@ -1,7 +1,7 @@
 import { RootProvider } from "fumadocs-ui/provider/next";
 import "./global.css";
 import { Inter } from "next/font/google";
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 import { colors } from "@/lib/colors";
@@ -13,9 +13,6 @@ const inter = Inter({
 export const metadata: Metadata = {
   title: "devdocs",
   description: "A curated reference of frontend engineering concepts",
-  // themeColor matches site.webmanifest theme_color (colors.brand)
-  // Controls the browser address bar / tab strip color on mobile
-  themeColor: colors.brand,
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "any" },
@@ -27,6 +24,10 @@ export const metadata: Metadata = {
       { url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" },
     ],
   },
+};
+
+export const viewport: Viewport = {
+  themeColor: colors.brand,
 };
 
 export default function Layout({ children }: LayoutProps<"/">) {
