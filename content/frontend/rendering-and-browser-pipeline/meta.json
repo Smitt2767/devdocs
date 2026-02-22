@@ -1,6 +1,5 @@
 {
   "title": "Rendering & Browser Pipeline",
-  "index": true,
   "pages": [
     "index",
     "hydration",

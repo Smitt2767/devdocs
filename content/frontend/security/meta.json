@@ -1,1 +1,12 @@
-{"title":"Security","pages":["index","csrf-vs-xss-mitigation","content-security-policy","trusted-types","prototype-pollution","dependency-supply-chain-risks","secrets-management"]}
+{
+  "title": "Security",
+  "pages": [
+    "index",
+    "csrf-vs-xss-mitigation",
+    "content-security-policy",
+    "trusted-types",
+    "prototype-pollution",
+    "dependency-supply-chain-risks",
+    "secrets-management"
+  ]
+}

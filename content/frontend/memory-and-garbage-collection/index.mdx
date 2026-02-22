@@ -3,7 +3,7 @@ title: Overview
 description: How the browser allocates and reclaims memory, how to detect leaks in production, and the patterns that silently hold objects alive.
 ---
 
-## Overview
+## Memory & Garbage Collection
 
 Memory leaks in browser applications are subtle — the page doesn't crash immediately, it just gets slower and slower until the tab is killed. JavaScript's garbage collector handles most memory management automatically, but it can only collect objects that have no live references. Understanding what holds references alive, and how to detect when they shouldn't be, is the core skill in this section.
 

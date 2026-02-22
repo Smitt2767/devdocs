@@ -1,1 +1,11 @@
-{"title":"JavaScript Runtime & Async","pages":["index","event-loop-macro-microtasks","task-starvation-scheduler-priorities","abort-controller-streaming-fetch","websockets-vs-sse-vs-long-polling","promise-combinators-error-propagation"]}
+{
+  "title": "JavaScript Runtime & Async",
+  "pages": [
+    "index",
+    "event-loop-macro-microtasks",
+    "task-starvation-scheduler-priorities",
+    "abort-controller-streaming-fetch",
+    "websockets-vs-sse-vs-long-polling",
+    "promise-combinators-error-propagation"
+  ]
+}
