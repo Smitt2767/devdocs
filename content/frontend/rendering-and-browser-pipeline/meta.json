@@ -13,6 +13,8 @@
     "render-blocking-resources",
     "browser-compositing-layers",
     "paint-vs-composite-vs-layout",
-    "render-waterfalls"
+    "render-waterfalls",
+    "view-transitions-api",
+    "image-and-font-optimization"
   ]
 }

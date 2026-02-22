@@ -1,0 +1,320 @@
+---
+title: Image & Font Optimization
+description: How Next.js optimizes images and fonts at the framework level — and how unoptimized images and late-loading fonts are the two most common causes of LCP and CLS regressions.
+---
+
+## Overview
+
+Images and fonts are the two assets most responsible for poor Core Web Vitals scores in production Next.js applications. Unoptimized images delay LCP. Fonts that load late cause layout shift. Both problems are solvable — Next.js ships built-in solutions for each — but developers routinely misconfigure them or bypass them without realizing the performance cost.
+
+This article covers how `next/image` and `next/font` work under the hood, the configuration decisions that actually matter, and the exact mistakes that cause regressions on LCP and CLS.
+
+---
+
+## How It Works
+
+### Images
+
+The browser can't display an image until it has downloaded it. For the Largest Contentful Paint element — almost always an image — this download time dominates the LCP score. Three variables control it:
+
+**Format** — AVIF and WebP are significantly smaller than JPEG and PNG at equivalent quality. AVIF averages 50% smaller than JPEG; WebP averages 25–35% smaller. Serving the right format per browser is a content negotiation problem.
+
+**Size** — Serving a 2000×1500px image to a mobile viewport displaying it at 400×300px wastes ~25× the bandwidth. Responsive images (`srcset`) let the browser pick the right size.
+
+**Loading strategy** — Images below the fold should be lazy-loaded (deferred until they approach the viewport). The LCP image should never be lazy-loaded — it needs to start downloading as early as possible.
+
+`next/image` handles all three automatically. It resizes images on-demand via a built-in image optimization API, generates `srcset` for responsive delivery, converts to AVIF/WebP based on the `Accept` header, and lazy-loads by default with `priority` to override for LCP candidates.
+
+### Fonts
+
+Fonts cause two distinct problems. **Flash of Invisible Text (FOIT)** — the browser hides text while the font loads. **Flash of Unstyled Text (FOUT)** — the browser shows text in a fallback font, then swaps to the loaded font, causing layout shift.
+
+`next/font` eliminates both at the source. It downloads fonts at build time, self-hosts them from the same origin (no DNS lookup, no cross-origin request), injects `font-display: swap` to prevent FOIT, and generates a size-adjusted fallback font metric that matches the loaded font's metrics closely enough to eliminate CLS from the font swap.
+
+---
+
+## Code Examples
+
+### 1. `next/image` — correct configuration for the LCP image
+
+```tsx
+// app/page.tsx — Server Component
+import Image from "next/image";
+
+export default function HeroSection() {
+  return (
+    <section className="relative h-[600px] w-full">
+      <Image
+        src="/images/hero.jpg"
+        alt="A scenic mountain landscape at sunrise"
+        // fill: makes the image fill the nearest positioned parent
+        fill
+        // sizes: tells the browser how wide this image will be at each breakpoint
+        // Without sizes, the browser assumes 100vw and downloads too large a file
+        sizes="100vw"
+        // priority: disables lazy loading and adds a <link rel="preload">
+        // Use this on the LCP image — never lazy-load your largest above-fold image
+        priority
+        // quality: 85 is a good balance of quality vs file size (default is 75)
+        quality={85}
+        className="object-cover"
+      />
+    </section>
+  );
+}
+```
+
+```tsx
+// app/products/page.tsx — product grid with correctly sized images
+import Image from "next/image";
+import { getProducts } from "@/lib/db";
+
+export default async function ProductsPage() {
+  const products = await getProducts();
+
+  return (
+    <ul className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+      {products.map((product, index) => (
+        <li key={product.id}>
+          <Image
+            src={product.imageUrl}
+            alt={product.name}
+            width={600}
+            height={450}
+            // sizes matches the CSS grid breakpoints above
+            // Browser uses this to pick the right srcset entry
+            sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+            // Only the first product (likely LCP candidate) gets priority
+            priority={index === 0}
+            className="w-full rounded-lg object-cover"
+          />
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+---
+
+### 2. `next/image` — external domains and remote images
+
+```ts
+// next.config.ts
+import type { NextConfig } from "next";
+
+const config: NextConfig = {
+  images: {
+    // Allow optimization for images from these domains
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "cdn.example.com",
+        pathname: "/products/**",
+      },
+      {
+        protocol: "https",
+        hostname: "images.unsplash.com",
+      },
+    ],
+    // Formats to generate — AVIF first (best compression), WebP fallback
+    // Next.js serves the best format the browser accepts via content negotiation
+    formats: ["image/avif", "image/webp"],
+    // Cache optimized images for 1 year on the CDN
+    minimumCacheTTL: 31536000,
+  },
+};
+
+export default config;
+```
+
+---
+
+### 3. `next/font` — Google Fonts with zero layout shift
+
+```tsx
+// app/layout.tsx
+import { Inter, Playfair_Display } from "next/font/google";
+import type { ReactNode } from "react";
+
+// next/font downloads and self-hosts the font at build time.
+// No Google Fonts network request at runtime — no DNS lookup, no cross-origin latency.
+const inter = Inter({
+  subsets: ["latin"],
+  // variable: exposes the font as a CSS custom property
+  // Lets you use it in Tailwind via font-sans if configured
+  variable: "--font-inter",
+  // display: "swap" prevents FOIT — text shows in fallback font immediately
+  display: "swap",
+});
+
+const playfair = Playfair_Display({
+  subsets: ["latin"],
+  // Only load the weights you actually use — each weight is a separate file
+  weight: ["400", "700"],
+  variable: "--font-playfair",
+  display: "swap",
+});
+
+export default function RootLayout({ children }: { children: ReactNode }) {
+  return (
+    // Apply both font variables to the root — components can use either via CSS
+    <html lang="en" className={`${inter.variable} ${playfair.variable}`}>
+      <body className="font-sans">{children}</body>
+    </html>
+  );
+}
+```
+
+```ts
+// tailwind.config.ts — wire the CSS variables into Tailwind
+import type { Config } from "tailwindcss";
+
+export default {
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ["var(--font-inter)", "system-ui", "sans-serif"],
+        display: ["var(--font-playfair)", "Georgia", "serif"],
+      },
+    },
+  },
+} satisfies Config;
+```
+
+---
+
+### 4. `next/font` — local fonts
+
+For custom brand fonts that aren't on Google Fonts:
+
+```tsx
+// app/layout.tsx
+import localFont from "next/font/local";
+
+const brandFont = localFont({
+  src: [
+    {
+      path: "../public/fonts/BrandFont-Regular.woff2",
+      weight: "400",
+      style: "normal",
+    },
+    {
+      path: "../public/fonts/BrandFont-Bold.woff2",
+      weight: "700",
+      style: "normal",
+    },
+  ],
+  variable: "--font-brand",
+  display: "swap",
+  // adjustFontFallback: generates a metric-adjusted fallback
+  // that matches the custom font's line-height, letter-spacing, and advance width.
+  // This is what eliminates layout shift during the font swap.
+  adjustFontFallback: true,
+});
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en" className={brandFont.variable}>
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+---
+
+### 5. Diagnosing image and font issues in production
+
+```tsx
+// app/layout.tsx — report LCP and CLS to catch regressions in the field
+"use client";
+
+import { useReportWebVitals } from "next/web-vitals";
+
+export function WebVitalsReporter() {
+  useReportWebVitals((metric) => {
+    // LCP > 2500ms or CLS > 0.1 indicates an image or font problem
+    if (
+      (metric.name === "LCP" && metric.value > 2500) ||
+      (metric.name === "CLS" && metric.value > 0.1)
+    ) {
+      console.warn(`[Web Vital regression] ${metric.name}: ${metric.value}`);
+
+      // Send to your analytics endpoint for alerting
+      fetch("/api/vitals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: metric.name,
+          value: metric.value,
+          rating: metric.rating,
+        }),
+        keepalive: true,
+      });
+    }
+  });
+
+  return null;
+}
+```
+
+---
+
+## Real-World Use Case
+
+An e-commerce homepage has a hero banner and a 3-column product grid. Before optimization:
+
+- The hero is a raw 3.2MB JPEG served at full resolution to all devices.
+- Three Google Fonts are loaded via a `<link>` tag in `<head>` — two cross-origin requests that block rendering.
+- All product images use `<img>` tags with no `width`/`height`, causing CLS as they load in.
+
+After switching to `next/image` and `next/font`:
+
+- The hero is served as AVIF at 380KB on mobile, 820KB on desktop — a ~75% reduction.
+- Fonts are self-hosted with zero cross-origin requests, `display: swap` prevents FOIT, and `adjustFontFallback` eliminates the CLS from the font swap.
+- Product images have explicit dimensions, stable `srcset` variants, and only the first image has `priority` — the rest lazy-load.
+
+LCP drops from 4.2s to 1.8s. CLS drops from 0.24 to 0.02.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Adding `priority` to every image**
+
+`priority` adds a `<link rel="preload">` for that image. Adding it to more than one or two images causes them to compete for bandwidth, delaying the actual LCP candidate. Use `priority` only on the single image that is (or is likely to be) the LCP element.
+
+**2. Omitting `sizes` on `fill` or responsive images**
+
+Without `sizes`, the browser assumes the image will be `100vw` wide and downloads the largest available `srcset` entry. On a mobile device showing a 400px image, this means downloading a 1600px file. Always set `sizes` to match your CSS layout.
+
+```tsx
+// ❌ Browser downloads the full-width version on all devices
+<Image src="..." fill alt="..." />
+
+// ✅ Browser picks the right size based on actual rendered width
+<Image src="..." fill sizes="(max-width: 768px) 100vw, 50vw" alt="..." />
+```
+
+**3. Using `<img>` instead of `next/image` for images that affect LCP or CLS**
+
+Raw `<img>` tags bypass all optimization. They don't generate `srcset`, don't convert formats, don't lazy-load intelligently, and don't reserve space to prevent CLS. Any image in the top half of your page should be a `next/image`.
+
+**4. Loading fonts from Google Fonts at runtime**
+
+A `<link href="https://fonts.googleapis.com/css2?family=Inter">` in your layout adds two cross-origin requests before any text can render: one to `fonts.googleapis.com` for the CSS, one to `fonts.gstatic.com` for the font file. `next/font` eliminates both by self-hosting at build time.
+
+**5. Not specifying `weight` in `next/font`**
+
+Without `weight`, some Google Fonts load all available weights — often 8–12 separate files. Specify exactly the weights used in your design. Two weights (400 and 700) is the common case.
+
+---
+
+## Summary
+
+`next/image` solves the image performance problem automatically — format conversion, responsive `srcset`, lazy loading, and LCP-aware preloading — but only if configured correctly. Set `sizes` to match your CSS layout, use `priority` only on the LCP image, and configure `remotePatterns` for external sources. `next/font` solves the font performance problem by self-hosting at build time, eliminating cross-origin requests and using `adjustFontFallback` to prevent CLS during the font swap. Together, these two tools address the two most common causes of poor LCP and CLS scores. Use `useReportWebVitals` in production to catch regressions in field data before they compound.

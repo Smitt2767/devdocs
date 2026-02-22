@@ -1,0 +1,368 @@
+---
+title: View Transitions API
+description: How to use the browser's native View Transitions API to animate between page states and route changes — including integration with Next.js App Router.
+---
+
+## Overview
+
+The View Transitions API lets the browser animate between two DOM states natively — without JavaScript animation libraries, manual FLIP calculations, or CSS keyframe gymnastics. You tell the browser "something is about to change," it snapshots the current state, applies the change, snapshots the new state, and crossfades between them using GPU-composited animations.
+
+The result is page transitions, element morphing, and list reordering animations that feel native — and that work with server-rendered HTML, not just client-side state.
+
+Before this API, smooth page transitions in a multi-page or server-rendered app required either a full client-side router takeover or a JavaScript animation library that fought the browser's navigation model. The View Transitions API solves this at the platform level.
+
+---
+
+## How It Works
+
+The core mechanism is `document.startViewTransition(callback)`. When called:
+
+1. The browser captures a screenshot of the current page state.
+2. Your `callback` runs — this is where you mutate the DOM (navigate, update state, re-render).
+3. The browser captures a screenshot of the new page state.
+4. It animates between the two screenshots using a default crossfade, or custom CSS animations you define.
+
+The screenshots are taken as flat images — the transition itself runs entirely on the compositor thread, off the main thread. This is what makes it smooth even when the DOM update is expensive.
+
+**Named view transitions** take this further. By applying `view-transition-name` to specific elements, you tell the browser to animate those elements independently — morphing them from their old position and size to their new ones. This is how you get a card expanding into a detail page, or a thumbnail image moving to a hero position.
+
+```
+Before state captured
+       ↓
+DOM update runs (navigation, setState, etc.)
+       ↓
+After state captured
+       ↓
+::view-transition-old animates out
+::view-transition-new animates in
+Named elements morph between positions (FLIP, handled by browser)
+```
+
+There are two scopes of the API:
+
+- **Same-document transitions** — triggered by JavaScript within a single page. Available now in all modern browsers.
+- **Cross-document transitions** — triggered by normal navigations between pages. Opt in via `@view-transition { navigation: auto }` in CSS. Available in Chrome 126+, coming to other browsers.
+
+---
+
+## Code Examples
+
+### 1. Basic same-document transition
+
+```tsx
+// components/theme-toggle.tsx
+"use client";
+
+import { useCallback } from "react";
+
+export function ThemeToggle() {
+  const toggleTheme = useCallback(() => {
+    // Check if the API is supported before using it
+    if (!document.startViewTransition) {
+      document.documentElement.classList.toggle("dark");
+      return;
+    }
+
+    document.startViewTransition(() => {
+      // Any DOM mutation inside the callback is captured as the "after" state
+      document.documentElement.classList.toggle("dark");
+    });
+  }, []);
+
+  return (
+    <button
+      onClick={toggleTheme}
+      className="rounded-md p-2 hover:bg-muted"
+      aria-label="Toggle theme"
+    >
+      Toggle theme
+    </button>
+  );
+}
+```
+
+```css
+/* globals.css */
+/* 
+  ::view-transition-old — the screenshot of the previous state
+  ::view-transition-new — the screenshot of the new state
+  Override the default crossfade with a circular reveal from the toggle button
+*/
+::view-transition-old(root) {
+  animation: 300ms ease-in both fade-out;
+}
+
+::view-transition-new(root) {
+  animation: 300ms ease-out both fade-in;
+}
+
+@keyframes fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Respect users who prefer no motion */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+  }
+}
+```
+
+---
+
+### 2. Named transitions — element morphing
+
+Apply `view-transition-name` to elements that should animate as individual units rather than crossfading with the whole page.
+
+```tsx
+// app/products/page.tsx — product grid (Server Component)
+import Link from "next/link";
+import { getProducts } from "@/lib/db";
+
+export default async function ProductsPage() {
+  const products = await getProducts();
+
+  return (
+    <ul className="grid grid-cols-3 gap-4">
+      {products.map((product) => (
+        <li key={product.id}>
+          <Link href={`/products/${product.id}`}>
+            <img
+              src={product.imageUrl}
+              alt={product.name}
+              width={400}
+              height={300}
+              // Each image gets a unique transition name
+              // The browser will morph this element to its new position on navigation
+              style={{ viewTransitionName: `product-image-${product.id}` }}
+              className="w-full rounded-lg object-cover"
+            />
+            <h2 className="mt-2 font-medium">{product.name}</h2>
+          </Link>
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+```tsx
+// app/products/[id]/page.tsx — product detail (Server Component)
+import { getProduct } from "@/lib/db";
+
+export default async function ProductDetailPage({
+  params,
+}: {
+  params: { id: string };
+}) {
+  const product = await getProduct(params.id);
+
+  return (
+    <div className="mx-auto max-w-4xl">
+      <img
+        src={product.imageUrl}
+        alt={product.name}
+        width={800}
+        height={600}
+        // Same view-transition-name as the grid thumbnail
+        // Browser morphs the thumbnail into this hero image on navigation
+        style={{ viewTransitionName: `product-image-${product.id}` }}
+        className="w-full rounded-xl object-cover"
+      />
+      <h1 className="mt-6 text-3xl font-bold">{product.name}</h1>
+    </div>
+  );
+}
+```
+
+<Callout type="warn">
+  `view-transition-name` values must be unique in the DOM at the time the
+  transition runs. If two elements share the same name simultaneously, the
+  browser skips the transition for both. Generate names dynamically from IDs,
+  never hardcode the same name on multiple elements.
+</Callout>
+
+---
+
+### 3. Cross-document transitions (CSS-only, no JavaScript)
+
+For standard link navigations between pages, opt in with a single CSS rule. No JavaScript required.
+
+```css
+/* globals.css */
+
+/* 
+  Tells the browser to animate navigations between pages in this origin.
+  Works for forward navigation, back/forward cache, and prerendered pages.
+  Chrome 126+; progressive enhancement — ignored by unsupported browsers.
+*/
+@view-transition {
+  navigation: auto;
+}
+
+/* Customize the transition */
+::view-transition-old(root) {
+  animation: 200ms ease-in slide-out-left;
+}
+
+::view-transition-new(root) {
+  animation: 200ms ease-out slide-in-right;
+}
+
+@keyframes slide-out-left {
+  to {
+    transform: translateX(-20px);
+    opacity: 0;
+  }
+}
+
+@keyframes slide-in-right {
+  from {
+    transform: translateX(20px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @view-transition {
+    navigation: none;
+  }
+}
+```
+
+---
+
+### 4. Integrating with Next.js App Router navigation
+
+Next.js App Router uses client-side navigation by default. Wrap `router.push` calls in `startViewTransition` to animate route changes.
+
+```tsx
+// hooks/use-transition-router.ts
+"use client";
+
+import { useRouter } from "next/navigation";
+import { useCallback } from "react";
+
+/**
+ * A router wrapper that triggers a view transition before navigating.
+ * Falls back to a normal push if the API isn't available.
+ */
+export function useTransitionRouter() {
+  const router = useRouter();
+
+  const push = useCallback(
+    (href: string) => {
+      if (!document.startViewTransition) {
+        router.push(href);
+        return;
+      }
+
+      document.startViewTransition(() => {
+        router.push(href);
+      });
+    },
+    [router],
+  );
+
+  return { push };
+}
+```
+
+```tsx
+// components/nav-link.tsx
+"use client";
+
+import { useTransitionRouter } from "@/hooks/use-transition-router";
+
+export function NavLink({
+  href,
+  children,
+}: {
+  href: string;
+  children: React.ReactNode;
+}) {
+  const { push } = useTransitionRouter();
+
+  return (
+    <button
+      onClick={() => push(href)}
+      className="text-sm font-medium hover:underline"
+    >
+      {children}
+    </button>
+  );
+}
+```
+
+<Callout type="info">
+  The Next.js team is working on first-class View Transitions support. Until it
+  lands, the `useTransitionRouter` hook pattern above is the recommended
+  approach. Watch the Next.js changelog — the integration story will improve.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+You're building a product catalog for an e-commerce site. Users browse a grid of product cards and tap into a detail view. Without transitions, the navigation is an abrupt page swap. With named view transitions on the product image, the browser morphs the thumbnail card into the full hero image — a "shared element transition" that gives the user a spatial sense of where they came from and where they are.
+
+The same technique works for: a list item expanding into a detail panel, an avatar in a comment thread morphing into a profile page hero, or a notification card animating out when dismissed. Each case uses the same two primitives: `view-transition-name` on both the source and destination element, and either `startViewTransition` for in-page updates or `@view-transition { navigation: auto }` for page navigations.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Not feature-detecting before calling `startViewTransition`**
+
+Safari added support in version 18. Older browsers don't have the API at all. Always check `if (!document.startViewTransition)` and fall back to the plain DOM update.
+
+**2. Using the same `view-transition-name` on multiple elements**
+
+If two elements share a name when the transition starts, both are skipped silently. In a list where you're generating names from IDs, this usually means you forgot to make the name unique — double-check the template string.
+
+**3. Animating too many named elements at once**
+
+Each named element gets its own compositor layer during the transition. Naming 50 list items on a page creates 50 layers simultaneously, which can overwhelm GPU memory on low-end devices. Use named transitions selectively — the one element the user just interacted with, not the entire list.
+
+**4. Blocking the transition callback with slow async work**
+
+The callback passed to `startViewTransition` should be fast — just the DOM mutation. Don't await data fetches inside it. Fetch data before calling `startViewTransition`, then apply the result inside the callback.
+
+```ts
+// ❌ Slow — transition waits for the fetch
+document.startViewTransition(async () => {
+  const data = await fetchProducts();
+  renderProducts(data);
+});
+
+// ✅ Fast — fetch first, then transition
+const data = await fetchProducts();
+document.startViewTransition(() => {
+  renderProducts(data); // synchronous DOM update
+});
+```
+
+**5. Forgetting `prefers-reduced-motion`**
+
+View transitions are animations. Users who have set `prefers-reduced-motion: reduce` in their OS expect animations to be suppressed. Always add a media query to disable or reduce your transition animations for these users.
+
+---
+
+## Summary
+
+The View Transitions API gives the browser native tools to animate between DOM states — crossfading pages, morphing shared elements between routes, and animating list changes — without JavaScript animation libraries. The core primitive is `document.startViewTransition(callback)` for in-page updates, and `@view-transition { navigation: auto }` in CSS for page-level navigations. Named transitions (`view-transition-name`) let individual elements morph between their old and new positions independently of the page crossfade. Always feature-detect before using the API, keep transition callbacks synchronous, generate unique names from IDs, and respect `prefers-reduced-motion`.
