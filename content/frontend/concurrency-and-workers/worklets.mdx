@@ -1,0 +1,294 @@
+---
+title: Worklets
+description: A guide to Audio Worklets, Paint Worklets, and Layout Worklets — low-level browser APIs that run JavaScript in specialized rendering and audio threads.
+---
+
+## Overview
+
+Worklets are lightweight, sandboxed JavaScript execution contexts that run outside the main thread. The browser exposes three stable worklet types:
+
+- **Audio Worklet** — custom audio processing nodes in the Web Audio API pipeline
+- **Paint Worklet** (CSS Houdini) — custom CSS `background`, `border-image`, or `mask` painters
+- **Layout Worklet** (CSS Houdini) — custom CSS layout algorithms (e.g., a masonry grid)
+
+Unlike Web Workers, worklets are tightly integrated into the browser's internal pipelines. They have intentionally limited APIs — no DOM access, restricted globals — because they must run on a high-priority, low-latency thread.
+
+<Callout type="info">
+  Worklets are not a general-purpose threading solution. Use Web Workers for
+  arbitrary background computation. Use Worklets only when you need to hook into
+  a browser pipeline (audio graph, paint, layout).
+</Callout>
+
+---
+
+## How It Works
+
+Each worklet type is registered through a global context tied to the pipeline it serves:
+
+| Worklet Type   | Registration Global        | Thread                     |
+| -------------- | -------------------------- | -------------------------- |
+| Audio Worklet  | `AudioWorkletGlobalScope`  | Audio rendering thread     |
+| Paint Worklet  | `PaintWorkletGlobalScope`  | Compositor / raster thread |
+| Layout Worklet | `LayoutWorkletGlobalScope` | Layout thread              |
+
+The lifecycle is always:
+
+1. **Register** — call `registerProcessor` / `registerPaint` / `registerLayout` inside the worklet module file.
+2. **Add the module** — call `audioContext.audioWorklet.addModule()`, `CSS.paintWorklet.addModule()`, or `CSS.layoutWorklet.addModule()` from the main thread.
+3. **Use** — reference the registered name in Web Audio node construction or CSS property values.
+
+Worklet modules are ES modules with a restricted global scope. They cannot import arbitrary npm packages — only static, side-effect-free code is safe inside them.
+
+---
+
+## Code Examples
+
+### 1. Audio Worklet — White Noise Generator
+
+**worklets/white-noise-processor.js** (the worklet module)
+
+```js
+// Runs in AudioWorkletGlobalScope — no DOM, no fetch, no timers
+class WhiteNoiseProcessor extends AudioWorkletProcessor {
+  process(_inputs, outputs) {
+    const output = outputs[0]; // first output node
+
+    for (const channel of output) {
+      for (let i = 0; i < channel.length; i++) {
+        // Math.random() produces values [0, 1); shift to [-1, 1)
+        channel[i] = Math.random() * 2 - 1;
+      }
+    }
+
+    // Return true to keep the processor alive indefinitely
+    return true;
+  }
+}
+
+registerProcessor("white-noise-processor", WhiteNoiseProcessor);
+```
+
+**main.ts** (main thread)
+
+```ts
+async function startWhiteNoise() {
+  const audioContext = new AudioContext();
+
+  // Load the worklet module into the audio rendering thread
+  await audioContext.audioWorklet.addModule(
+    "/worklets/white-noise-processor.js",
+  );
+
+  // Instantiate a node backed by our registered processor
+  const noiseNode = new AudioWorkletNode(audioContext, "white-noise-processor");
+
+  // Connect to speakers
+  noiseNode.connect(audioContext.destination);
+}
+
+document
+  .querySelector<HTMLButtonElement>("#start")!
+  .addEventListener("click", startWhiteNoise);
+```
+
+---
+
+### 2. Paint Worklet — Diagonal Stripe Background
+
+**worklets/diagonal-stripes-painter.js**
+
+```js
+class DiagonalStripesPainter {
+  // Declare which CSS custom properties this painter reads
+  static get inputProperties() {
+    return ["--stripe-color", "--stripe-width"];
+  }
+
+  paint(ctx, geometry, properties) {
+    const stripeColor =
+      properties.get("--stripe-color").toString().trim() || "#ccc";
+    const stripeWidth =
+      parseInt(properties.get("--stripe-width").toString()) || 20;
+
+    ctx.strokeStyle = stripeColor;
+    ctx.lineWidth = stripeWidth / 2;
+
+    // Draw diagonal lines across the element's bounding box
+    for (
+      let x = -geometry.height;
+      x < geometry.width + geometry.height;
+      x += stripeWidth * 2
+    ) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x + geometry.height, geometry.height);
+      ctx.stroke();
+    }
+  }
+}
+
+registerPaint("diagonal-stripes", DiagonalStripesPainter);
+```
+
+**main.ts**
+
+```ts
+// CSS Paint Worklet API is behind CSS.paintWorklet
+if ("paintWorklet" in CSS) {
+  (CSS as any).paintWorklet.addModule("/worklets/diagonal-stripes-painter.js");
+}
+```
+
+**styles.css**
+
+```css
+.striped-card {
+  --stripe-color: #6366f1;
+  --stripe-width: 24px;
+  background: paint(diagonal-stripes);
+  border-radius: 8px;
+  padding: 2rem;
+}
+```
+
+---
+
+### 3. Layout Worklet — Centered Masonry (Simplified)
+
+<Callout type="warn">
+  Layout Worklet support is currently limited to Chromium-based browsers behind
+  the "Experimental Web Platform features" flag. Do not ship this to production
+  without a fallback.
+</Callout>
+
+**worklets/masonry-layout.js**
+
+```js
+registerLayout(
+  "simple-masonry",
+  class {
+    static get inputProperties() {
+      return ["--column-count"];
+    }
+
+    async intrinsicSizes() {}
+
+    async layout(children, edges, constraints, styleMap) {
+      const columnCount = parseInt(styleMap.get("--column-count")) || 3;
+      const availableWidth = constraints.fixedInlineSize - edges.inline;
+      const columnWidth = availableWidth / columnCount;
+
+      // Track the current height of each column
+      const columnHeights = new Array(columnCount).fill(0);
+      const childFragments = [];
+
+      for (const child of children) {
+        // Place child in the shortest column
+        const shortestCol = columnHeights.indexOf(Math.min(...columnHeights));
+
+        const childConstraints = new LayoutConstraints({
+          fixedInlineSize: columnWidth,
+        });
+
+        const fragment = await child.layoutNextFragment(childConstraints);
+
+        childFragments.push({
+          fragment,
+          inlineOffset: shortestCol * columnWidth,
+          blockOffset: columnHeights[shortestCol],
+        });
+
+        columnHeights[shortestCol] += fragment.blockSize;
+      }
+
+      return {
+        autoBlockSize: Math.max(...columnHeights),
+        childFragments,
+      };
+    }
+  },
+);
+```
+
+**main.ts**
+
+```ts
+if ("layoutWorklet" in CSS) {
+  (CSS as any).layoutWorklet.addModule("/worklets/masonry-layout.js");
+}
+```
+
+**styles.css**
+
+```css
+.masonry-grid {
+  display: layout(simple-masonry);
+  --column-count: 3;
+}
+```
+
+---
+
+## Real-World Use Cases
+
+**Audio Worklet** — A browser-based DAW (like Bandlab or a podcast editor) needs to apply real-time compression, reverb, or pitch-shifting to a live microphone stream. The ScriptProcessorNode (now deprecated) ran on the main thread and caused dropouts under load. An AudioWorkletProcessor runs on the audio thread, guaranteeing glitch-free processing even while the main thread is painting or handling events.
+
+**Paint Worklet** — A design-system library wants a `<Card>` component with a configurable generative background that reacts to CSS custom properties (theme colors, density). Instead of generating an SVG in JavaScript and updating the DOM, the paint worklet repaints natively whenever the custom property changes — no React re-render, no DOM mutation.
+
+**Layout Worklet** — A content platform needs a true masonry layout without JavaScript measuring and repositioning. The layout worklet runs the algorithm inside the browser's layout engine, enabling the browser to handle resize, zoom, and print natively.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Forgetting `await` on `addModule()`**
+
+`addModule()` is asynchronous. If you construct an `AudioWorkletNode` or apply the CSS before the module resolves, you will get a `DOMException: The node name 'x' is not defined` error.
+
+```ts
+// ❌ Wrong — race condition
+audioContext.audioWorklet.addModule("/processor.js");
+const node = new AudioWorkletNode(audioContext, "my-processor"); // may throw
+
+// ✅ Correct
+await audioContext.audioWorklet.addModule("/processor.js");
+const node = new AudioWorkletNode(audioContext, "my-processor");
+```
+
+**2. Using ES module imports inside a worklet**
+
+Worklet global scopes support `import` only in browsers that support ESM worklets (not universal). Avoid importing from `node_modules` or other local modules inside a worklet file. Keep worklet files fully self-contained.
+
+```js
+// ❌ This will silently fail or throw in many browsers
+import { clamp } from "./math-utils.js";
+```
+
+**3. Trying to access the DOM or `window` inside a worklet**
+
+Worklet global scopes do not expose `window`, `document`, `fetch`, `setTimeout`, or `localStorage`. Attempting to use them throws a `ReferenceError`.
+
+```js
+class BadProcessor extends AudioWorkletProcessor {
+  process() {
+    console.log(window.location.href); // ❌ ReferenceError: window is not defined
+    return true;
+  }
+}
+```
+
+Pass data into worklets via `AudioWorkletNode.port.postMessage()` or CSS custom properties — never try to read external state directly.
+
+**4. Returning `false` from `AudioWorkletProcessor.process()` unintentionally**
+
+Returning `false` (or `undefined`) from `process()` signals to the browser that the processor is done and should be garbage-collected. Always `return true` for processors that should stay alive.
+
+**5. Shipping Layout Worklet to production without a fallback**
+
+Browser support for Layout Worklets is currently Chromium-only behind a flag. Always wrap usage with a `CSS.supports('display: layout(your-layout)')` check and provide a CSS Grid or Flexbox fallback.
+
+---
+
+## Summary
+
+Worklets give you a sanctioned escape hatch into the browser's internal pipelines — audio rendering, painting, and layout — without blocking the main thread. Audio Worklets replace the deprecated `ScriptProcessorNode` and are the only correct way to do real-time audio processing in the browser today. Paint Worklets let you define fully custom CSS backgrounds and borders driven by custom properties, without touching the DOM. Layout Worklets let you implement novel layout algorithms as first-class CSS layouts. All three share the same module-based registration pattern but run in isolated, restricted global scopes — keep worklet files self-contained and always `await addModule()` before use.

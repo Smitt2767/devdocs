@@ -1,1 +1,10 @@
-{"title":"Concurrency & Workers","pages":["index","web-workers-vs-service-workers"]}
+{
+  "title": "Concurrency & Workers",
+  "pages": [
+    "index",
+    "web-workers-vs-service-workers",
+    "shared-array-buffer-and-atomics",
+    "shared-array-buffer-and-atomics",
+    "worklets"
+  ]
+}

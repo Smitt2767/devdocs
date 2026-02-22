@@ -1,0 +1,345 @@
+---
+title: SharedArrayBuffer & Atomics
+description: A guide to using SharedArrayBuffer and the Atomics API for shared memory concurrency and thread-safe operations in JavaScript.
+---
+
+## Overview
+
+JavaScript is single-threaded by default, but Web Workers let you run code in parallel threads. The problem: workers normally communicate by copying data via `postMessage`, which is slow for large payloads.
+
+`SharedArrayBuffer` solves this by giving multiple workers access to the **same block of memory** — no copying required. `Atomics` is the companion API that makes reads and writes to that shared memory **thread-safe**, preventing race conditions.
+
+Together they unlock true shared-memory concurrency in JavaScript, which is critical for performance-intensive work like audio processing, game engines, image manipulation, and WASM-based applications.
+
+<Callout type="warn">
+  `SharedArrayBuffer` requires specific HTTP headers to be set on your server
+  due to security restrictions (Spectre mitigation). Without them, the
+  constructor will throw. See the **Common Mistakes** section below.
+</Callout>
+
+---
+
+## How It Works
+
+Normally, when Worker A sends data to Worker B via `postMessage`, the JavaScript engine **serializes and copies** the data. For a 50MB buffer, that's 50MB of copying on every message.
+
+With `SharedArrayBuffer`, both workers receive a **reference to the same underlying memory**. Think of it like two people editing the same Google Doc simultaneously — they're both looking at the same data, not their own copies.
+
+This introduces a classic concurrency problem: what if both workers try to write to the same memory location at the same time? You get a **race condition** — unpredictable, corrupted data.
+
+`Atomics` prevents this by providing **atomic operations** — operations that are guaranteed to complete entirely before any other thread can touch that memory location. The CPU-level locking ensures no two operations interleave.
+
+Key `Atomics` methods:
+
+- `Atomics.add(typedArray, index, value)` — atomically adds a value
+- `Atomics.load(typedArray, index)` — safely reads a value
+- `Atomics.store(typedArray, index, value)` — safely writes a value
+- `Atomics.compareExchange(typedArray, index, expectedValue, replacementValue)` — only writes if the current value matches expected (a "CAS" operation)
+- `Atomics.wait(typedArray, index, value)` — blocks the thread until the value changes (Workers only)
+- `Atomics.notify(typedArray, index, count)` — wakes up waiting threads
+
+---
+
+## Code Examples
+
+### Basic Setup: Sharing a Counter Between Workers
+
+**`main.ts`** — Creates the shared buffer and spawns workers
+
+```ts
+// main.ts (runs in the browser main thread)
+
+// SharedArrayBuffer must hold a TypedArray — here we use Int32Array
+// 4 bytes per Int32 element, 1 element = 4 bytes total
+const sharedBuffer = new SharedArrayBuffer(4);
+const sharedArray = new Int32Array(sharedBuffer);
+
+// Initialize the counter to 0
+Atomics.store(sharedArray, 0, 0);
+
+const worker1 = new Worker(new URL("./worker.ts", import.meta.url), {
+  type: "module",
+});
+const worker2 = new Worker(new URL("./worker.ts", import.meta.url), {
+  type: "module",
+});
+
+// Send the shared buffer to both workers — no copying, just a reference
+worker1.postMessage({ sharedBuffer });
+worker2.postMessage({ sharedBuffer });
+
+// After both workers finish, read the final counter value
+setTimeout(() => {
+  const finalValue = Atomics.load(sharedArray, 0);
+  console.log(`Final counter value: ${finalValue}`); // Should be 2000
+}, 3000);
+```
+
+**`worker.ts`** — Each worker increments the shared counter 1000 times
+
+```ts
+// worker.ts (runs in a Web Worker context)
+
+self.onmessage = (event: MessageEvent<{ sharedBuffer: SharedArrayBuffer }>) => {
+  const { sharedBuffer } = event.data;
+  const sharedArray = new Int32Array(sharedBuffer);
+
+  // Increment the counter 1000 times using an atomic add
+  // Without Atomics.add(), concurrent increments would corrupt the value
+  for (let i = 0; i < 1000; i++) {
+    Atomics.add(sharedArray, 0, 1);
+  }
+
+  console.log("Worker done. Current value:", Atomics.load(sharedArray, 0));
+};
+```
+
+---
+
+### Producer/Consumer with `Atomics.wait` and `Atomics.notify`
+
+This pattern lets a worker **pause execution** until another worker signals it — like a mutex or semaphore.
+
+**`producer.worker.ts`**
+
+```ts
+// producer.worker.ts
+self.onmessage = (
+  event: MessageEvent<{
+    controlBuffer: SharedArrayBuffer;
+    dataBuffer: SharedArrayBuffer;
+  }>,
+) => {
+  const { controlBuffer, dataBuffer } = event.data;
+
+  const control = new Int32Array(controlBuffer); // index 0 = ready flag
+  const data = new Int32Array(dataBuffer);
+
+  // Simulate producing data
+  for (let i = 0; i < data.length; i++) {
+    data[i] = i * 10; // Write computed values into shared data buffer
+  }
+
+  // Signal the consumer that data is ready
+  // Sets control[0] to 1 and wakes up any thread waiting on control[0]
+  Atomics.store(control, 0, 1);
+  Atomics.notify(control, 0, 1); // Wake up 1 waiting thread
+};
+```
+
+**`consumer.worker.ts`**
+
+```ts
+// consumer.worker.ts
+self.onmessage = (
+  event: MessageEvent<{
+    controlBuffer: SharedArrayBuffer;
+    dataBuffer: SharedArrayBuffer;
+  }>,
+) => {
+  const { controlBuffer, dataBuffer } = event.data;
+
+  const control = new Int32Array(controlBuffer);
+  const data = new Int32Array(dataBuffer);
+
+  // Block this worker thread until control[0] changes from 0
+  // 'ok' means it was notified, 'timed-out' means it waited too long
+  const waitResult = Atomics.wait(control, 0, 0, 5000); // 5 second timeout
+
+  if (waitResult === "timed-out") {
+    console.error("Consumer timed out waiting for producer.");
+    return;
+  }
+
+  // Safe to read — producer has finished writing
+  console.log("Received data:", Array.from(data));
+  self.postMessage({ done: true, sample: data[5] });
+};
+```
+
+**`main.ts`** — Wiring them together
+
+```ts
+// main.ts
+const controlBuffer = new SharedArrayBuffer(4); // 1 x Int32 for signaling
+const dataBuffer = new SharedArrayBuffer(4 * 10); // 10 x Int32 for data
+
+const producer = new Worker(new URL("./producer.worker.ts", import.meta.url), {
+  type: "module",
+});
+const consumer = new Worker(new URL("./consumer.worker.ts", import.meta.url), {
+  type: "module",
+});
+
+// Start consumer first so it begins waiting before producer signals
+consumer.postMessage({ controlBuffer, dataBuffer });
+consumer.onmessage = (e) => console.log("Consumer result:", e.data);
+
+// Start producer slightly after (in a real app, ordering is handled by the wait/notify)
+setTimeout(() => {
+  producer.postMessage({ controlBuffer, dataBuffer });
+}, 100);
+```
+
+---
+
+### Required HTTP Headers (Express / Node.js)
+
+```ts
+// server.ts — Express server with required COOP/COEP headers
+import express from "express";
+import path from "path";
+
+const app = express();
+
+// These two headers enable cross-origin isolation, which is required
+// for SharedArrayBuffer to be available in the browser
+app.use((_req, res, next) => {
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+  next();
+});
+
+app.use(express.static(path.resolve("./dist")));
+
+app.listen(3000, () => console.log("Server running on http://localhost:3000"));
+```
+
+### Required HTTP Headers (Next.js App Router)
+
+```ts
+// next.config.ts
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  async headers() {
+    return [
+      {
+        // Apply to all routes — adjust the source pattern if you only need it on specific pages
+        source: "/:path*",
+        headers: [
+          { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
+          { key: "Cross-Origin-Embedder-Policy", value: "require-corp" },
+        ],
+      },
+    ];
+  },
+};
+
+export default nextConfig;
+```
+
+---
+
+## Real-World Use Case
+
+**Image processing pipeline in a photo editor app:**
+
+A user uploads a 20MB raw image. Your app needs to apply multiple filters (grayscale, blur, contrast) in parallel before displaying the result.
+
+Without `SharedArrayBuffer`, you'd copy the full image buffer between the main thread and multiple workers for each filter — potentially hundreds of megabytes of copying.
+
+With `SharedArrayBuffer`:
+
+1. Load the image pixel data once into a `SharedArrayBuffer`
+2. Spawn N workers, each responsible for processing a horizontal slice of the image
+3. Each worker reads from and writes to the shared buffer directly
+4. Use `Atomics.wait` / `Atomics.notify` to coordinate when all workers have finished a pass before the next filter runs
+
+The result is a dramatic reduction in memory usage and processing time — especially important for WASM-based image codecs like `libvips` or `ImageMagick` compiled to WebAssembly.
+
+---
+
+## Common Mistakes / Gotchas
+
+### 1. Missing Cross-Origin Isolation Headers
+
+This is the most common error. If `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` are not set, `SharedArrayBuffer` is `undefined` in the browser.
+
+```ts
+// This will throw: "SharedArrayBuffer is not defined"
+const buffer = new SharedArrayBuffer(1024);
+```
+
+Check `crossOriginIsolated` before using it:
+
+```ts
+if (!crossOriginIsolated) {
+  throw new Error(
+    "Page is not cross-origin isolated. SharedArrayBuffer is unavailable.",
+  );
+}
+```
+
+<Callout type="warn">
+  Setting these headers can break loading of cross-origin resources (fonts,
+  images, iframes) unless those resources send a `Cross-Origin-Resource-Policy`
+  header. Audit your third-party dependencies before enabling isolation
+  site-wide.
+</Callout>
+
+---
+
+### 2. Using `Atomics.wait` on the Main Thread
+
+`Atomics.wait` **blocks the thread**. Calling it on the main browser thread will freeze the UI and throw a `TypeError` in most browsers.
+
+```ts
+// ❌ This will throw in a browser main thread
+Atomics.wait(sharedArray, 0, 0);
+```
+
+Use `Atomics.waitAsync` for non-blocking waits on the main thread:
+
+```ts
+// ✅ Non-blocking alternative for the main thread
+const result = await Atomics.waitAsync(sharedArray, 0, 0, 5000).value;
+console.log("Wait result:", result); // 'ok' or 'timed-out'
+```
+
+---
+
+### 3. Non-Atomic Read-Modify-Write Operations
+
+A common misconception is that separating an atomic read and an atomic write is safe. It's not — another thread can modify the value **between** your read and write.
+
+```ts
+// ❌ NOT thread-safe — race condition between load and store
+const current = Atomics.load(sharedArray, 0);
+Atomics.store(sharedArray, 0, current + 1);
+
+// ✅ Thread-safe — the add is a single atomic operation
+Atomics.add(sharedArray, 0, 1);
+```
+
+For conditional updates, use `Atomics.compareExchange`:
+
+```ts
+// Only set the value to 99 if it's currently 0
+const previousValue = Atomics.compareExchange(sharedArray, 0, 0, 99);
+if (previousValue === 0) {
+  console.log("Successfully updated to 99");
+} else {
+  console.log("Value was already", previousValue, "— no update made");
+}
+```
+
+---
+
+### 4. Using Regular Arrays Instead of TypedArrays
+
+`SharedArrayBuffer` only works with TypedArrays (`Int32Array`, `Uint8Array`, etc.). You cannot wrap it in a regular `Array` or use it with plain objects.
+
+```ts
+// ❌ Will throw — SharedArrayBuffer requires a TypedArray view
+const plain = new Array(new SharedArrayBuffer(4));
+
+// ✅ Correct
+const typed = new Int32Array(new SharedArrayBuffer(4));
+```
+
+---
+
+## Summary
+
+`SharedArrayBuffer` enables multiple Web Workers to access the same memory region without copying data, making it essential for high-performance parallel processing in the browser. `Atomics` provides the thread-safe primitives — load, store, add, compareExchange, wait, and notify — needed to coordinate access to that shared memory without race conditions. Cross-origin isolation headers (`COOP` + `COEP`) are mandatory for `SharedArrayBuffer` to be available. Always use `Atomics.waitAsync` on the main thread to avoid blocking the UI. This combination is particularly powerful for WASM interop, media processing, and any workload that benefits from true parallelism without the overhead of data copying.

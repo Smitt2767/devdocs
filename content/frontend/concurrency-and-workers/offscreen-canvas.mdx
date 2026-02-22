@@ -1,0 +1,242 @@
+---
+title: OffscreenCanvas
+description: A guide to using OffscreenCanvas to run canvas rendering in Web Workers, keeping the main thread free for smooth UI performance.
+---
+
+## Overview
+
+`OffscreenCanvas` is a browser API that lets you move canvas rendering work off the main thread and into a Web Worker. Normally, all canvas drawing happens on the main thread — the same thread responsible for layout, user interactions, and React rendering. Heavy canvas work (data visualizations, particle systems, image processing) can block that thread and cause jank.
+
+`OffscreenCanvas` solves this by giving a Web Worker full ownership of a canvas element's rendering context. The main thread stays responsive while the worker handles all the heavy lifting.
+
+---
+
+## How It Works
+
+A regular `<canvas>` element lives in the DOM and can only be drawn to from the main thread. `OffscreenCanvas` breaks that coupling.
+
+Here's the flow:
+
+1. You create a `<canvas>` element in the DOM as usual.
+2. You call `.transferControlToOffscreen()` on it, which returns an `OffscreenCanvas` object and **transfers** ownership — the main thread can no longer draw to it.
+3. You post that `OffscreenCanvas` to a Web Worker via `postMessage`, using the transferable objects mechanism.
+4. Inside the worker, you call `.getContext('2d')` (or `'webgl'`) on the `OffscreenCanvas` and draw as you normally would.
+
+The browser composites the worker's output directly onto the screen without round-tripping through the main thread.
+
+<Callout type="info">
+  Transfer, not copy. When you post an `OffscreenCanvas` to a worker, the main
+  thread loses access. This is intentional — only one context can control
+  rendering at a time.
+</Callout>
+
+---
+
+## Code Examples
+
+### Worker file: `renderWorker.ts`
+
+```ts
+// renderWorker.ts — runs entirely in a Web Worker
+let ctx: OffscreenCanvasRenderingContext2D | null = null;
+let animationFrame: ReturnType<typeof requestAnimationFrame> | null = null;
+
+function drawFrame(timestamp: number) {
+  if (!ctx) return;
+
+  const { width, height } = ctx.canvas;
+
+  // Clear previous frame
+  ctx.clearRect(0, 0, width, height);
+
+  // Animate a circle across the canvas using timestamp for smooth motion
+  const x = (timestamp / 5) % width;
+  const y = height / 2;
+
+  ctx.beginPath();
+  ctx.arc(x, y, 30, 0, Math.PI * 2);
+  ctx.fillStyle = "#6366f1";
+  ctx.fill();
+
+  animationFrame = requestAnimationFrame(drawFrame);
+}
+
+self.addEventListener("message", (event: MessageEvent) => {
+  const { type, canvas } = event.data;
+
+  if (type === "init") {
+    // Receive the OffscreenCanvas transferred from the main thread
+    ctx = (canvas as OffscreenCanvas).getContext("2d");
+    animationFrame = requestAnimationFrame(drawFrame);
+  }
+
+  if (type === "stop" && animationFrame !== null) {
+    cancelAnimationFrame(animationFrame);
+  }
+});
+```
+
+---
+
+### React component: `AnimatedCanvas.tsx`
+
+```tsx
+"use client";
+
+import { useEffect, useRef } from "react";
+
+export default function AnimatedCanvas() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const workerRef = useRef<Worker | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    // Check for OffscreenCanvas support before proceeding
+    if (!canvas.transferControlToOffscreen) {
+      console.warn("OffscreenCanvas is not supported in this browser.");
+      return;
+    }
+
+    // Transfer rendering control to an OffscreenCanvas
+    const offscreen = canvas.transferControlToOffscreen();
+
+    // Instantiate the worker
+    workerRef.current = new Worker(
+      new URL("./renderWorker.ts", import.meta.url),
+      { type: "module" },
+    );
+
+    // Post the OffscreenCanvas as a transferable — main thread no longer owns it
+    workerRef.current.postMessage({ type: "init", canvas: offscreen }, [
+      offscreen,
+    ]);
+
+    return () => {
+      workerRef.current?.postMessage({ type: "stop" });
+      workerRef.current?.terminate();
+    };
+  }, []);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={800}
+      height={200}
+      className="w-full rounded-xl border border-zinc-200"
+    />
+  );
+}
+```
+
+<Callout type="warn">
+  Once you call `transferControlToOffscreen()`, any attempt to call
+  `getContext()` on the original canvas element will throw an error. The
+  transfer is permanent for that canvas instance.
+</Callout>
+
+---
+
+### Handling resize from the main thread
+
+The worker can't access the DOM, so you need to send dimension updates via `postMessage`.
+
+```tsx
+"use client";
+
+import { useEffect, useRef } from "react";
+
+export default function ResponsiveCanvas() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const workerRef = useRef<Worker | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !canvas.transferControlToOffscreen) return;
+
+    const offscreen = canvas.transferControlToOffscreen();
+    workerRef.current = new Worker(
+      new URL("./renderWorker.ts", import.meta.url),
+      { type: "module" },
+    );
+
+    workerRef.current.postMessage({ type: "init", canvas: offscreen }, [
+      offscreen,
+    ]);
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        // Notify the worker of the new dimensions so it can re-draw correctly
+        workerRef.current?.postMessage({ type: "resize", width, height });
+      }
+    });
+
+    observer.observe(canvas);
+
+    return () => {
+      observer.disconnect();
+      workerRef.current?.terminate();
+    };
+  }, []);
+
+  return <canvas ref={canvasRef} className="w-full h-48 rounded-xl" />;
+}
+```
+
+---
+
+## Real-World Use Case
+
+Imagine you're building a real-time analytics dashboard that plots thousands of data points every second from a WebSocket feed — think financial tick data or IoT sensor streams.
+
+Without `OffscreenCanvas`, plotting on every data event would compete with React's rendering cycle and user interactions (filtering, zooming), causing dropped frames and a sluggish UI.
+
+With `OffscreenCanvas`, you pipe the raw data to a worker via `postMessage`. The worker owns the canvas, runs its own `requestAnimationFrame` loop, and renders continuously. The main thread only handles React state, user events, and layout — completely independent from the canvas workload.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Trying to use the canvas after transfer**
+
+Calling `canvas.getContext('2d')` after `transferControlToOffscreen()` throws `InvalidStateError`. Once transferred, the canvas belongs to the worker. Structure your code so transfer happens exactly once.
+
+**2. Forgetting to pass the OffscreenCanvas as a transferable**
+
+```ts
+// ❌ Wrong — canvas is copied (which fails for transferables)
+worker.postMessage({ canvas: offscreen });
+
+// ✅ Correct — canvas is transferred, not cloned
+worker.postMessage({ canvas: offscreen }, [offscreen]);
+```
+
+Without the second argument array, the browser will throw a `DataCloneError` because `OffscreenCanvas` cannot be structured-cloned, only transferred.
+
+**3. Assuming DOM APIs are available in the worker**
+
+Workers have no access to `document`, `window`, `localStorage`, or any DOM element. You can use `requestAnimationFrame`, `fetch`, `WebSockets`, and `OffscreenCanvas` — but nothing that touches the DOM. If your render logic inadvertently imports a module that references `window`, it will crash the worker.
+
+**4. Not checking browser support**
+
+`OffscreenCanvas` is widely supported in modern browsers but is absent in Safari versions before 16.4. Always feature-detect and provide a fallback that renders on the main thread.
+
+```ts
+if ("OffscreenCanvas" in window) {
+  // Use worker-based rendering
+} else {
+  // Fall back to main-thread canvas rendering
+}
+```
+
+**5. Sending too much data per frame**
+
+`postMessage` serializes data using the structured clone algorithm. Posting large arrays of raw pixel data every frame defeats the performance benefit. Use `SharedArrayBuffer` for high-frequency data sharing, or batch updates before posting.
+
+---
+
+## Summary
+
+`OffscreenCanvas` moves canvas rendering into a Web Worker, freeing the main thread for UI responsiveness. You transfer ownership of a canvas element using `transferControlToOffscreen()`, then pass the result to a worker as a transferable object. The worker draws to it independently using standard Canvas or WebGL APIs. This pattern is ideal for animation-heavy, data-intensive, or computationally expensive rendering scenarios. Always feature-detect support and avoid posting large payloads per frame to get the full performance benefit.
