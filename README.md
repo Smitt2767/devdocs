@@ -1,6 +1,16 @@
 # devdocs
 
-A **Frontend Engineering Handbook** — a curated reference of frontend concepts built to understand the *why* behind the how. Not just copy-paste patterns; browser internals, rendering pipelines, and system-level thinking.
+<p align="center">
+  <img src="public/favicon.svg" alt="devdocs logo" width="64" height="64" />
+</p>
+
+<p align="center">
+  <strong>Frontend Engineering Handbook</strong> — <a href="https://devdocs-web.vercel.app/">Live site →</a>
+</p>
+
+A curated reference of frontend concepts built to understand the *why* behind the how. Not just copy-paste patterns; browser internals, rendering pipelines, and system-level thinking.
+
+**Content:** All documentation (MDX articles) in this project was created with [Claude](https://www.anthropic.com/claude) (Anthropic AI). The handbook is maintained as a personal reference and is openly shared.
 
 ## What's inside
 
@@ -45,6 +55,8 @@ pnpm dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000). The home page lists all categories; use **browse →** or go to `/docs/frontend` for the full sidebar.
+
+**Preview without running locally:** [devdocs-web.vercel.app](https://devdocs-web.vercel.app/)
 
 ### Other commands
 

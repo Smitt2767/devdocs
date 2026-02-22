@@ -1,7 +1,10 @@
 import { Logo } from "@/components/Logo";
 import { getFrontendSections } from "@/lib/getFrontendSections";
+import { gitConfig } from "@/lib/layout.shared";
 import { Metadata } from "next";
 import Link from "next/link";
+
+const githubUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
 
 export const metadata: Metadata = {
   title: "devdocs - Frontend Engineering Handbook",
@@ -43,12 +46,22 @@ export default async function HomePage() {
         {/* Nav */}
         <nav className="flex items-center justify-between mb-24">
           <Logo />
-          <Link
-            href="/docs/frontend"
-            className="text-xs text-[#a0a0a0] hover:text-[#ebebeb] transition-colors tracking-wide"
-          >
-            browse →
-          </Link>
+          <div className="flex items-center gap-6">
+            <Link
+              href={githubUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-[#a0a0a0] hover:text-[#ebebeb] transition-colors tracking-wide"
+            >
+              GitHub
+            </Link>
+            <Link
+              href="/docs/frontend"
+              className="text-xs text-[#a0a0a0] hover:text-[#ebebeb] transition-colors tracking-wide"
+            >
+              browse →
+            </Link>
+          </div>
         </nav>
 
         {/* Hero */}
@@ -114,12 +127,22 @@ export default async function HomePage() {
           <span className="text-[#777] text-[10px] tracking-[0.2em] uppercase">
             Always learning
           </span>
-          <span
-            className="text-[#555] text-[10px] font-mono"
-            aria-hidden="true"
-          >
-            {new Date().getFullYear()}
-          </span>
+          <div className="flex items-center gap-4">
+            <Link
+              href={githubUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[#555] text-[10px] hover:text-[#888] transition-colors"
+            >
+              GitHub
+            </Link>
+            <span
+              className="text-[#555] text-[10px] font-mono"
+              aria-hidden="true"
+            >
+              {new Date().getFullYear()}
+            </span>
+          </div>
         </footer>
       </div>
     </main>
