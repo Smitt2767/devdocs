@@ -3,7 +3,7 @@
   "pages": [
     "index",
     "web-workers-vs-service-workers",
-    "shared-array-buffer-and-atomics",
+    "offscreen-canvas",
     "shared-array-buffer-and-atomics",
     "worklets"
   ]
