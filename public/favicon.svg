@@ -1,26 +1,11 @@
-<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Dark background -->
-  <rect width="32" height="32" fill="#0a0a0a" rx="6"/>
-  
-  <!-- Hexagon shape -->
-  <path d="M16 6L23.8564 10.5V19.5L16 24L8.14359 19.5V10.5L16 6Z" 
-        fill="url(#gradient)" 
-        stroke="#5b4cff" 
-        stroke-width="1.5"/>
-  
-  <!-- Gradient definition -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="12 12 40 48" fill="none">
   <defs>
-    <linearGradient id="gradient" x1="8" y1="6" x2="23" y2="24" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#5b4cff" stop-opacity="0.3"/>
-      <stop offset="100%" stop-color="#00d2ff" stop-opacity="0.2"/>
+    <linearGradient id="gradient1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#5b4cff" />
+      <stop offset="100%" stop-color="#7c6dff" />
     </linearGradient>
   </defs>
-  
-  <!-- Letter D -->
-   <path
-          d="M 12.5,11 H 14.5 Q 20,11 20,15.25 Q 20,19.5 14.5,19.5 H 12.5 Z
-             M 14.5,13 Q 18,13 18,15.25 Q 18,17.5 14.5,17.5 Z"
-          fill="#ffffff"
-          fill-rule="evenodd"
-        />
+  <path d="M32 12 L52 24 L32 36 L12 24 Z" fill="url(#gradient1)" opacity="0.9" />
+  <path d="M12 24 L12 48 L32 60 L32 36 Z" fill="url(#gradient1)" opacity="0.6" />
+  <path d="M32 36 L32 60 L52 48 L52 24 Z" fill="url(#gradient1)" opacity="0.75" />
 </svg>

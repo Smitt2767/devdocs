@@ -14,7 +14,7 @@ export function OgLogo() {
       <div style={{ color: colors.foreground }}>Front</div>
       <div
         style={{
-          backgroundImage: `linear-gradient(to right, ${colors.brand}, ${colors.accent})`,
+          backgroundImage: `linear-gradient(to right, ${colors.brand}, ${colors.brandLight})`,
           WebkitBackgroundClip: "text",
           backgroundClip: "text",
           color: "transparent",

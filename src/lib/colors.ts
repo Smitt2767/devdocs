@@ -1,6 +1,6 @@
 export const colors = {
   brand: "#5b4cff",
-  accent: "#00d2ff",
+  brandLight: "#7c6dff",
 
   background: "#121212",
   logoBg: "#0a0a0a",

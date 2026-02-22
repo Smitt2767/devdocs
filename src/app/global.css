@@ -4,7 +4,7 @@
 
 :root {
   --brand: #5b4cff;
-  --accent: #00d2ff;
+  --brand-light: #7c6dff;
 
   --background: #121212;
   --logo-bg: #0a0a0a;
@@ -24,7 +24,7 @@
 
 @theme inline {
   --color-brand: var(--brand);
-  --color-accent: var(--accent);
+  --color-brand-light: var(--brand-light);
 
   --color-background: var(--background);
   --color-logo-bg: var(--logo-bg);
