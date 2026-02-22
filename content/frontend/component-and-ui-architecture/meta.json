@@ -9,6 +9,7 @@
     "shadow-dom",
     "error-boundaries",
     "compound-components",
-    "headless-ui-pattern"
+    "headless-ui-pattern",
+    "portal-and-layering-architecture"
   ]
 }

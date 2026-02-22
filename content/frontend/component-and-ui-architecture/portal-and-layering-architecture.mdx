@@ -1,0 +1,576 @@
+---
+title: Portal & Layering Architecture
+description: How to build a robust layering system for tooltips, modals, toasts, and dropdowns using React portals, stacking contexts, and a coordinated z-index strategy.
+---
+
+## Overview
+
+Every UI eventually needs elements that float above everything else — modals, tooltips, dropdown menus, toast notifications, command palettes. These elements share a common problem: they need to visually escape the component tree they logically belong to.
+
+A tooltip on a button inside a card inside a sidebar shouldn't be clipped by the card's `overflow: hidden`. A modal should cover the entire page, not just its parent container. A toast notification should sit above everything else regardless of where in the component tree it was triggered.
+
+React portals solve the rendering side of this problem. Stacking contexts and a deliberate z-index architecture solve the visual side. Without both, you get the most classic frontend bug there is: a dropdown that disappears behind a sibling element, or a modal that can't cover a sticky header.
+
+---
+
+## How It Works
+
+### React Portals
+
+`createPortal(children, container)` renders `children` into a different DOM node than the component's natural parent — while keeping the React component tree (and therefore Context) intact.
+
+```
+React tree (logical):        DOM tree (physical):
+<App>                        <body>
+  <Sidebar>                    <div id="root">
+    <Tooltip> ←──────────────────<App><Sidebar>...</Sidebar></App>
+    </Tooltip>               </div>
+  </Sidebar>                 <div id="portal-root">
+</App>                  ────────> <Tooltip /> ← rendered here
+                               </div>
+                             </body>
+```
+
+The tooltip reads Context from `<Sidebar>` (logical parent), but its DOM node lives in `#portal-root` (physical parent). It escapes `overflow: hidden`, `clip-path`, and any transform on its ancestors — while still participating in React's event bubbling system. A click inside the portal still bubbles up through the React tree, not the DOM tree.
+
+### Stacking Contexts
+
+A stacking context is a self-contained layer in the browser's painting order. Elements inside a stacking context are painted as a group and can only be ordered relative to other elements in the same context.
+
+What creates a stacking context:
+
+- `position: fixed` or `position: sticky`
+- `position: relative/absolute` with a `z-index` other than `auto`
+- `opacity` less than 1
+- `transform`, `filter`, `will-change`, `isolation: isolate`
+
+The critical insight: **a `z-index` of 9999 inside a stacking context with `z-index: 1` will always paint below an element with `z-index: 2` in the parent context.** This is why `z-index` wars are unwinnable — you're fighting the wrong battle.
+
+### A deliberate z-index scale
+
+Rather than assigning arbitrary numbers, define a named scale as CSS custom properties or a design token. This makes the layering order legible and prevents collisions:
+
+```
+z-base:     0      Normal document flow
+z-raised:   10     Cards, sticky table headers
+z-dropdown: 100    Dropdown menus, popovers, tooltips
+z-sticky:   200    Sticky navbars, fixed sidebars
+z-overlay:  300    Modal backdrops
+z-modal:    400    Modal dialogs, drawers
+z-toast:    500    Toast notifications
+z-tooltip:  600    Tooltips (must clear modals)
+z-command:  700    Command palettes, global search
+```
+
+---
+
+## Code Examples
+
+### 1. A `usePortal` hook — reusable portal mounting
+
+```tsx
+// hooks/use-portal.ts
+import { useEffect, useRef } from "react";
+
+/**
+ * Creates and mounts a dedicated DOM container for a portal.
+ * Cleans up the container when the component unmounts.
+ */
+export function usePortal(id: string): HTMLElement {
+  const containerRef = useRef<HTMLElement | null>(null);
+
+  if (!containerRef.current && typeof document !== "undefined") {
+    // Reuse an existing container if one exists (e.g., for SSR re-use)
+    let container = document.getElementById(id);
+    if (!container) {
+      container = document.createElement("div");
+      container.id = id;
+      document.body.appendChild(container);
+    }
+    containerRef.current = container;
+  }
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    // Only remove the container if we created it (no pre-existing element)
+    return () => {
+      if (container.childElementCount === 0) {
+        container.remove();
+      }
+    };
+  }, []);
+
+  return containerRef.current!;
+}
+```
+
+---
+
+### 2. A modal with portal, backdrop, and focus trap
+
+```tsx
+// components/modal/index.tsx
+"use client";
+
+import {
+  createPortal,
+  useEffect,
+  useRef,
+  useCallback,
+  type ReactNode,
+} from "react";
+import { usePortal } from "@/hooks/use-portal";
+
+interface ModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  title: string;
+  children: ReactNode;
+}
+
+export function Modal({ isOpen, onClose, title, children }: ModalProps) {
+  const portalContainer = usePortal("modal-root");
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
+  // Save and restore focus when modal opens/closes
+  useEffect(() => {
+    if (isOpen) {
+      previousFocusRef.current = document.activeElement as HTMLElement;
+      // Move focus into the dialog on open
+      dialogRef.current?.focus();
+    } else {
+      // Restore focus to the element that triggered the modal
+      previousFocusRef.current?.focus();
+    }
+  }, [isOpen]);
+
+  // Close on Escape key
+  useEffect(() => {
+    if (!isOpen) return;
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, onClose]);
+
+  // Trap focus inside the dialog
+  const handleTabKey = useCallback((e: React.KeyboardEvent) => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+
+    const focusableSelectors = [
+      "button:not([disabled])",
+      "a[href]",
+      "input:not([disabled])",
+      "select:not([disabled])",
+      "textarea:not([disabled])",
+      '[tabindex]:not([tabindex="-1"])',
+    ].join(", ");
+
+    const focusable = Array.from(
+      dialog.querySelectorAll<HTMLElement>(focusableSelectors),
+    );
+
+    if (focusable.length === 0) return;
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+
+    if (e.key === "Tab") {
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+  }, []);
+
+  if (!isOpen) return null;
+
+  return createPortal(
+    <>
+      {/* Backdrop — sits at z-overlay, below the dialog */}
+      <div
+        className="fixed inset-0 bg-black/50 backdrop-blur-sm"
+        style={{ zIndex: "var(--z-overlay)" }}
+        onClick={onClose}
+        aria-hidden="true"
+      />
+
+      {/* Dialog — sits at z-modal, above the backdrop */}
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-title"
+        tabIndex={-1}
+        onKeyDown={handleTabKey}
+        className="fixed left-1/2 top-1/2 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-xl bg-background p-6 shadow-2xl outline-none"
+        style={{ zIndex: "var(--z-modal)" }}
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <h2 id="modal-title" className="text-lg font-semibold">
+            {title}
+          </h2>
+          <button
+            onClick={onClose}
+            className="rounded-md p-1 hover:bg-muted"
+            aria-label="Close modal"
+          >
+            ✕
+          </button>
+        </div>
+        {children}
+      </div>
+    </>,
+    portalContainer,
+  );
+}
+```
+
+```tsx
+// app/settings/page.tsx — consuming the modal
+"use client";
+
+import { useState } from "react";
+import { Modal } from "@/components/modal";
+
+export default function SettingsPage() {
+  const [isDeleteOpen, setIsDeleteOpen] = useState(false);
+
+  return (
+    <div>
+      <button
+        onClick={() => setIsDeleteOpen(true)}
+        className="rounded-md bg-destructive px-4 py-2 text-sm text-white"
+      >
+        Delete Account
+      </button>
+
+      <Modal
+        isOpen={isDeleteOpen}
+        onClose={() => setIsDeleteOpen(false)}
+        title="Delete Account"
+      >
+        <p className="text-sm text-muted-foreground">
+          This action is permanent and cannot be undone.
+        </p>
+        <div className="mt-6 flex justify-end gap-3">
+          <button
+            onClick={() => setIsDeleteOpen(false)}
+            className="rounded-md px-4 py-2 text-sm hover:bg-muted"
+          >
+            Cancel
+          </button>
+          <button className="rounded-md bg-destructive px-4 py-2 text-sm text-white">
+            Delete
+          </button>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+```
+
+---
+
+### 3. z-index scale as CSS custom properties
+
+Define the scale once in your global CSS. Every layered component reads from this scale — no magic numbers anywhere in component code.
+
+```css
+/* app/globals.css */
+:root {
+  --z-base: 0;
+  --z-raised: 10;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-overlay: 300;
+  --z-modal: 400;
+  --z-toast: 500;
+  --z-tooltip: 600;
+  --z-command: 700;
+}
+```
+
+```tsx
+// components/sticky-nav.tsx — reads from the scale, not hardcoded
+export function StickyNav() {
+  return (
+    <nav
+      className="sticky top-0 w-full border-b border-border bg-background"
+      style={{ zIndex: "var(--z-sticky)" }}
+    >
+      {/* nav content */}
+    </nav>
+  );
+}
+```
+
+---
+
+### 4. Toast notification system — portal + global state
+
+Toasts are triggered from anywhere in the app but render in one portal. A lightweight context manages the queue.
+
+```tsx
+// components/toast/context.tsx
+"use client";
+
+import {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useId,
+  type ReactNode,
+} from "react";
+
+interface Toast {
+  id: string;
+  message: string;
+  variant: "success" | "error" | "info";
+}
+
+interface ToastContextValue {
+  toasts: Toast[];
+  addToast: (message: string, variant?: Toast["variant"]) => void;
+  removeToast: (id: string) => void;
+}
+
+const ToastContext = createContext<ToastContextValue | null>(null);
+
+export function ToastProvider({ children }: { children: ReactNode }) {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  const removeToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const addToast = useCallback(
+    (message: string, variant: Toast["variant"] = "info") => {
+      const id = crypto.randomUUID();
+      setToasts((prev) => [...prev, { id, message, variant }]);
+      // Auto-dismiss after 4 seconds
+      setTimeout(() => removeToast(id), 4000);
+    },
+    [removeToast],
+  );
+
+  return (
+    <ToastContext.Provider value={{ toasts, addToast, removeToast }}>
+      {children}
+    </ToastContext.Provider>
+  );
+}
+
+export function useToast() {
+  const ctx = useContext(ToastContext);
+  if (!ctx) throw new Error("useToast must be used inside <ToastProvider>");
+  return ctx;
+}
+```
+
+```tsx
+// components/toast/toast-container.tsx
+"use client";
+
+import { createPortal } from "react";
+import { usePortal } from "@/hooks/use-portal";
+import { useToast } from "./context";
+
+const variantStyles = {
+  success: "bg-green-600 text-white",
+  error: "bg-destructive text-white",
+  info: "bg-foreground text-background",
+};
+
+export function ToastContainer() {
+  const { toasts, removeToast } = useToast();
+  const portalContainer = usePortal("toast-root");
+
+  return createPortal(
+    <div
+      // aria-live: screen readers announce new toasts automatically
+      aria-live="polite"
+      aria-atomic="false"
+      className="fixed bottom-6 right-6 flex flex-col gap-3"
+      style={{ zIndex: "var(--z-toast)" }}
+    >
+      {toasts.map((toast) => (
+        <div
+          key={toast.id}
+          role="status"
+          className={`flex items-center gap-3 rounded-lg px-4 py-3 shadow-lg ${variantStyles[toast.variant]}`}
+        >
+          <span className="text-sm font-medium">{toast.message}</span>
+          <button
+            onClick={() => removeToast(toast.id)}
+            className="ml-auto rounded p-0.5 opacity-70 hover:opacity-100"
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+    </div>,
+    portalContainer,
+  );
+}
+```
+
+```tsx
+// app/layout.tsx — wire up providers and the portal container
+import { ToastProvider } from "@/components/toast/context";
+import { ToastContainer } from "@/components/toast/toast-container";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        <ToastProvider>
+          {children}
+          {/* ToastContainer renders into its own portal — always above everything */}
+          <ToastContainer />
+        </ToastProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+```tsx
+// Usage from anywhere in the tree
+"use client";
+
+import { useToast } from "@/components/toast/context";
+
+export function SaveButton() {
+  const { addToast } = useToast();
+
+  async function handleSave() {
+    try {
+      await save();
+      addToast("Changes saved", "success");
+    } catch {
+      addToast("Save failed. Try again.", "error");
+    }
+  }
+
+  return <button onClick={handleSave}>Save</button>;
+}
+```
+
+---
+
+### 5. Diagnosing stacking context problems
+
+When a portal element disappears behind another element despite a high `z-index`, the cause is almost always an ancestor stacking context. Use this snippet to find which ancestor is creating one:
+
+```ts
+// Paste in browser DevTools console to find stacking context ancestors
+// of any element that has a z-index problem
+
+function findStackingContexts(el: Element): Element[] {
+  const contexts: Element[] = [];
+  let current: Element | null = el.parentElement;
+
+  while (current && current !== document.documentElement) {
+    const style = getComputedStyle(current);
+    const createsContext =
+      (style.position !== "static" && style.zIndex !== "auto") ||
+      parseFloat(style.opacity) < 1 ||
+      style.transform !== "none" ||
+      style.filter !== "none" ||
+      style.willChange !== "auto" ||
+      style.isolation === "isolate" ||
+      style.position === "fixed" ||
+      style.position === "sticky";
+
+    if (createsContext) contexts.push(current);
+    current = current.parentElement;
+  }
+
+  return contexts;
+}
+
+// Usage: findStackingContexts(document.querySelector('.your-element'))
+```
+
+<Callout type="info">
+  The `isolation: isolate` CSS property deliberately creates a stacking context
+  without any visual side effect. It's the clean way to contain a component's
+  internal z-index without leaking into the parent — use it on design system
+  components that use z-index internally so they don't interfere with the page's
+  layering system.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+A SaaS dashboard has a sticky sidebar nav, a data table with a floating column menu dropdown, and a global command palette triggered by `⌘K`. The table rows also have inline tooltip hints on certain cells.
+
+Without a layering architecture:
+
+- The column menu dropdown clips behind the sticky sidebar because the sidebar has `position: sticky` creating a stacking context.
+- The tooltip on a table row disappears behind the modal backdrop when a modal is open.
+- The command palette fights with a developer's `z-index: 9999` on the modal added during a late-night bug fix.
+
+With the z-index scale and portal architecture:
+
+- Every floating element renders into a portal, escaping any `overflow` or `transform` on its ancestors.
+- The scale guarantees ordering: dropdown (100) < sticky nav (200) < modal backdrop (300) < modal (400) < toasts (500) < tooltips (600) < command palette (700).
+- Adding a new layered component means picking the right named value from the scale — no hunting for which number is "safe".
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Assuming high `z-index` wins globally**
+
+`z-index` only has meaning within the same stacking context. `z-index: 9999` inside a parent with `transform: translateZ(0)` will paint below `z-index: 1` in the root context. The fix is almost always to use a portal to move the element to a container outside the stacking context ancestor.
+
+**2. Not restoring focus when a modal closes**
+
+When a modal closes, focus should return to the element that triggered it. Without this, keyboard and screen reader users lose their position in the page. Store a ref to `document.activeElement` before opening and call `.focus()` on it when closing.
+
+**3. Closing portals on backdrop click without preventing inside clicks from propagating**
+
+A click inside the modal dialog bubbles to the backdrop if the dialog doesn't call `e.stopPropagation()`. But `stopPropagation` breaks other things. The cleaner fix is to check the click target on the backdrop handler:
+
+```tsx
+// ✅ Only close if the click landed directly on the backdrop, not inside the dialog
+<div
+  className="fixed inset-0 bg-black/50"
+  onClick={(e) => {
+    if (e.target === e.currentTarget) onClose();
+  }}
+/>
+```
+
+**4. Creating a new portal container on every render**
+
+If `usePortal` creates a `document.createElement("div")` directly in the component body (not in a ref or effect), it creates a new container on every render and appends it to `document.body` repeatedly. Always guard with a ref so the container is created once.
+
+**5. Forgetting `aria-modal="true"` on dialog portals**
+
+Without `aria-modal="true"`, screen readers don't understand the modal boundary and will read content behind the backdrop. Combined with `role="dialog"` and `aria-labelledby`, this is the minimum required for an accessible modal.
+
+---
+
+## Summary
+
+React portals let components render into a different DOM node than their logical parent — escaping `overflow: hidden`, `clip-path`, and ancestor transforms while keeping React Context and event bubbling intact. Stacking contexts are the browser's painting layers: `z-index` only works within a context, not globally. The solution to z-index wars is a named z-index scale defined as CSS custom properties, with every layered component reading from the scale rather than using magic numbers. Combine portals for DOM positioning, a z-index scale for ordering, and `isolation: isolate` on design system components to contain internal layering without leaking into the page. Always restore focus when modals close, check `e.target === e.currentTarget` for backdrop clicks, and mark dialogs with `role="dialog"` and `aria-modal="true"` for screen reader accessibility.
