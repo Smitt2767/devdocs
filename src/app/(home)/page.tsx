@@ -115,7 +115,7 @@ export default async function HomePage() {
                     {section.count}
                   </span>
                   <span
-                    className="text-[#555] text-xs group-hover:text-[#888] transition-colors"
+                    className="text-[#555] text-xs group-hover:text-[#888] transition-colors shrink-0"
                     aria-hidden="true"
                   >
                     →
