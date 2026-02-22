@@ -1,0 +1,270 @@
+---
+title: RUM vs Synthetic Monitoring
+description: A practical guide to understanding the differences between Real User Monitoring and Synthetic Monitoring, when to use each, and how to implement both in modern web applications.
+---
+
+## Overview
+
+When measuring web performance, you have two fundamentally different approaches: **Real User Monitoring (RUM)** and **Synthetic Monitoring**. Neither replaces the other — they answer different questions.
+
+- **RUM** collects performance data from actual users as they interact with your site in production. It tells you what real people are experiencing right now.
+- **Synthetic Monitoring** runs scripted, automated tests against your app from controlled environments on a schedule. It tells you how your app _should_ perform under known conditions.
+
+Think of it this way: RUM is like reading customer reviews after a restaurant opens. Synthetic monitoring is like sending a food critic on a scheduled visit every hour.
+
+---
+
+## How It Works
+
+### Real User Monitoring (RUM)
+
+RUM works by injecting a small JavaScript snippet into your app. This script hooks into browser APIs — primarily the [Performance API](https://developer.mozilla.org/en-US/docs/Web/API/Performance) and [PerformanceObserver](https://developer.mozilla.org/en-US/docs/Web/API/PerformanceObserver) — to capture metrics like:
+
+- **Core Web Vitals**: LCP, INP, CLS, FCP, TTFB
+- **Resource timing**: how long each asset took to load
+- **Long tasks**: JavaScript blocking the main thread
+- **Navigation timing**: page load lifecycle data
+
+This data is batched and sent to a backend endpoint (often via `navigator.sendBeacon()` to avoid blocking page unload), then aggregated in a dashboard.
+
+Because RUM captures real sessions, you get segmentation by device type, geography, browser, connection speed, and more. You also capture edge cases that synthetic tests would never simulate — a user on a throttled 3G connection in rural India, or someone with 40 browser tabs open.
+
+### Synthetic Monitoring
+
+Synthetic monitoring uses headless browsers (Chromium via Playwright or Puppeteer) or dedicated agents to run scripted user journeys against your app on a fixed schedule. The environment is controlled:
+
+- Fixed network conditions (you choose: broadband, 4G, 3G, etc.)
+- Fixed CPU throttling
+- Fixed viewport
+- Fixed geographic origin (you choose the region)
+
+Because conditions are constant, synthetic tests are highly **reproducible**. A spike in your synthetic Lighthouse score is a real regression — not noise from a few users on slow connections.
+
+Synthetic monitoring is ideal for:
+
+- Pre-production performance gates in CI/CD
+- Alerting on uptime and availability
+- Catching regressions before users hit them
+- Monitoring third-party scripts and APIs
+
+---
+
+## Code Examples
+
+### RUM: Capturing Core Web Vitals with `web-vitals`
+
+Install the library:
+
+```bash
+npm install web-vitals
+```
+
+Create a reporting utility:
+
+```ts
+// lib/vitals.ts
+import { onCLS, onINP, onLCP, onFCP, onTTFB } from "web-vitals";
+
+type MetricReport = {
+  name: string;
+  value: number;
+  rating: "good" | "needs-improvement" | "poor";
+  id: string;
+};
+
+function sendToAnalytics(metric: MetricReport) {
+  // Use sendBeacon so the request doesn't block page unload
+  navigator.sendBeacon(
+    "/api/vitals",
+    JSON.stringify({
+      name: metric.name,
+      value: metric.value,
+      rating: metric.rating,
+      id: metric.id,
+      url: window.location.href,
+      timestamp: Date.now(),
+    }),
+  );
+}
+
+export function registerVitals() {
+  onCLS(sendToAnalytics); // Cumulative Layout Shift
+  onINP(sendToAnalytics); // Interaction to Next Paint (replaced FID)
+  onLCP(sendToAnalytics); // Largest Contentful Paint
+  onFCP(sendToAnalytics); // First Contentful Paint
+  onTTFB(sendToAnalytics); // Time to First Byte
+}
+```
+
+Call it from a Client Component so it runs in the browser:
+
+```tsx
+// app/_components/vitals-reporter.tsx
+"use client";
+
+import { useEffect } from "react";
+import { registerVitals } from "@/lib/vitals";
+
+export function VitalsReporter() {
+  useEffect(() => {
+    registerVitals();
+  }, []); // Run once on mount
+
+  return null; // This component renders nothing
+}
+```
+
+Include it in your root layout:
+
+```tsx
+// app/layout.tsx
+import { VitalsReporter } from "./_components/vitals-reporter";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        <VitalsReporter />
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+Handle the incoming metrics in a Route Handler:
+
+```ts
+// app/api/vitals/route.ts
+import { NextRequest, NextResponse } from "next/server";
+
+export async function POST(request: NextRequest) {
+  const body = await request.json();
+
+  // Forward to your observability platform (Datadog, Grafana, etc.)
+  // or write to your own database
+  console.log("[RUM]", body);
+
+  // In production, you'd do something like:
+  // await db.insert('web_vitals', body);
+
+  return NextResponse.json({ ok: true });
+}
+```
+
+---
+
+### Synthetic Monitoring: Playwright Performance Script
+
+Install Playwright:
+
+```bash
+npm install -D @playwright/test
+npx playwright install chromium
+```
+
+Write a synthetic test that measures LCP and checks a performance budget:
+
+```ts
+// tests/synthetic/homepage-perf.spec.ts
+import { test, expect } from "@playwright/test";
+
+test("homepage meets LCP performance budget", async ({ page }) => {
+  // Emulate a mid-tier mobile device on a fast 4G connection
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const client = await page.context().newCDPSession(page);
+
+  await client.send("Network.emulateNetworkConditions", {
+    offline: false,
+    downloadThroughput: (10 * 1024 * 1024) / 8, // 10 Mbps
+    uploadThroughput: (2 * 1024 * 1024) / 8, // 2 Mbps
+    latency: 20, // 20ms RTT
+  });
+
+  await client.send("Emulation.setCPUThrottlingRate", { rate: 4 }); // 4x slowdown
+
+  // Navigate and wait for the page to be fully loaded
+  await page.goto("https://your-app.com", { waitUntil: "networkidle" });
+
+  // Extract LCP using PerformanceObserver via page.evaluate
+  const lcp = await page.evaluate(() => {
+    return new Promise<number>((resolve) => {
+      new PerformanceObserver((list) => {
+        const entries = list.getEntries();
+        const lastEntry = entries[entries.length - 1];
+        resolve(lastEntry.startTime);
+      }).observe({ type: "largest-contentful-paint", buffered: true });
+    });
+  });
+
+  // LCP should be under 2500ms for a "Good" rating
+  expect(lcp).toBeLessThan(2500);
+});
+```
+
+Run it in CI:
+
+```bash
+npx playwright test tests/synthetic/
+```
+
+<Callout type="info">
+  You can run Playwright synthetic tests on a cron schedule using GitHub
+  Actions, or use a managed synthetic monitoring service (Checkly, Datadog
+  Synthetics, New Relic) that wraps Playwright/Puppeteer for you.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+**Scenario: E-commerce checkout flow**
+
+An e-commerce team notices conversion rates dropping on mobile at the checkout step. Synthetic tests show no regression — the checkout page loads in 1.8s on their test runner.
+
+RUM data tells a different story: p75 LCP for real mobile users is 4.2s, concentrated in Southeast Asia and on Android devices running Chrome. The synthetic test was run from a US server with no CPU throttling.
+
+They use RUM segmentation to confirm the issue is device + geography specific, then use a synthetic test scoped to a Southeast Asia node with 6x CPU throttling to reproduce it locally. This lets them fix and verify the regression in a controlled way before shipping.
+
+**The lesson**: RUM surfaces _that_ a problem exists and _who_ it affects. Synthetic monitoring lets you reproduce and validate the fix.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Treating synthetic scores as ground truth for user experience**
+
+Lighthouse scores are useful for catching regressions, but a Lighthouse score of 95 does not mean your p90 users are having a fast experience. Real devices, real networks, and real browser state (extensions, open tabs, cached vs. uncached) can make performance dramatically worse than any synthetic test reveals.
+
+**2. Only measuring the happy path in synthetic tests**
+
+Most synthetic monitors are set up to test the homepage. But performance regressions often happen on deeply nested routes — product detail pages, search results, account dashboards — where more data is loaded and more JavaScript executes. Make sure synthetic coverage matches your most critical user journeys.
+
+**3. Not filtering bot traffic from RUM data**
+
+RUM captures all sessions, including crawlers and automated tools. If you don't filter out non-human traffic, your RUM dashboards will be noisy and your averages misleading. Use `navigator.webdriver` detection or user-agent filtering at the ingestion layer.
+
+**4. Ignoring the p75/p90/p95 — only watching averages**
+
+Averages hide slow outliers. A mean LCP of 1.5s sounds great until you see that your p95 is 8s. Core Web Vitals are assessed at the **75th percentile** by Google for a reason — that's where real user pain lives.
+
+<Callout type="warn">
+  Never use `window.performance.timing` (the legacy Navigation Timing Level 1
+  API). It's deprecated. Use `PerformanceNavigationTiming` (Level 2) via
+  `performance.getEntriesByType('navigation')` or the `web-vitals` library which
+  handles this for you.
+</Callout>
+
+**5. Skipping RUM entirely because you "have Lighthouse in CI"**
+
+Lighthouse in CI tells you about a single, synthetic, controlled page load. It gives you zero information about your actual users' devices, network conditions, geographic distribution, or session behavior. RUM and synthetic monitoring are complements, not substitutes.
+
+---
+
+## Summary
+
+RUM and synthetic monitoring solve different problems and work best when used together. RUM captures what real users are experiencing across the full distribution of devices, networks, and geographies — it's essential for understanding actual user impact. Synthetic monitoring provides reproducible, controlled tests that catch regressions early in CI and enable reliable alerting on uptime and performance budgets. Use the `web-vitals` library to implement RUM in Next.js App Router with a simple client component and a Route Handler endpoint. Use Playwright (or a managed service like Checkly) for synthetic tests that cover your critical user journeys — not just the homepage. Always analyze RUM data at the 75th percentile or higher, and filter out bot traffic to keep your data clean.

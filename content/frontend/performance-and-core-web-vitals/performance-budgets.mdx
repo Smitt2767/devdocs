@@ -1,0 +1,282 @@
+---
+title: Performance Budgets
+description: A guide to defining, measuring, and enforcing performance budgets in modern web applications to keep load times and user experience within acceptable thresholds.
+---
+
+## Overview
+
+A performance budget is a set of limits you impose on metrics that affect how fast your site loads and responds — things like total JavaScript bundle size, Largest Contentful Paint (LCP), or Time to Interactive (TTI). If a change causes your app to exceed those limits, the build fails or an alert fires.
+
+Without a budget, performance degrades silently. Every added dependency, every unoptimized image, every extra render pass chips away at speed — and no single change feels significant until users are waiting 6 seconds for your page to load.
+
+Performance budgets make performance a first-class engineering constraint, not an afterthought.
+
+---
+
+## How It Works
+
+A budget defines a threshold for one or more metrics. These metrics fall into three categories:
+
+**Quantity-based** — raw file sizes (e.g., "JS bundle must be under 200 KB gzipped").
+
+**Milestone-based** — user-perceived timing events (e.g., "LCP must be under 2.5s on a simulated 4G connection").
+
+**Rule-based** — Lighthouse score floors (e.g., "Performance score must stay above 90").
+
+You enforce budgets at one or more checkpoints:
+
+- **Local dev** — lint or build-time warnings via bundler plugins
+- **CI/CD** — fail the pipeline if thresholds are breached
+- **Monitoring** — real-user monitoring (RUM) alerts when field data drifts over time
+
+The goal is to catch regressions before they ship, not after users report them.
+
+---
+
+## Code Examples
+
+### 1. Bundler-level budget with Next.js + `next.config.ts`
+
+Next.js exposes built-in bundle analysis support. Pair it with `@next/bundle-analyzer` and a size limit check in CI.
+
+```bash
+npm install --save-dev @next/bundle-analyzer
+```
+
+```ts
+// next.config.ts
+import type { NextConfig } from "next";
+import withBundleAnalyzer from "@next/bundle-analyzer";
+
+const nextConfig: NextConfig = {
+  // Your existing config
+};
+
+// Wrap conditionally — only analyze when the env flag is set
+export default withBundleAnalyzer({
+  enabled: process.env.ANALYZE === "true",
+})(nextConfig);
+```
+
+Run the analyzer locally:
+
+```bash
+ANALYZE=true next build
+```
+
+---
+
+### 2. Enforcing size limits with `size-limit`
+
+`size-limit` integrates with CI and fails the build when your JS exceeds the defined budget.
+
+```bash
+npm install --save-dev size-limit @size-limit/file
+```
+
+```json
+// package.json
+{
+  "size-limit": [
+    {
+      "path": ".next/static/chunks/main-*.js",
+      "limit": "80 kB" // gzipped by default
+    },
+    {
+      "path": ".next/static/chunks/pages/**/*.js",
+      "limit": "50 kB"
+    }
+  ],
+  "scripts": {
+    "size": "size-limit",
+    "build": "next build"
+  }
+}
+```
+
+Add it to your CI pipeline:
+
+```yaml
+# .github/workflows/ci.yml
+- name: Build
+  run: npm run build
+
+- name: Check bundle size budget
+  run: npx size-limit
+```
+
+If any chunk exceeds its limit, `size-limit` exits with a non-zero code and fails the pipeline.
+
+---
+
+### 3. Lighthouse CI budget enforcement
+
+Lighthouse CI lets you define metric-based budgets (LCP, CLS, TTI) and enforce them in GitHub Actions.
+
+```bash
+npm install --save-dev @lhci/cli
+```
+
+```js
+// lighthouserc.js
+export default {
+  ci: {
+    collect: {
+      url: ["http://localhost:3000/", "http://localhost:3000/products"],
+      startServerCommand: "npm run start",
+      numberOfRuns: 3,
+    },
+    assert: {
+      assertions: {
+        "categories:performance": ["error", { minScore: 0.9 }],
+        "first-contentful-paint": ["warn", { maxNumericValue: 1800 }],
+        "largest-contentful-paint": ["error", { maxNumericValue: 2500 }],
+        "cumulative-layout-shift": ["error", { maxNumericValue: 0.1 }],
+        "total-blocking-time": ["warn", { maxNumericValue: 300 }],
+      },
+    },
+    upload: {
+      target: "temporary-public-storage",
+    },
+  },
+};
+```
+
+```yaml
+# .github/workflows/lhci.yml
+name: Lighthouse CI
+
+on: [push]
+
+jobs:
+  lhci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run build
+      - run: npx lhci autorun
+```
+
+<Callout type="info">
+  Use `'warn'` for metrics you're working toward and `'error'` for hard limits
+  that must never be exceeded.
+</Callout>
+
+---
+
+### 4. Runtime monitoring with Web Vitals in Next.js
+
+Catch field regressions (real users on real devices) by reporting Core Web Vitals to your analytics pipeline.
+
+```tsx
+// app/layout.tsx
+import { WebVitalsReporter } from "@/components/web-vitals-reporter";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        {children}
+        <WebVitalsReporter />
+      </body>
+    </html>
+  );
+}
+```
+
+```tsx
+// components/web-vitals-reporter.tsx
+"use client";
+
+import { useReportWebVitals } from "next/web-vitals";
+
+export function WebVitalsReporter() {
+  useReportWebVitals((metric) => {
+    // Send to your analytics endpoint — replace with your actual ingestion URL
+    fetch("/api/vitals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: metric.name, // e.g. "LCP", "CLS", "FID"
+        value: metric.value, // the measured value
+        rating: metric.rating, // "good" | "needs-improvement" | "poor"
+        id: metric.id,
+      }),
+      keepalive: true, // ensures the request fires even if the page unloads
+    });
+  });
+
+  return null;
+}
+```
+
+```ts
+// app/api/vitals/route.ts
+import { NextRequest, NextResponse } from "next/server";
+
+export async function POST(req: NextRequest) {
+  const body = await req.json();
+
+  // Forward to your monitoring service (Datadog, Grafana, custom DB, etc.)
+  console.log("[Web Vital]", body);
+
+  // Alert if LCP exceeds 2.5s in the field
+  if (body.name === "LCP" && body.value > 2500) {
+    // trigger your alerting logic here
+  }
+
+  return NextResponse.json({ received: true });
+}
+```
+
+---
+
+## Real-World Use Case
+
+You're building a Next.js e-commerce storefront. Your product listing page renders hundreds of product cards, lazy-loads images, and imports a third-party review widget. Over four sprints, five different engineers added dependencies — and nobody noticed the JS bundle grew from 180 KB to 410 KB gzipped.
+
+With a performance budget in place:
+
+- `size-limit` would have flagged the bundle crossing 200 KB during the PR that introduced the heavy review widget library.
+- Lighthouse CI would have caught that TTI jumped from 2.1s to 4.8s after a poorly code-split page import.
+- The Web Vitals reporter would show a spike in real-user LCP on mobile devices in a specific region after a CDN config change.
+
+Each of these catches a different class of regression at a different stage — build time, deploy time, and runtime.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Setting budgets once and never revisiting them**
+A budget that's too loose is useless. A budget set for your MVP shouldn't be the same one you enforce a year later. Revisit your budgets quarterly and tighten them as your baseline improves.
+
+**2. Only measuring in ideal lab conditions**
+Lighthouse runs on a high-spec machine with simulated throttling. Real users are on mid-range Android phones on spotty LTE. Lab scores can look healthy while field LCP is consistently poor. Always pair lab budgets with RUM.
+
+<Callout type="warn">
+  A Lighthouse score of 90+ in CI does not guarantee good performance for real
+  users. Field data (CrUX, your own RUM) is the ground truth.
+</Callout>
+
+**3. Budgeting only JavaScript**
+JS is the most common culprit, but unoptimized images, render-blocking fonts, and large CSS files kill performance too. Include image weight and LCP-critical resource budgets alongside JS limits.
+
+**4. Ignoring third-party scripts**
+Analytics tags, chat widgets, and A/B testing SDKs load outside your bundle and are invisible to `size-limit`. Measure their impact separately with Lighthouse's "Third-Party Summary" audit and set a total blocking time budget that accounts for them.
+
+**5. Not assigning ownership**
+Budgets enforced in CI that anyone can bypass with `// TODO: fix later` comments accomplish nothing. Assign a team or rotation responsible for triaging budget violations before they're merged.
+
+---
+
+## Summary
+
+Performance budgets define measurable limits on speed metrics — bundle size, LCP, TTI, CLS — and enforce them automatically so regressions get caught before they reach users. You enforce them at three layers: the bundler (size-limit), CI (Lighthouse CI), and runtime (Web Vitals RUM). Lab-only budgets are insufficient; always combine them with real-user monitoring. Treat budget violations as build failures, not optional warnings. Review and tighten your budgets regularly as your product and team scale.

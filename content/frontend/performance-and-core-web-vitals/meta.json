@@ -5,6 +5,8 @@
     "interaction-to-next-paint",
     "cumulative-layout-shift",
     "largest-contentful-paint",
-    "lighthouse-ci-integration"
+    "lighthouse-ci-integration",
+    "rum-vs-synthetic-monitoring",
+    "performance-budgets"
   ]
 }
