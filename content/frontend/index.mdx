@@ -1,14 +1,145 @@
 ---
 title: Overview
-description: A curated reference of frontend engineering concepts. Built to understand the why, not just the how.
+description: A structured reference of frontend engineering concepts — covering rendering, performance, architecture, and everything in between.
 ---
 
 # Frontend Engineering
 
-Welcome to the frontend section of your personal engineering handbook.
+This section is a curated, in-depth reference for frontend engineering. Each article goes beyond surface-level explanations — the goal is to understand _why_ things work the way they do, not just how to copy a pattern.
 
-Topics are organized by category — use the sidebar to navigate. New categories and articles will be added over time as topics are covered.
+Topics are organized into 16 categories. Use the sidebar to navigate.
 
-## Categories
+---
 
-Here's what's planned across this section:
+## Rendering & Browser Pipeline
+
+The largest section. Covers how browsers turn HTML, CSS, and JavaScript into pixels — and how modern React frameworks (Next.js App Router) layer on top of that.
+
+Topics include: hydration, partial and selective hydration, streaming SSR, concurrent rendering, time slicing, React's fiber architecture and reconciliation algorithm, the critical rendering path, render-blocking resources, browser compositing layers, paint vs composite vs layout, GPU acceleration in CSS, and render waterfalls.
+
+---
+
+## Component & UI Architecture
+
+Covers how to structure the UI layer at a component and system level.
+
+Topics include: Suspense boundaries, React Server Components, edge rendering, micro-frontend orchestration, Shadow DOM, error boundaries, and component design patterns.
+
+---
+
+## State Management & Data Patterns
+
+Covers how state flows through an application — including the edge cases that cause subtle bugs.
+
+Topics include: immutable data patterns, memoization pitfalls, race conditions in UI state, optimistic UI and rollback strategy, offline conflict resolution, idempotent UI actions, derived state vs redundant state, state boundaries, and URL as state.
+
+---
+
+## JavaScript Runtime & Async
+
+Covers the JavaScript engine and async model underneath your application code.
+
+Topics include: the event loop (macrotasks vs microtasks), task starvation and scheduler priorities, AbortController and streaming fetch, WebSockets vs SSE vs long polling, and promise combinators and error propagation.
+
+---
+
+## Bundling & Code Delivery
+
+Covers how code gets from your editor to the browser — and how to make that process faster and leaner.
+
+Topics include: tree shaking internals, code splitting strategies, module federation, preload / prefetch / preconnect / priority hints, bundle analysis and dependency auditing, monorepo tooling, and environment configuration.
+
+---
+
+## Caching & Storage
+
+Covers caching at every layer — HTTP, CDN, service worker, and client-side storage.
+
+Topics include: cache invalidation strategies, HTTP caching strategies, IndexedDB, service worker lifecycle traps, offline conflict resolution, HTTP caching hierarchy, and CDN cache purging.
+
+---
+
+## Networking & Protocols
+
+Covers the network layer between your frontend and the server.
+
+Topics include: HTTP/3 and QUIC, CORS and preflight, SameSite cookie modes, API paradigms (REST, GraphQL, tRPC), authentication flows, and client-side rate limiting.
+
+---
+
+## Security
+
+Covers the attack vectors and mitigations most relevant to frontend engineers.
+
+Topics include: CSRF vs XSS mitigation, Content Security Policy, Trusted Types, prototype pollution, dependency and supply chain risks, and secrets management.
+
+---
+
+## CSS & Layout
+
+Covers CSS at the systems level — not syntax, but architecture and performance.
+
+Topics include: CSS containment, layout thrashing, CSS architecture tradeoffs, animation performance, theming and design tokens, and responsive design strategies.
+
+---
+
+## Browser Observation APIs
+
+Covers the browser APIs used to observe DOM changes, visibility, and performance — without polling.
+
+Topics include: IntersectionObserver internals, MutationObserver cost, the PerformanceObserver API, and the Long Tasks API.
+
+---
+
+## Performance & Core Web Vitals
+
+Covers measurable, user-impacting performance — from individual metrics to CI enforcement.
+
+Topics include: First Input Delay, Interaction to Next Paint, Cumulative Layout Shift, Largest Contentful Paint, Lighthouse CI integration, RUM vs synthetic monitoring, and performance budgets.
+
+---
+
+## Memory & Garbage Collection
+
+Covers how the browser allocates and reclaims memory — and how to find and fix leaks.
+
+Topics include: browser memory leak detection, detached DOM nodes, and garbage collection timing.
+
+---
+
+## Concurrency & Workers
+
+Covers how to move work off the main thread.
+
+Topics include: Web Workers vs Service Workers.
+
+---
+
+## Accessibility
+
+Covers building UIs that work for all users — including the underlying browser and AT mechanics.
+
+Topics include: the accessibility tree, ARIA live regions internals, pointer events, focus management in SPAs, keyboard navigation patterns, and color contrast and reduced motion.
+
+---
+
+## DevX & Delivery
+
+Covers the engineering systems around shipping software reliably and safely.
+
+Topics include: feature flags and progressive rollouts, CI/CD pipelines for frontend, error tracking and observability, internationalization (i18n) architecture, and design system ownership and versioning.
+
+---
+
+## Architecture & Decision Making
+
+Covers the higher-order thinking required to make durable technical decisions.
+
+Topics include: framework selection criteria, build vs buy for UI, technical debt identification and prioritization, Architecture Decision Records (ADRs), and API contract design.
+
+---
+
+<Callout type="info">
+  This section is actively maintained. New articles are added as topics are
+  covered. If a category only has one or two articles, more are on the way.
+</Callout>

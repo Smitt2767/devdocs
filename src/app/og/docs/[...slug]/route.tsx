@@ -17,7 +17,9 @@ export async function GET(
     <DefaultImage
       title={page.data.title}
       description={page.data.description}
-      site="devdocs"
+      site="DEVDOCS"
+      primaryColor="#080808"
+      primaryTextColor="#e0e0e0"
     />,
     {
       width: 1200,
