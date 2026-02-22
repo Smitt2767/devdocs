@@ -1,0 +1,309 @@
+---
+title: Error Tracking & Observability
+description: How to integrate Sentry, configure sourcemaps, and implement structured logging for full-stack observability in a Next.js App Router project.
+---
+
+## Overview
+
+When your app breaks in production, you need to know three things fast: what failed, where it failed, and why. Error tracking and observability give you that visibility by capturing exceptions, mapping minified stack traces back to your source code, and surfacing structured logs you can query and alert on.
+
+This doc covers:
+
+- Integrating **Sentry** for exception tracking in both Server and Client Components
+- Configuring **sourcemaps** so stack traces point to your real code
+- Implementing **structured logging** with a lightweight logger for server-side observability
+
+---
+
+## How It Works
+
+### Sentry
+
+Sentry works by installing a global error handler that intercepts unhandled exceptions and promise rejections. It serializes the error, the current breadcrumb trail (recent user actions), and environment metadata, then ships it to Sentry's ingest API.
+
+In Next.js App Router, Sentry hooks into two distinct runtimes:
+
+- **Node.js (server)** — wraps Route Handlers, Server Actions, and middleware
+- **Browser (client)** — patches `window.onerror` and `unhandledrejection` for Client Components
+
+### Sourcemaps
+
+Production JavaScript is minified and bundled, so raw stack traces reference line 1, column 84932 of a single `page-abc123.js` file. Sourcemaps are JSON files that map those positions back to your original TypeScript/JSX source. Sentry downloads them at ingest time (or you upload them during CI) to display human-readable traces.
+
+### Structured Logging
+
+Unlike `console.log`, structured logs are JSON objects with consistent fields (`level`, `message`, `timestamp`, `requestId`, etc.). This makes them filterable and alertable in log aggregation tools like **Datadog**, **Logtail**, or **AWS CloudWatch**.
+
+---
+
+## Code Examples
+
+### 1. Install Sentry
+
+```bash
+npx @sentry/wizard@latest -i nextjs
+```
+
+The wizard creates `sentry.client.config.ts`, `sentry.server.config.ts`, `sentry.edge.config.ts`, and patches `next.config.ts` automatically.
+
+### 2. Sentry Client Config
+
+```ts
+// sentry.client.config.ts
+import * as Sentry from "@sentry/nextjs";
+
+Sentry.init({
+  dsn: process.env.NEXT_PUBLIC_SENTRY_DSN,
+  // Capture 10% of sessions as replays in production
+  replaysSessionSampleRate: 0.1,
+  // Capture 100% of sessions where an error occurs
+  replaysOnErrorSampleRate: 1.0,
+  integrations: [Sentry.replayIntegration()],
+  // Reduce noise: ignore known benign errors
+  ignoreErrors: ["ResizeObserver loop limit exceeded"],
+  environment: process.env.NODE_ENV,
+});
+```
+
+### 3. Sentry Server Config
+
+```ts
+// sentry.server.config.ts
+import * as Sentry from "@sentry/nextjs";
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  // Trace 20% of requests for performance monitoring
+  tracesSampleRate: 0.2,
+  environment: process.env.NODE_ENV,
+});
+```
+
+### 4. Global Error Boundary for the App Router
+
+The App Router uses `error.tsx` files as React error boundaries. Wire Sentry into the boundary so client-side rendering errors are captured automatically.
+
+```tsx
+// app/error.tsx
+"use client";
+
+import * as Sentry from "@sentry/nextjs";
+import { useEffect } from "react";
+
+interface ErrorProps {
+  error: Error & { digest?: string };
+  reset: () => void;
+}
+
+export default function GlobalError({ error, reset }: ErrorProps) {
+  useEffect(() => {
+    // Report the error to Sentry with full context
+    Sentry.captureException(error, {
+      extra: { digest: error.digest },
+    });
+  }, [error]);
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen gap-4">
+      <h2 className="text-xl font-semibold">Something went wrong</h2>
+      <p className="text-sm text-gray-500">
+        Our team has been notified. Try again in a moment.
+      </p>
+      <button
+        onClick={reset}
+        className="px-4 py-2 bg-blue-600 text-white rounded-md"
+      >
+        Try again
+      </button>
+    </div>
+  );
+}
+```
+
+### 5. Manual Error Capture in a Server Action
+
+```ts
+// app/actions/checkout.ts
+"use server";
+
+import * as Sentry from "@sentry/nextjs";
+import { db } from "@/lib/db";
+
+export async function createOrder(cartId: string, userId: string) {
+  try {
+    const order = await db.order.create({
+      data: { cartId, userId, status: "pending" },
+    });
+    return { success: true, orderId: order.id };
+  } catch (error) {
+    // Attach structured context so Sentry groups these errors meaningfully
+    Sentry.captureException(error, {
+      tags: { action: "createOrder" },
+      extra: { cartId, userId },
+    });
+
+    // Return a safe error to the client — never leak raw DB errors
+    return { success: false, error: "Failed to create order. Please retry." };
+  }
+}
+```
+
+### 6. Sourcemap Upload in next.config.ts
+
+```ts
+// next.config.ts
+import { withSentryConfig } from "@sentry/nextjs";
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  // your existing config
+};
+
+export default withSentryConfig(nextConfig, {
+  org: process.env.SENTRY_ORG,
+  project: process.env.SENTRY_PROJECT,
+  // Upload sourcemaps during `next build`
+  sourcemaps: {
+    uploadSourceMaps: true,
+    // Delete local sourcemap files after upload so they aren't served publicly
+    deleteSourcemapsAfterUpload: true,
+  },
+  // Silence the Sentry build output in CI logs
+  silent: process.env.CI === "true",
+  // Inject auto-instrumentation for Route Handlers and Server Actions
+  autoInstrumentServerFunctions: true,
+});
+```
+
+<Callout type="warn">
+  Never set `deleteSourcemapsAfterUpload: false` in production builds if your
+  `.next` directory is publicly accessible. Sourcemaps expose your original
+  source code to anyone who requests them.
+</Callout>
+
+### 7. Structured Logger for Server-Side Code
+
+Build a lightweight logger that outputs JSON in production and human-readable output locally.
+
+```ts
+// lib/logger.ts
+type LogLevel = "debug" | "info" | "warn" | "error";
+
+interface LogPayload {
+  message: string;
+  level: LogLevel;
+  timestamp: string;
+  [key: string]: unknown;
+}
+
+function log(
+  level: LogLevel,
+  message: string,
+  context: Record<string, unknown> = {},
+) {
+  const payload: LogPayload = {
+    level,
+    message,
+    timestamp: new Date().toISOString(),
+    ...context,
+  };
+
+  if (process.env.NODE_ENV === "production") {
+    // Log aggregators (Datadog, CloudWatch) parse JSON from stdout
+    process.stdout.write(JSON.stringify(payload) + "\n");
+  } else {
+    // Pretty-print locally for developer readability
+    const prefix = `[${payload.level.toUpperCase()}] ${payload.timestamp}`;
+    console.log(
+      `${prefix} — ${message}`,
+      Object.keys(context).length ? context : "",
+    );
+  }
+}
+
+export const logger = {
+  debug: (msg: string, ctx?: Record<string, unknown>) => log("debug", msg, ctx),
+  info: (msg: string, ctx?: Record<string, unknown>) => log("info", msg, ctx),
+  warn: (msg: string, ctx?: Record<string, unknown>) => log("warn", msg, ctx),
+  error: (msg: string, ctx?: Record<string, unknown>) => log("error", msg, ctx),
+};
+```
+
+```ts
+// app/api/orders/route.ts
+import { logger } from "@/lib/logger";
+import { db } from "@/lib/db";
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const userId = searchParams.get("userId");
+
+  logger.info("Fetching orders", { userId });
+
+  try {
+    const orders = await db.order.findMany({
+      where: { userId: userId ?? undefined },
+    });
+    logger.info("Orders fetched successfully", {
+      userId,
+      count: orders.length,
+    });
+    return Response.json(orders);
+  } catch (error) {
+    logger.error("Failed to fetch orders", {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return Response.json({ error: "Internal Server Error" }, { status: 500 });
+  }
+}
+```
+
+<Callout type="info">
+  In production, pair this logger with a log drain. In Vercel, set a **Log
+  Drain** to ship stdout JSON to Datadog, Logtail, or Axiom. You get full
+  structured search without any extra SDK.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+**E-commerce checkout flow:** A payment provider's API occasionally returns transient 5xx errors. Without observability, your on-call engineer gets a Slack message saying "checkout is broken" with no context.
+
+With this setup:
+
+1. The `createOrder` Server Action catches the exception and calls `Sentry.captureException` with `cartId` and `userId` as extra context.
+2. Sentry groups all payment-provider failures under one issue, showing the exact line in your source (not minified) code where it threw.
+3. The structured logger records `{ level: "error", message: "Payment provider timeout", userId, cartId, durationMs: 30012 }` — queryable in your log tool.
+4. You set a Sentry alert: "Alert me when this issue hits 10 events in 5 minutes" — you're paged before customers flood support.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Leaking sourcemaps publicly**
+
+If you build with `uploadSourceMaps: true` but forget `deleteSourcemapsAfterUpload: true`, your `.next/static/chunks/*.js.map` files are served to the public. Anyone can reconstruct your full source code from them. Always delete after upload in production.
+
+**2. Calling `Sentry.init` in Server Components**
+
+Sentry is initialized once via the config files (`sentry.server.config.ts`). Do not import and call `Sentry.init()` inside a Server Component or Route Handler — it causes multiple SDK initializations and undefined behavior. Only call `Sentry.captureException` or `Sentry.captureMessage` from within your app code.
+
+**3. Using `console.log` in production server code**
+
+`console.log` outputs an unstructured string. Log aggregators can't parse it reliably. It also intermixes with framework logs and becomes noise. Replace all server-side logging with a structured logger from day one — retrofitting it later across a large codebase is painful.
+
+**4. Missing `error.digest` in server error boundaries**
+
+When a Server Component throws, Next.js generates an `error.digest` — a hash of the error used to correlate the client-side boundary with the server-side error log. If you don't pass `digest` to `Sentry.captureException`, you lose the link between what Sentry saw and what Next.js logged to stdout.
+
+**5. Sampling at 100% in production**
+
+Setting `tracesSampleRate: 1.0` on a high-traffic app can quickly exhaust your Sentry quota and add non-trivial overhead. Start at 5–20% for traces, and use `beforeSend` to filter noise (e.g., bots, health checks) before events leave the client.
+
+---
+
+## Summary
+
+Sentry's Next.js SDK integrates cleanly with the App Router via its wizard and `withSentryConfig` wrapper, covering both server and client runtimes. Sourcemaps must be uploaded during the build and deleted afterward to keep your source private while enabling readable stack traces. Structured JSON logging on the server side turns raw stdout into queryable, alertable telemetry when paired with a log drain. Always attach user and request context to exceptions so issues in Sentry are immediately actionable, not just a stack trace in a vacuum. Start with conservative sampling rates and tune them based on your traffic and quota.

@@ -1,0 +1,396 @@
+---
+title: i18n Architecture
+description: A practical guide to structuring internationalization in modern Next.js App Router applications.
+---
+
+## Overview
+
+Internationalization (i18n) is the process of architecting your application so it can serve content in multiple languages and locales without requiring a separate codebase for each. It covers everything from URL routing and locale detection to translation loading and locale-aware formatting of dates, numbers, and currencies.
+
+In Next.js App Router, i18n is not built-in the way it was in the Pages Router. Instead, you own the routing layer — which gives you more flexibility but requires deliberate architecture decisions upfront.
+
+<Callout type="warn">
+  The old `next.config.js` `i18n` key (used in the Pages Router) is not
+  supported in the App Router. Do not use it. All locale routing must be handled
+  via middleware and a `[locale]` dynamic segment.
+</Callout>
+
+---
+
+## How It Works
+
+The App Router i18n architecture is built on three pillars:
+
+**1. Locale-prefixed routing**
+Every route is nested under a `[locale]` dynamic segment (e.g., `/en/about`, `/fr/about`). This makes the active locale available to every Server Component via params.
+
+**2. Middleware-based locale detection**
+Next.js middleware intercepts every request before it hits a route. It detects the user's preferred locale (from cookies, `Accept-Language` headers, or URL) and redirects or rewrites to the correct locale-prefixed path.
+
+**3. Translation loading**
+A translation library (such as `next-intl` or a custom loader) reads the locale from params and loads the matching message catalog. Translations are fetched server-side in Server Components — no client bundle bloat.
+
+The flow for a request to `/about` from a French browser looks like:
+
+```
+Request: GET /about
+  → Middleware detects `fr` from Accept-Language header
+  → Rewrites internally to /fr/about
+  → [locale] = "fr" available in layout/page params
+  → Server Component loads fr.json translations
+  → HTML rendered with French content
+  → Sent to browser
+```
+
+---
+
+## Code Examples
+
+### Project Structure
+
+```
+app/
+  [locale]/
+    layout.tsx       ← sets <html lang>, loads translations
+    page.tsx
+    about/
+      page.tsx
+middleware.ts        ← locale detection & redirect logic
+messages/
+  en.json
+  fr.json
+  de.json
+lib/
+  i18n.ts           ← locale config & helpers
+```
+
+---
+
+### Locale Configuration
+
+```ts
+// lib/i18n.ts
+export const locales = ["en", "fr", "de"] as const;
+export type Locale = (typeof locales)[number];
+
+export const defaultLocale: Locale = "en";
+
+export function isValidLocale(value: string): value is Locale {
+  return (locales as readonly string[]).includes(value);
+}
+```
+
+---
+
+### Middleware — Locale Detection & Redirect
+
+```ts
+// middleware.ts
+import { NextRequest, NextResponse } from "next/server";
+import { locales, defaultLocale, isValidLocale } from "@/lib/i18n";
+
+function getPreferredLocale(request: NextRequest): string {
+  // 1. Check if locale is stored in a cookie (user previously chose a language)
+  const cookieLocale = request.cookies.get("NEXT_LOCALE")?.value;
+  if (cookieLocale && isValidLocale(cookieLocale)) return cookieLocale;
+
+  // 2. Parse the Accept-Language header (e.g., "fr-FR,fr;q=0.9,en;q=0.8")
+  const acceptLanguage = request.headers.get("accept-language") ?? "";
+  const preferred = acceptLanguage
+    .split(",")
+    .map((part) => part.split(";")[0].trim().slice(0, 2)) // take first 2 chars (e.g., "fr")
+    .find((lang) => isValidLocale(lang));
+
+  return preferred ?? defaultLocale;
+}
+
+export function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  // Check if the pathname already starts with a valid locale segment
+  const pathnameHasLocale = locales.some(
+    (locale) => pathname.startsWith(`/${locale}/`) || pathname === `/${locale}`,
+  );
+
+  if (pathnameHasLocale) return NextResponse.next();
+
+  // Redirect to the locale-prefixed path
+  const locale = getPreferredLocale(request);
+  request.nextUrl.pathname = `/${locale}${pathname}`;
+  return NextResponse.redirect(request.nextUrl);
+}
+
+export const config = {
+  // Skip Next.js internals and static files
+  matcher: ["/((?!_next|api|favicon.ico|.*\\..*).*)"],
+};
+```
+
+---
+
+### Translation Messages
+
+```json
+// messages/en.json
+{
+  "nav": {
+    "home": "Home",
+    "about": "About",
+    "pricing": "Pricing"
+  },
+  "home": {
+    "heading": "Welcome back, {name}",
+    "itemCount": "{count, plural, =0 {No items} one {# item} other {# items}}"
+  }
+}
+```
+
+```json
+// messages/fr.json
+{
+  "nav": {
+    "home": "Accueil",
+    "about": "À propos",
+    "pricing": "Tarifs"
+  },
+  "home": {
+    "heading": "Bon retour, {name}",
+    "itemCount": "{count, plural, =0 {Aucun article} one {# article} other {# articles}}"
+  }
+}
+```
+
+---
+
+### Root Locale Layout
+
+```tsx
+// app/[locale]/layout.tsx
+import { notFound } from "next/navigation";
+import { isValidLocale, type Locale } from "@/lib/i18n";
+import { getTranslations } from "@/lib/translations"; // shown below
+
+interface Props {
+  children: React.ReactNode;
+  params: { locale: string };
+}
+
+export default async function LocaleLayout({ children, params }: Props) {
+  const { locale } = params;
+
+  // Reject unknown locales with a 404
+  if (!isValidLocale(locale)) notFound();
+
+  return (
+    <html lang={locale} dir={locale === "ar" ? "rtl" : "ltr"}>
+      <body>{children}</body>
+    </html>
+  );
+}
+
+// Generate static params for all supported locales (used with static export)
+export function generateStaticParams() {
+  return [{ locale: "en" }, { locale: "fr" }, { locale: "de" }];
+}
+```
+
+---
+
+### Translation Loader
+
+```ts
+// lib/translations.ts
+import type { Locale } from "./i18n";
+
+// Cache message catalogs per locale so they aren't re-read on every render
+const messageCache = new Map<string, Record<string, unknown>>();
+
+export async function getMessages(
+  locale: Locale,
+): Promise<Record<string, unknown>> {
+  if (messageCache.has(locale)) return messageCache.get(locale)!;
+
+  // Dynamic import — Next.js bundles each locale file separately
+  const messages = (await import(`@/messages/${locale}.json`)).default;
+  messageCache.set(locale, messages);
+  return messages;
+}
+
+// Tiny helper: access nested keys like "home.heading"
+export function t(
+  messages: Record<string, unknown>,
+  key: string,
+  variables?: Record<string, string | number>,
+): string {
+  const value = key.split(".").reduce<unknown>((obj, k) => {
+    if (typeof obj === "object" && obj !== null)
+      return (obj as Record<string, unknown>)[k];
+    return undefined;
+  }, messages);
+
+  if (typeof value !== "string") return key; // fallback to key if missing
+
+  if (!variables) return value;
+
+  // Replace {name}, {count} style placeholders
+  return Object.entries(variables).reduce(
+    (str, [k, v]) => str.replace(new RegExp(`\\{${k}\\}`, "g"), String(v)),
+    value,
+  );
+}
+```
+
+---
+
+### Using Translations in a Server Component
+
+```tsx
+// app/[locale]/page.tsx
+import { getMessages, t } from "@/lib/translations";
+import type { Locale } from "@/lib/i18n";
+
+interface Props {
+  params: { locale: Locale };
+}
+
+export default async function HomePage({ params }: Props) {
+  const messages = await getMessages(params.locale);
+  const cartItemCount = 3;
+
+  return (
+    <main>
+      <h1>{t(messages, "home.heading", { name: "Sarah" })}</h1>
+      {/* Outputs: "Welcome back, Sarah" in English */}
+
+      <p>{t(messages, "home.itemCount", { count: cartItemCount })}</p>
+      {/* Outputs: "3 items" in English */}
+    </main>
+  );
+}
+```
+
+---
+
+### Locale-Aware Formatting with `Intl`
+
+```tsx
+// components/ProductPrice.tsx
+// No third-party library needed — the Intl API handles locale-aware formatting
+
+interface Props {
+  amount: number;
+  currency: string;
+  locale: string;
+}
+
+export function ProductPrice({ amount, currency, locale }: Props) {
+  const formatted = new Intl.NumberFormat(locale, {
+    style: "currency",
+    currency,
+    maximumFractionDigits: 2,
+  }).format(amount);
+
+  // In "fr" locale with EUR: "12,99 €"
+  // In "en" locale with USD: "$12.99"
+  return <span>{formatted}</span>;
+}
+```
+
+---
+
+### Language Switcher (Client Component)
+
+```tsx
+// components/LanguageSwitcher.tsx
+"use client";
+
+import { useRouter, usePathname } from "next/navigation";
+import { locales, type Locale } from "@/lib/i18n";
+
+const labelMap: Record<Locale, string> = {
+  en: "English",
+  fr: "Français",
+  de: "Deutsch",
+};
+
+interface Props {
+  currentLocale: Locale;
+}
+
+export function LanguageSwitcher({ currentLocale }: Props) {
+  const router = useRouter();
+  const pathname = usePathname();
+
+  function switchLocale(nextLocale: Locale) {
+    // pathname is like "/en/about" — replace the locale segment
+    const segments = pathname.split("/");
+    segments[1] = nextLocale; // index 1 is always the locale in [locale]/... routing
+    const nextPath = segments.join("/");
+
+    // Persist choice in a cookie so middleware respects it on the next visit
+    document.cookie = `NEXT_LOCALE=${nextLocale}; path=/; max-age=31536000`;
+
+    router.push(nextPath);
+  }
+
+  return (
+    <nav aria-label="Language selector">
+      {locales.map((locale) => (
+        <button
+          key={locale}
+          onClick={() => switchLocale(locale)}
+          aria-current={locale === currentLocale ? "true" : undefined}
+          style={{ fontWeight: locale === currentLocale ? "bold" : "normal" }}
+        >
+          {labelMap[locale]}
+        </button>
+      ))}
+    </nav>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+An e-commerce platform sells to customers in the US, France, and Germany. When a French user visits the site:
+
+- Middleware detects `fr` from their browser's `Accept-Language` header and redirects to `/fr/`.
+- The `[locale]/layout.tsx` sets `<html lang="fr">`, enabling correct screen reader pronunciation and browser spell-check.
+- Product pages load `messages/fr.json` on the server — no extra client round-trip.
+- Prices render via `Intl.NumberFormat` with `fr` locale, displaying `€12,99` instead of `$12.99`.
+- If the user switches to English via the `LanguageSwitcher`, a `NEXT_LOCALE=en` cookie is set, so future visits go straight to `/en/` without needing the `Accept-Language` fallback.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Forgetting to validate the locale param**
+Any string can be passed as `[locale]` in the URL. Without calling `notFound()` on invalid values, you'll get runtime errors when attempting to load a non-existent message file. Always validate against your `locales` array in the layout.
+
+**2. Putting translation loading in Client Components**
+Importing message files inside a `'use client'` component ships the entire translation catalog to the browser. Load translations in Server Components and pass only the strings each Client Component needs as props.
+
+**3. Hard-coding locale-dependent formatting**
+Using `.toLocaleString()` without passing a locale argument produces inconsistent output depending on the server's system locale. Always pass the locale explicitly: `new Intl.NumberFormat(locale, options).format(value)`.
+
+**4. Not accounting for RTL languages**
+If you plan to add Arabic, Hebrew, or Persian later, the `dir` attribute on `<html>` must flip to `rtl`. Design your layout with logical CSS properties (`margin-inline-start` instead of `margin-left`) from the beginning — retrofitting RTL support later is painful.
+
+**5. Incorrect middleware matcher**
+If your middleware matcher accidentally intercepts `/_next/static/` or `/api/` routes, you'll redirect API calls and break asset loading. Always exclude these paths explicitly in the `config.matcher` pattern.
+
+<Callout type="info">
+  For production applications with many locales and complex pluralization rules,
+  consider using `next-intl` or `react-i18next`. They handle ICU message format,
+  plural rules, and React context integration out of the box — the architecture
+  above remains the same, but you replace the custom `t()` helper with their
+  APIs.
+</Callout>
+
+---
+
+## Summary
+
+i18n architecture in the Next.js App Router centers on three things: a `[locale]` dynamic segment that scopes every route, middleware that detects and enforces the correct locale before any rendering happens, and server-side translation loading that keeps message catalogs out of the client bundle. Always validate the locale param to prevent runtime errors from malformed URLs. Use the native `Intl` API for formatting dates, numbers, and currencies — it's locale-aware and requires no dependencies. Architect for RTL and plural rules from the start; they are expensive to retrofit.

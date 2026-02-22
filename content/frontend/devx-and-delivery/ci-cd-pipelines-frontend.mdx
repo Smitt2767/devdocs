@@ -1,0 +1,229 @@
+---
+title: CI/CD Pipelines for Frontend
+description: A practical guide to setting up continuous integration and deployment pipelines for modern frontend applications using GitHub Actions.
+---
+
+## Overview
+
+CI/CD stands for Continuous Integration and Continuous Deployment. In a frontend context, it means every code change you push automatically gets linted, tested, built, and deployed — without manual steps.
+
+For a Next.js app, this translates to: push to `main` → run checks → deploy to production. Push to a feature branch → run checks → deploy a preview URL.
+
+This removes "it works on my machine" problems, catches regressions early, and makes shipping fast and repeatable.
+
+---
+
+## How It Works
+
+A CI/CD pipeline is a series of automated steps (called **jobs**) that run on a remote server (called a **runner**) whenever a trigger fires — usually a `git push` or a pull request.
+
+Think of it like an assembly line in a factory. Raw material (your code) enters one end. Each station (lint, test, build, deploy) does one job. Only a passing product exits the other end into production.
+
+The three phases:
+
+- **CI (Continuous Integration):** Validate the code. Run linters, type checks, and tests. Fail fast if something is broken.
+- **Build:** Compile the application into optimized static or server-rendered output.
+- **CD (Continuous Deployment):** Ship the built output to a hosting platform automatically.
+
+GitHub Actions is the most common tool for this because it's tightly integrated with GitHub, free for public repos, and uses a simple YAML config.
+
+---
+
+## Code Examples
+
+### Project Structure
+
+```bash
+your-app/
+├── .github/
+│   └── workflows/
+│       └── ci-cd.yml   # Pipeline definition lives here
+├── app/
+├── components/
+├── package.json
+└── next.config.ts
+```
+
+### Basic GitHub Actions Pipeline
+
+This pipeline runs on every push to `main` and on all pull requests.
+
+```yaml
+# .github/workflows/ci-cd.yml
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  ci:
+    name: Lint, Typecheck & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci # Use ci instead of install — faster, uses lockfile exactly
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Run TypeScript type check
+        run: npx tsc --noEmit # Checks types without emitting build output
+
+      - name: Run tests
+        run: npm test -- --passWithNoTests
+
+  deploy:
+    name: Deploy to Vercel
+    runs-on: ubuntu-latest
+    needs: ci # Only runs if the ci job passes
+    if: github.ref == 'refs/heads/main' # Only deploy from main branch
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to Vercel
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: "--prod" # Promotes to production environment
+```
+
+<Callout type="info">
+  Store sensitive values like `VERCEL_TOKEN` in **GitHub → Settings → Secrets
+  and variables → Actions**. Never hardcode tokens in your YAML file.
+</Callout>
+
+### Adding a Preview Deployment for Pull Requests
+
+```yaml
+# Add this as a separate job inside the same ci-cd.yml
+
+preview:
+  name: Deploy Preview
+  runs-on: ubuntu-latest
+  needs: ci
+  if: github.event_name == 'pull_request' # Only runs on PRs, not pushes to main
+
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Deploy Preview to Vercel
+      uses: amondnet/vercel-action@v25
+      id: vercel-deploy
+      with:
+        vercel-token: ${{ secrets.VERCEL_TOKEN }}
+        vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+        vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+        # No --prod flag here, so it creates a preview URL
+
+    - name: Comment preview URL on PR
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `✅ Preview deployed: ${{ steps.vercel-deploy.outputs.preview-url }}`
+          })
+```
+
+### Caching Dependencies for Faster Runs
+
+Without caching, `npm ci` downloads all packages on every run. With caching, subsequent runs skip the download if `package-lock.json` hasn't changed.
+
+```yaml
+- name: Setup Node.js with cache
+  uses: actions/setup-node@v4
+  with:
+    node-version: 20
+    cache: "npm" # Caches ~/.npm based on package-lock.json hash
+```
+
+This alone can cut pipeline time from 2–3 minutes to under 30 seconds on a warm cache.
+
+### Environment Variables at Build Time
+
+For Next.js, public environment variables (prefixed with `NEXT_PUBLIC_`) need to be available during the build step.
+
+```yaml
+- name: Build Next.js app
+  run: npm run build
+  env:
+    NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
+    # Server-only vars don't need NEXT_PUBLIC_ prefix
+    DATABASE_URL: ${{ secrets.DATABASE_URL }}
+```
+
+<Callout type="warn">
+  Never prefix server-only secrets with `NEXT_PUBLIC_`. Doing so exposes them in
+  the client-side JavaScript bundle.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+You're building a SaaS dashboard with a team of five developers. Every developer opens a pull request for their feature. The pipeline automatically:
+
+1. Runs ESLint to catch code style issues before code review.
+2. Runs TypeScript checks to catch type errors.
+3. Deploys a unique preview URL (e.g., `my-app-pr-42.vercel.app`) so teammates and designers can review the feature in a real browser without pulling the branch locally.
+
+When the PR merges into `main`, the deploy job fires automatically and the new code is live in production within 2 minutes — no manual deployment commands, no FTP uploads, no SSH sessions.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Using `npm install` instead of `npm ci` in pipelines**
+
+`npm install` can silently update packages and doesn't guarantee a reproducible build. `npm ci` installs exactly what's in `package-lock.json` and fails if there's a mismatch. Always use `npm ci` in CI environments.
+
+**2. Running jobs in parallel when they have dependencies**
+
+If your `deploy` job runs at the same time as your `ci` job, you can deploy broken code. Use `needs: ci` to enforce job ordering — deploy only runs after `ci` passes.
+
+**3. Forgetting to set secrets for all environments**
+
+A pipeline that works in CI can fail silently in production because an environment variable exists locally but wasn't added to GitHub Secrets. Audit your `.env.example` file and make sure every variable it lists has a corresponding secret in GitHub.
+
+**4. Not scoping deployments by branch**
+
+Without `if: github.ref == 'refs/heads/main'`, your deploy job runs on every PR branch — potentially overwriting production. Always guard production deploys with a branch condition.
+
+**5. Committing large build artifacts**
+
+Never commit `.next/`, `dist/`, or `out/` directories. Add them to `.gitignore`. The pipeline builds these fresh from source on every run. Committing them bloats the repo and causes merge conflicts.
+
+<Callout type="warn">
+  If your pipeline takes longer than 5 minutes, it's a signal to profile which
+  step is slow. Usually it's missing dependency caching or running too many
+  tests sequentially that could be parallelized.
+</Callout>
+
+---
+
+## Summary
+
+CI/CD pipelines automate the process of validating, building, and deploying your frontend app on every code change. GitHub Actions is the standard tool for this, configured via YAML files in `.github/workflows/`. A well-structured pipeline separates concerns into distinct jobs — lint/test, build, and deploy — with `needs` dependencies to enforce order. Preview deployments on pull requests give teams a fast feedback loop without touching production. The most common mistakes are skipping dependency caching, missing branch guards on deploy jobs, and leaking secrets through `NEXT_PUBLIC_` prefixes.

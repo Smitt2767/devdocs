@@ -1,0 +1,219 @@
+---
+title: Feature Flags & Progressive Rollouts
+description: A guide to implementing feature flags and progressive rollout strategies in modern Next.js applications using the App Router.
+---
+
+## Overview
+
+Feature flags (also called feature toggles) let you ship code to production without exposing it to all users at once. You control which users see which features at runtime — no redeployment required.
+
+Progressive rollouts build on this: instead of flipping a flag for everyone simultaneously, you release to 1% of users, then 10%, then 100% — watching metrics at each stage and rolling back instantly if something breaks.
+
+Together, these patterns let teams decouple **deployment** from **release**, which is one of the most impactful practices in modern continuous delivery.
+
+## How It Works
+
+At the core, a feature flag is a conditional check:
+
+```ts
+if (flags.newCheckout) {
+  // show new experience
+} else {
+  // show old experience
+}
+```
+
+The value of `flags.newCheckout` is fetched from an external source — not hardcoded. That source can be:
+
+- A managed service (LaunchDarkly, Statsig, Unleash, Vercel Flags, GrowthBook)
+- A database row
+- An edge config value (e.g. Vercel Edge Config)
+
+For progressive rollouts, the flag system evaluates **targeting rules** per request. A common rule: hash the user's ID, take the result modulo 100, and enable the flag if the result is below the rollout percentage. This ensures a given user always lands in the same bucket (sticky sessions).
+
+```
+hash(userId) % 100 < rolloutPercentage → flag is ON
+```
+
+In Next.js App Router, you evaluate flags on the **server** (in Server Components or middleware) to avoid layout shifts and prevent flag values from leaking into client bundles.
+
+## Code Examples
+
+### 1. Evaluating a Flag in a Server Component
+
+This example uses a lightweight in-house flag resolver backed by Vercel Edge Config, but the pattern applies to any provider.
+
+```tsx
+// app/checkout/page.tsx
+import { getFeatureFlags } from "@/lib/flags";
+import { NewCheckout } from "@/components/new-checkout";
+import { LegacyCheckout } from "@/components/legacy-checkout";
+
+export default async function CheckoutPage() {
+  // Flags are resolved server-side — no client round-trip needed
+  const flags = await getFeatureFlags();
+
+  if (flags.newCheckout) {
+    return <NewCheckout />;
+  }
+
+  return <LegacyCheckout />;
+}
+```
+
+```ts
+// lib/flags.ts
+import { get } from "@vercel/edge-config";
+import { cookies } from "next/headers";
+
+type Flags = {
+  newCheckout: boolean;
+  aiRecommendations: boolean;
+};
+
+export async function getFeatureFlags(): Promise<Flags> {
+  const cookieStore = await cookies();
+  const userId = cookieStore.get("userId")?.value ?? "anonymous";
+
+  // Fetch rollout config from Edge Config (sub-millisecond read)
+  const rollouts = await get<Record<string, number>>("rollouts");
+
+  return {
+    newCheckout: isInRollout(userId, rollouts?.newCheckout ?? 0),
+    aiRecommendations: isInRollout(userId, rollouts?.aiRecommendations ?? 0),
+  };
+}
+
+function isInRollout(userId: string, percentage: number): boolean {
+  if (percentage >= 100) return true;
+  if (percentage <= 0) return false;
+
+  // Stable hash so the same user always gets the same result
+  const hash = [...userId].reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+  return hash % 100 < percentage;
+}
+```
+
+### 2. Flag-Gated Route in Middleware
+
+Use middleware for full-page redirects when a feature is behind a flag — ideal for beta paths.
+
+```ts
+// middleware.ts
+import { NextRequest, NextResponse } from "next/server";
+import { get } from "@vercel/edge-config";
+
+export async function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  if (pathname.startsWith("/dashboard/analytics")) {
+    const enabled = await get<boolean>("analyticsPageEnabled");
+
+    if (!enabled) {
+      // Redirect to a waitlist page instead of 404ing
+      return NextResponse.redirect(new URL("/waitlist", request.url));
+    }
+  }
+
+  return NextResponse.next();
+}
+
+export const config = {
+  matcher: ["/dashboard/analytics/:path*"],
+};
+```
+
+### 3. Passing Flag Values to Client Components
+
+When a Client Component needs to know about a flag (e.g. for UI state), pass it as a prop from a Server Component — never fetch it inside the Client Component.
+
+```tsx
+// app/product/[id]/page.tsx  (Server Component)
+import { getFeatureFlags } from "@/lib/flags";
+import { ProductPage } from "@/components/product-page";
+
+export default async function Page({ params }: { params: { id: string } }) {
+  const flags = await getFeatureFlags();
+
+  return (
+    <ProductPage
+      productId={params.id}
+      showAiRecommendations={flags.aiRecommendations}
+    />
+  );
+}
+```
+
+```tsx
+// components/product-page.tsx
+"use client";
+
+import { useState } from "react";
+import { AiRecommendations } from "@/components/ai-recommendations";
+
+type Props = {
+  productId: string;
+  showAiRecommendations: boolean;
+};
+
+export function ProductPage({ productId, showAiRecommendations }: Props) {
+  const [tab, setTab] = useState<"details" | "reviews">("details");
+
+  return (
+    <div>
+      {/* product UI */}
+      {showAiRecommendations && <AiRecommendations productId={productId} />}
+    </div>
+  );
+}
+```
+
+## Real-World Use Case
+
+An e-commerce platform wants to roll out a redesigned checkout flow. The old checkout has been stable for two years — a bad rollout could cost significant revenue.
+
+Using progressive rollouts, the team:
+
+1. Ships the new checkout behind a `newCheckout` flag at **0%** (dark launch — code is in production but no users see it).
+2. Enables it for **5% of users** and monitors conversion rate and error rate in their observability tool.
+3. If metrics look healthy after 24 hours, bumps to **25%**, then **50%**, then **100%**.
+4. If conversion drops at any stage, sets the flag back to **0%** in Edge Config — rollback takes seconds with zero redeployment.
+
+The same flag system also powers an internal `isEmployee` rule so the team dogfoods the new checkout at 100% before any external users see it.
+
+## Common Mistakes / Gotchas
+
+**1. Fetching flags in Client Components**
+
+Fetching flags client-side causes a flash of the wrong UI (the old experience renders first, then swaps). Always resolve flags in Server Components or middleware so the correct branch is server-rendered from the start.
+
+<Callout type="warn">
+  Never call your flag provider's SDK directly inside a `'use client'`
+  component. Pass flag values down as props from a Server Component instead.
+</Callout>
+
+**2. Using non-sticky hashing**
+
+If your rollout logic produces a different bucket for the same user on each request (e.g. using `Math.random()`), users will see the new and old experience alternating on page refreshes. Always derive the bucket from a stable identifier like a user ID or a persistent cookie.
+
+**3. Forgetting to clean up old flags**
+
+Flags accumulate. A codebase with 60 stale flags becomes unreadable — every branch is a question mark. Treat flag removal as part of the feature's definition of done. Once a rollout reaches 100% and the old code path is confirmed removed, delete the flag from both your config and your codebase.
+
+<Callout type="info">
+  Some teams use a flag expiry date in their config schema to enforce cleanup.
+  If a flag is past its expiry date and still present, a CI lint rule fails the
+  build.
+</Callout>
+
+**4. Exposing flag config to the client bundle**
+
+If you import your full flag configuration (including targeting rules and percentages) into a Client Component, it ships to the browser. This can leak internal strategy or allow users to manipulate their experience. Keep flag evaluation server-only.
+
+**5. Not accounting for the `anonymous` user case**
+
+Users who aren't logged in won't have a stable user ID. Decide upfront: assign a persistent anonymous ID via a cookie on first visit, or default all anonymous users to the control (old) experience. Inconsistency here leads to confusing analytics.
+
+## Summary
+
+Feature flags decouple code deployment from feature release, letting you ship safely and roll back instantly without redeployment. Progressive rollouts let you validate new experiences incrementally by targeting increasing percentages of users. In Next.js App Router, evaluate flags server-side — in Server Components or middleware — to avoid UI flicker and keep targeting logic off the client. Use a stable hash of a user identifier to ensure consistent bucket assignment across requests. Treat flag cleanup as a first-class engineering task to prevent long-term codebase debt.
