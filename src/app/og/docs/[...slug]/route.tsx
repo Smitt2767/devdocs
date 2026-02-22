@@ -18,8 +18,8 @@ export async function GET(
       title={page.data.title}
       description={page.data.description}
       site="DEVDOCS"
-      primaryColor="#080808"
-      primaryTextColor="#e0e0e0"
+      primaryColor="#5b4cff"
+      primaryTextColor="#00d2ff"
     />,
     {
       width: 1200,

@@ -1,3 +1,4 @@
+import { Metadata } from "next";
 import Link from "next/link";
 
 const sections = [
@@ -61,20 +62,48 @@ const sections = [
 
 const totalArticles = sections.reduce((sum, s) => sum + s.count, 0);
 
+export const metadata: Metadata = {
+  title: "devdocs - Frontend Engineering Handbook",
+  description:
+    "A curated reference of frontend engineering concepts. Built to understand the why, not just the how.",
+  openGraph: {
+    title: "devdocs - Frontend Engineering Handbook",
+    description:
+      "A curated reference of frontend engineering concepts. Built to understand the why, not just the how.",
+    url: "https://yoursite.com", // Replace with your actual domain
+    siteName: "devdocs",
+    images: [
+      {
+        url: "/og/home/image.png",
+        width: 1200,
+        height: 630,
+        alt: "devdocs - Frontend Engineering Handbook",
+      },
+    ],
+    locale: "en_US",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "devdocs - Frontend Engineering Handbook",
+    description:
+      "A curated reference of frontend engineering concepts. Built to understand the why, not just the how.",
+    images: ["/og/home/image.png"],
+  },
+};
+
 export default function HomePage() {
   return (
-    <main className="min-h-screen bg-[#080808] text-white font-mono">
+    <main className="min-h-screen bg-[#121212] text-white font-mono">
       <div className="relative max-w-3xl mx-auto px-6 py-6 md:py-28">
         {/* Nav */}
         <nav className="flex items-center justify-between mb-24">
-          {/* #e0e0e0 on #080808 = ~14:1 contrast ✓ */}
-          <span className="text-xs text-[#e0e0e0] tracking-[0.2em] uppercase">
+          <span className="text-xs text-[#ebebeb] tracking-[0.2em] uppercase">
             DEVDOCS
           </span>
-          {/* #a0a0a0 on #080808 = ~7.5:1 contrast ✓ */}
           <Link
             href="/docs/frontend"
-            className="text-xs text-[#a0a0a0] hover:text-[#e0e0e0] transition-colors tracking-wide"
+            className="text-xs text-[#a0a0a0] hover:text-[#ebebeb] transition-colors tracking-wide"
           >
             browse →
           </Link>
@@ -82,18 +111,14 @@ export default function HomePage() {
 
         {/* Hero */}
         <section className="mb-20">
-          {/* #888 on #080808 = ~5.7:1 ✓ AA */}
           <p className="text-[10px] text-[#888] tracking-[0.3em] uppercase mb-6">
             Frontend Engineering
           </p>
-          {/* #e8e8e8 on #080808 = ~15:1 ✓ */}
           <h1 className="text-4xl md:text-5xl font-black tracking-tight leading-[1.1] mb-6 text-[#e8e8e8]">
             The why behind
             <br />
-            {/* #666 on #080808 = ~3.6:1 — large text (≥18pt bold) passes AA at 3:1 ✓ */}
             <span className="text-[#666]">the how.</span>
           </h1>
-          {/* #aaa on #080808 = ~8.5:1 ✓ */}
           <p className="text-[#aaa] text-sm leading-relaxed max-w-sm">
             {sections.length} categories &middot; {totalArticles} articles. A
             personal reference built to understand browser internals, rendering
@@ -101,16 +126,12 @@ export default function HomePage() {
           </p>
         </section>
 
-        {/* Divider */}
         <div className="border-t border-[#1e1e1e] mb-12" />
 
-        {/* Section label */}
-        {/* #777 on #080808 = ~4.6:1 ✓ AA */}
         <p className="text-[10px] text-[#777] tracking-[0.25em] uppercase mb-6">
           Frontend
         </p>
 
-        {/* Section list */}
         <ul className="space-y-0 divide-y divide-[#161616]">
           {sections.map((section, i) => (
             <li key={section.slug}>
@@ -119,28 +140,21 @@ export default function HomePage() {
                 className="group flex items-center justify-between py-3.5 hover:pl-2 transition-all duration-200"
               >
                 <div className="flex items-center gap-4">
-                  {/*
-                    Row numbers are purely decorative (screen readers skip
-                    sequential numbering when aria-hidden). Kept dim intentionally.
-                  */}
                   <span
                     className="text-[#444] text-[10px] w-5 tabular-nums select-none"
                     aria-hidden="true"
                   >
                     {String(i + 1).padStart(2, "0")}
                   </span>
-                  {/* #999 on #080808 = ~6.5:1 ✓ AA | hover → #f0f0f0 = ~19:1 ✓ */}
                   <span className="text-[#999] text-sm group-hover:text-[#f0f0f0] transition-colors duration-150">
                     {section.label}
                   </span>
                 </div>
 
                 <div className="flex items-center gap-4">
-                  {/* #777 on #080808 = ~4.6:1 ✓ AA */}
                   <span className="text-[#777] text-[10px] tabular-nums group-hover:text-[#aaa] transition-colors">
                     {section.count}
                   </span>
-                  {/* Arrow — decorative, paired with visible label text */}
                   <span
                     className="text-[#555] text-xs group-hover:text-[#888] transition-colors"
                     aria-hidden="true"
@@ -155,7 +169,6 @@ export default function HomePage() {
 
         {/* Footer */}
         <footer className="border-t border-[#1e1e1e] mt-20 pt-8 flex items-center justify-between">
-          {/* #777 on #080808 = ~4.6:1 ✓ AA */}
           <span className="text-[#777] text-[10px] tracking-[0.2em] uppercase">
             Always learning
           </span>
