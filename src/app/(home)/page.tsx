@@ -6,6 +6,8 @@ import Link from "next/link";
 
 const githubUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
 
+const baseUrl = process.env.NEXT_PUBLIC_SITE_URL;
+
 export const metadata: Metadata = {
   title: "devdocs - Frontend Engineering Handbook",
   description:
@@ -14,11 +16,11 @@ export const metadata: Metadata = {
     title: "devdocs - Frontend Engineering Handbook",
     description:
       "A curated reference of frontend engineering concepts. Built to understand the why, not just the how.",
-    url: "https://yoursite.com", // Replace with your actual domain
+    url: baseUrl,
     siteName: "devdocs",
     images: [
       {
-        url: "/og/home/image.png",
+        url: `${baseUrl}/og/home/image.png`,
         width: 1200,
         height: 630,
         alt: "devdocs - Frontend Engineering Handbook",
@@ -32,7 +34,7 @@ export const metadata: Metadata = {
     title: "devdocs - Frontend Engineering Handbook",
     description:
       "A curated reference of frontend engineering concepts. Built to understand the why, not just the how.",
-    images: ["/og/home/image.png"],
+    images: [`${baseUrl}/og/home/image.png`],
   },
 };
 

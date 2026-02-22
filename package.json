@@ -2,6 +2,11 @@
   "name": "devdocs",
   "version": "1.0.0",
   "private": true,
+  "description": "Frontend Engineering Handbook — curated reference for the why behind the how (Next.js, Fumadocs, MDX)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/smitt2767/devdocs.git"
+  },
   "scripts": {
     "build": "next build",
     "dev": "next dev",
