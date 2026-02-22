@@ -1,0 +1,233 @@
+---
+title: Garbage Collection Timing
+description: A practical guide to understanding when and how JavaScript's garbage collector reclaims memory, and how to write code that works with it instead of against it.
+---
+
+## Overview
+
+JavaScript is a garbage-collected language, meaning you don't manually free memory. The engine automatically reclaims memory that is no longer reachable. But "automatic" doesn't mean "invisible" — GC pauses can cause jank, slow response times, and unpredictable latency spikes in both browser and Node.js applications.
+
+Understanding when garbage collection runs, what triggers it, and how to minimize its impact is critical for building high-performance apps — especially long-running Node.js servers and animation-heavy frontends.
+
+---
+
+## How It Works
+
+V8 (the engine behind Node.js and Chrome) uses a **generational garbage collector** with two main regions:
+
+- **Young generation (Scavenger):** New, short-lived objects are allocated here. GC runs frequently but quickly on this space. Most objects die young and are collected cheaply.
+- **Old generation (Mark-Sweep / Mark-Compact):** Objects that survive multiple young-generation collections get promoted here. GC runs less often but is more expensive — this is where long pauses come from.
+
+V8 also uses **incremental marking** and **concurrent GC** to spread collection work across multiple small steps rather than one large stop-the-world pause. Still, heavy allocation pressure can force a full GC cycle at an unpredictable moment.
+
+**Analogy:** Think of the young generation as a whiteboard — fast to erase. The old generation is a filing cabinet — reorganizing it takes real time.
+
+### What triggers GC?
+
+- Allocating beyond the heap size limit
+- Explicit calls via `--expose-gc` flag (dev/testing only)
+- V8's internal heuristics based on allocation rate and heap pressure
+
+You cannot control _when_ GC runs — but you can control _how much pressure you put on the allocator_.
+
+---
+
+## Code Examples
+
+### Measuring GC impact in Node.js with `PerformanceObserver`
+
+```ts
+// server/gc-observer.ts
+import { PerformanceObserver, performance } from "node:perf_hooks";
+
+const obs = new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    // 'gc' entries report kind, duration, and startTime
+    console.log(
+      `GC event | kind: ${(entry as any).detail?.kind} | duration: ${entry.duration.toFixed(2)}ms`,
+    );
+  }
+});
+
+// Subscribe to GC performance entries
+obs.observe({ type: "gc" });
+
+// Simulate allocation pressure
+function leakPressure() {
+  const sink: Buffer[] = [];
+  for (let i = 0; i < 5000; i++) {
+    sink.push(Buffer.allocUnsafe(1024)); // allocate 1KB chunks rapidly
+  }
+  // sink goes out of scope — young gen will collect these
+}
+
+leakPressure();
+```
+
+<Callout type="info">
+  `PerformanceObserver` with `type: 'gc'` is the production-safe way to measure
+  GC timing. It requires no flags and works in Node.js 16+.
+</Callout>
+
+---
+
+### Reducing allocations in a hot loop (before vs. after)
+
+```ts
+// ❌ Before: creates a new object on every request tick
+function buildPayload(userId: string, role: string) {
+  return { userId, role, timestamp: Date.now() }; // new object every call
+}
+
+// ✅ After: reuse a single object — safe only when consumed synchronously
+const sharedPayload = { userId: "", role: "", timestamp: 0 };
+
+function buildPayloadReused(userId: string, role: string) {
+  sharedPayload.userId = userId;
+  sharedPayload.role = role;
+  sharedPayload.timestamp = Date.now();
+  return sharedPayload; // caller must not hold a reference across ticks
+}
+```
+
+<Callout type="warn">
+  Object reuse is only safe when the returned reference is consumed immediately
+  and never stored. Storing it will cause stale data bugs.
+</Callout>
+
+---
+
+### Avoiding closure-based memory retention
+
+```ts
+// ❌ This keeps the entire `rawData` buffer alive as long as the closure exists
+function processLater(rawData: Buffer) {
+  const summary = rawData.slice(0, 10).toString(); // we only need this small slice
+
+  setTimeout(() => {
+    // rawData is still referenced in scope — V8 cannot collect it
+    console.log(summary, rawData.length);
+  }, 5000);
+}
+
+// ✅ Extract only what you need before the async boundary
+function processLaterFixed(rawData: Buffer) {
+  const summary = rawData.slice(0, 10).toString();
+  const length = rawData.length; // copy the primitive
+
+  // rawData is no longer referenced — eligible for GC
+  setTimeout(() => {
+    console.log(summary, length);
+  }, 5000);
+}
+```
+
+---
+
+### Checking heap usage programmatically
+
+```ts
+// server/heap-check.ts
+import { memoryUsage } from "node:process";
+
+function logHeapPressure() {
+  const { heapUsed, heapTotal, rss } = memoryUsage();
+
+  const usedMB = (heapUsed / 1024 / 1024).toFixed(1);
+  const totalMB = (heapTotal / 1024 / 1024).toFixed(1);
+  const rssMB = (rss / 1024 / 1024).toFixed(1);
+
+  console.log(`Heap: ${usedMB}MB / ${totalMB}MB | RSS: ${rssMB}MB`);
+}
+
+// Log heap every 10 seconds during load testing
+setInterval(logHeapPressure, 10_000);
+```
+
+---
+
+## Real-World Use Case
+
+**In a Next.js API route handling high-frequency webhook events:**
+
+A payment processor sends thousands of webhook payloads per minute. Each handler parses JSON, builds a response object, and writes to a database. If each handler allocates large intermediate objects (e.g., full parsed bodies held in closures across `await` boundaries), old-generation heap pressure climbs fast.
+
+The fix: parse what you need immediately, drop references before any `await`, and avoid caching raw payloads in module-level variables.
+
+```ts
+// app/api/webhook/route.ts
+export async function POST(req: Request) {
+  const body = await req.json();
+
+  // Extract only needed fields — let the full body be GC'd
+  const eventType = body.type as string;
+  const customerId = body.data?.customer_id as string;
+
+  // body is no longer referenced after this point
+  await processWebhookEvent(eventType, customerId);
+
+  return new Response("ok", { status: 200 });
+}
+
+async function processWebhookEvent(type: string, customerId: string) {
+  // work with primitives only — no large objects retained
+  console.log(`Processing ${type} for ${customerId}`);
+}
+```
+
+---
+
+## Common Mistakes / Gotchas
+
+### 1. Holding references across `await` boundaries
+
+When you `await` inside a function, V8 cannot collect objects still referenced in the surrounding scope. Always extract primitives or small values before awaiting if you don't need the full object after.
+
+### 2. Using global caches without eviction
+
+```ts
+// ❌ This grows forever — old entries are never collected
+const cache = new Map<string, object>();
+
+// ✅ Use a bounded cache or WeakMap where applicable
+const weakCache = new WeakMap<object, ProcessedResult>();
+```
+
+Module-level `Map` and `Set` objects are GC roots — anything stored in them lives as long as the module. Always implement TTL eviction or use `WeakMap`/`WeakRef` when keys are objects.
+
+### 3. Ignoring GC during load testing
+
+Benchmarks run in isolation often miss GC pauses because heap pressure is low. Run load tests with realistic concurrency _and_ monitor GC timing with `PerformanceObserver`. A route that handles 10 RPS fine may jank at 500 RPS once old-gen GC kicks in.
+
+### 4. Assuming `null`ing a variable immediately frees memory
+
+Setting a variable to `null` removes the reference, but the object is only collected when V8 schedules the next GC cycle. You cannot force immediate collection in production code.
+
+<Callout type="warn">
+  `global.gc()` only works when Node.js is started with `--expose-gc`. Never
+  rely on this in production — it exists for testing and profiling only.
+</Callout>
+
+### 5. Event listeners as hidden memory roots
+
+```ts
+// ❌ Each call adds a new listener — previous closures are never released
+function setupHandler(emitter: EventEmitter, data: LargeObject) {
+  emitter.on("data", () => {
+    process(data); // data is retained as long as the listener exists
+  });
+}
+
+// ✅ Remove listeners when no longer needed
+function setupHandlerFixed(emitter: EventEmitter, data: LargeObject) {
+  const handler = () => process(data);
+  emitter.on("data", handler);
+  return () => emitter.off("data", handler); // return cleanup function
+}
+```
+
+---
+
+## Summary
+
+JavaScript GC is generational: short-lived objects are cheap to collect, long-lived ones are expensive. You can't control when GC runs, but you can reduce how often the expensive old-generation cycle is needed by minimizing allocations in hot paths and releasing references before async boundaries. Use `PerformanceObserver` with `type: 'gc'` to measure real GC impact in Node.js. The most common production issues come from accidental long-lived references — in closures, event listeners, and unbounded caches. Write code that lets objects die young, and GC becomes nearly invisible.

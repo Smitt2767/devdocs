@@ -1,0 +1,226 @@
+---
+title: Memory Leak Detection
+description: How to identify, diagnose, and fix memory leaks in browser-based JavaScript applications using modern DevTools and code patterns.
+---
+
+## Overview
+
+A memory leak in a browser application occurs when your code allocates memory that is never released, even after it's no longer needed. Over time, leaked memory accumulates, causing the browser tab to consume more and more RAM — leading to sluggish performance, janky animations, and eventually a crashed tab.
+
+Memory leaks are especially common in single-page applications (SPAs) where components mount and unmount frequently, event listeners pile up, and closures accidentally hold references to large objects.
+
+---
+
+## How It Works
+
+JavaScript uses a garbage collector (GC) to automatically free memory. The GC reclaims memory when an object has no more **reachable references** — nothing in your running code points to it anymore.
+
+A memory leak happens when an object _should_ be unreachable but isn't — because something still holds a reference to it unintentionally. Common culprits:
+
+- **Detached DOM nodes** — A DOM element is removed from the page but a JavaScript variable still references it.
+- **Forgotten event listeners** — A `addEventListener` is attached but never removed, keeping the callback (and its closure scope) alive.
+- **Growing caches or collections** — A `Map`, `Set`, or array that grows indefinitely without eviction.
+- **Timers** — `setInterval` callbacks that reference component state and are never cleared.
+- **Closures over large objects** — A closure inadvertently captures a large object in its scope, preventing GC.
+
+The browser's GC uses a **mark-and-sweep** algorithm: it starts from root objects (like `window`) and marks everything reachable. Anything unmarked is swept (freed). A leak means the GC is marking something as reachable when you don't intend it to be.
+
+---
+
+## Detecting Leaks with Chrome DevTools
+
+### Step 1 — Establish a Baseline Heap Snapshot
+
+1. Open DevTools → **Memory** tab.
+2. Select **Heap snapshot** and click **Take snapshot**.
+3. Interact with the part of your app you suspect is leaking (e.g., navigate to a route and back several times).
+4. Take a second snapshot.
+5. In the second snapshot, change the dropdown from **Summary** to **Comparison**. Objects with a high **+Delta** count are candidates for investigation.
+
+### Step 2 — Use the Allocation Timeline
+
+1. Select **Allocation instrumentation on timeline** in the Memory tab.
+2. Click **Start**.
+3. Perform the user interaction you suspect causes a leak.
+4. Click **Stop**.
+
+Blue bars represent allocations that were never freed. Clicking a bar shows you exactly what was allocated and where in your code it came from.
+
+### Step 3 — Monitor Live Memory with Performance Monitor
+
+Open DevTools → **More tools** → **Performance monitor**. Watch the **JS heap size** line while you interact with your app. If it rises steadily and never drops after triggering GC (Shift+click the trash icon in Memory tab), you have a leak.
+
+---
+
+## Code Examples
+
+### Leaked Event Listener (and the Fix)
+
+```tsx
+// app/components/ResizeTracker.tsx
+"use client";
+
+import { useEffect, useState } from "react";
+
+export default function ResizeTracker() {
+  const [width, setWidth] = useState(window.innerWidth);
+
+  useEffect(() => {
+    const handleResize = () => setWidth(window.innerWidth);
+
+    window.addEventListener("resize", handleResize);
+
+    // ✅ Return a cleanup function — without this, every time
+    // this component mounts a new listener is added and never removed.
+    return () => {
+      window.removeEventListener("resize", handleResize);
+    };
+  }, []); // Empty dep array = runs once on mount, cleans up on unmount
+
+  return <p>Window width: {width}px</p>;
+}
+```
+
+<Callout type="warn">
+  Omitting the cleanup function from `useEffect` is the single most common
+  source of memory leaks in React applications. Every `addEventListener`,
+  `setInterval`, or external subscription must be cleaned up.
+</Callout>
+
+---
+
+### Leaked `setInterval` (and the Fix)
+
+```tsx
+// app/components/LiveClock.tsx
+"use client";
+
+import { useEffect, useState } from "react";
+
+export default function LiveClock() {
+  const [time, setTime] = useState(new Date().toLocaleTimeString());
+
+  useEffect(() => {
+    // Store the interval ID so we can clear it later
+    const intervalId = setInterval(() => {
+      setTime(new Date().toLocaleTimeString());
+    }, 1000);
+
+    // ✅ Clear the interval when the component unmounts
+    return () => clearInterval(intervalId);
+  }, []);
+
+  return <p>Current time: {time}</p>;
+}
+```
+
+---
+
+### Unbounded Cache (and the Fix using `WeakMap`)
+
+```ts
+// lib/cache.ts
+
+// ❌ Bad: This Map holds strong references. DOM nodes stored as keys
+// will never be garbage collected even after they're removed from the DOM.
+const badCache = new Map<HTMLElement, { data: string }>();
+
+// ✅ Good: WeakMap holds *weak* references. If the DOM node is removed
+// and nothing else references it, the GC can collect both the key and value.
+const elementMetadata = new WeakMap<HTMLElement, { clickCount: number }>();
+
+export function trackElement(el: HTMLElement) {
+  if (!elementMetadata.has(el)) {
+    elementMetadata.set(el, { clickCount: 0 });
+  }
+  el.addEventListener("click", () => {
+    const meta = elementMetadata.get(el);
+    if (meta) meta.clickCount++;
+  });
+}
+```
+
+<Callout type="info">
+  Use `WeakMap` and `WeakSet` when you need to associate metadata with objects
+  (especially DOM nodes) without preventing garbage collection. They don't
+  appear in heap snapshots as leak sources because their entries are
+  automatically released.
+</Callout>
+
+---
+
+### Detached DOM Node Leak (and the Fix)
+
+```ts
+// ❌ Bad: The button is removed from the DOM but `detachedButton`
+// still holds a reference, keeping it alive in memory along with
+// its entire subtree and any closures attached to it.
+let detachedButton: HTMLButtonElement | null =
+  document.querySelector("#submit");
+document.body.removeChild(detachedButton!);
+// detachedButton is never set to null — it's now a leak
+
+// ✅ Fix: Null out references to removed DOM nodes
+let button: HTMLButtonElement | null = document.querySelector("#submit");
+document.body.removeChild(button!);
+button = null; // Now the GC can collect it
+```
+
+---
+
+## Real-World Use Case
+
+**Scenario:** You're building a dashboard SPA where users frequently switch between a live chart view (polling an API every 2 seconds) and a settings panel. After navigating back and forth a few times, users report the tab becoming slow and eventually crashing.
+
+**Root cause:** The chart component starts a `setInterval` for polling, but when the component unmounts (user switches to settings), the interval continues running, holding a reference to the component's state setter and the chart canvas element.
+
+**Fix:** Add a cleanup function to the `useEffect` that starts the poll, calling `clearInterval` on unmount. Verify the fix by taking heap snapshots before and after navigating between views — the `+Delta` count for chart-related objects should drop to zero after the second snapshot.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Assuming React cleans up subscriptions for you.**
+React only calls your cleanup function if you return one from `useEffect`. External subscriptions (WebSockets, RxJS observables, third-party SDKs) must be manually unsubscribed in that cleanup.
+
+**2. Creating new function references inside `addEventListener` without storing them.**
+You can only remove an event listener if you pass the exact same function reference to `removeEventListener`. Defining an inline arrow function during cleanup won't work.
+
+```ts
+// ❌ This removeEventListener does nothing — different function reference
+window.addEventListener("scroll", () => handleScroll());
+window.removeEventListener("scroll", () => handleScroll()); // ← new function, no match
+
+// ✅ Store the reference
+const onScroll = () => handleScroll();
+window.addEventListener("scroll", onScroll);
+window.removeEventListener("scroll", onScroll); // ← same reference, works
+```
+
+**3. Forgetting that closures capture the entire scope.**
+A timer callback that references a single variable from a large object graph will keep that entire graph alive. Extract only what the callback needs.
+
+```ts
+// ❌ The entire `reportData` object (potentially MBs) stays alive
+const reportData = await fetchLargeReport();
+setInterval(() => console.log(reportData.status), 5000);
+
+// ✅ Extract only what's needed
+const status = reportData.status;
+setInterval(() => console.log(status), 5000);
+```
+
+**4. Not accounting for third-party libraries.**
+Many libraries (analytics SDKs, map renderers, rich text editors) attach their own listeners and allocate internal state. Always call their destroy/dispose methods when unmounting.
+
+<Callout type="warn">
+  When integrating third-party libraries in React, always check their docs for a
+  `destroy()`, `dispose()`, or `unmount()` method and call it in your
+  `useEffect` cleanup.
+</Callout>
+
+---
+
+## Summary
+
+Memory leaks in browsers occur when JavaScript retains references to objects that are no longer needed, preventing the garbage collector from freeing that memory. The most reliable way to detect them is with Chrome DevTools' Heap Snapshot comparison and Allocation Timeline tools. The most common causes are forgotten event listeners, uncleared timers, and closures that accidentally capture large objects. In React, always return a cleanup function from `useEffect` for any side effect that allocates resources. For object-keyed caches, prefer `WeakMap` over `Map` to avoid strong reference retention.

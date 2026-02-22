@@ -1,0 +1,303 @@
+---
+title: Detached DOM Nodes
+description: A guide to understanding, identifying, and fixing detached DOM node memory leaks in modern web applications.
+---
+
+## Overview
+
+A detached DOM node is a node that has been removed from the document tree but is still referenced in JavaScript memory. Because something holds a reference to it, the garbage collector cannot free it — causing a **memory leak**.
+
+This matters because leaked nodes accumulate silently. In long-lived apps (dashboards, SPAs, rich editors), hundreds of leaked nodes can balloon memory usage, degrade performance, and eventually crash browser tabs.
+
+## How It Works
+
+When you call `element.remove()` or `parent.removeChild(child)`, the node is removed from the live DOM. If no JavaScript reference points to it, the GC collects it. If a reference still exists — in a closure, an event listener, a module-level variable, a Map, or a React ref — the node stays alive in memory, disconnected from the document.
+
+Think of it like cutting a balloon from a bunch: the balloon floats away (detaches from the DOM) but if someone is still holding the string (a JS reference), the balloon isn't gone — it just hangs there consuming memory.
+
+```
+Document Tree         JavaScript Memory
+─────────────         ─────────────────
+<body>                let leak = detachedDiv  ← still reachable
+  (no div)            detachedDiv { ... }     ← not collected
+```
+
+The Chrome DevTools Memory panel labels these nodes as `Detached <TagName>` in heap snapshots, making them straightforward to spot once you know where to look.
+
+## Code Examples
+
+### Example 1: Creating a Leak (What Not to Do)
+
+```ts
+// leak.ts
+
+// ❌ This reference keeps the removed node alive forever
+let cachedBanner: HTMLDivElement | null = null;
+
+function showBanner(message: string) {
+  const banner = document.createElement("div");
+  banner.textContent = message;
+  document.body.appendChild(banner);
+
+  // Store a reference for later use
+  cachedBanner = banner;
+
+  setTimeout(() => {
+    banner.remove(); // Removed from DOM...
+    // ...but cachedBanner still holds a reference — LEAK
+  }, 3000);
+}
+
+showBanner("Welcome!");
+// After 3s: banner is detached but cachedBanner keeps it in memory
+```
+
+### Example 2: Fixing the Leak
+
+```ts
+// no-leak.ts
+
+let cachedBanner: HTMLDivElement | null = null;
+
+function showBanner(message: string) {
+  const banner = document.createElement("div");
+  banner.textContent = message;
+  document.body.appendChild(banner);
+
+  cachedBanner = banner;
+
+  setTimeout(() => {
+    banner.remove();
+    cachedBanner = null; // ✅ Release the reference so GC can collect it
+  }, 3000);
+}
+
+showBanner("Welcome!");
+```
+
+### Example 3: Leak via Event Listener
+
+Event listeners bound to a removed node can also keep it alive if the listener closure captures an outer reference.
+
+```ts
+// event-leak.ts
+
+function attachLogger() {
+  const container = document.getElementById("log-container") as HTMLDivElement;
+
+  const entries: string[] = [];
+
+  // ❌ The listener captures `entries` and `container`
+  //    If container is removed but the listener isn't cleaned up,
+  //    both the node and the array stay in memory.
+  container.addEventListener("click", (e) => {
+    entries.push((e.target as HTMLElement).textContent ?? "");
+    console.log("Logged entries:", entries);
+  });
+
+  // Simulate removal without cleanup
+  container.remove();
+  // Listener still registered → container is detached but not collected
+}
+```
+
+```ts
+// event-no-leak.ts
+
+function attachLogger() {
+  const container = document.getElementById("log-container") as HTMLDivElement;
+  const entries: string[] = [];
+
+  const handleClick = (e: Event) => {
+    entries.push((e.target as HTMLElement).textContent ?? "");
+    console.log("Logged entries:", entries);
+  };
+
+  container.addEventListener("click", handleClick);
+
+  // ✅ Remove listener before or immediately after removing the node
+  container.removeEventListener("click", handleClick);
+  container.remove();
+}
+```
+
+### Example 4: React — Detached Nodes via Stale Refs
+
+```tsx
+// components/AutoFocusInput.tsx
+"use client";
+
+import { useEffect, useRef } from "react";
+
+export default function AutoFocusInput() {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+
+    input.focus();
+
+    // ✅ Return a cleanup function.
+    // Without cleanup, if this component unmounts while a timeout/interval
+    // holds a reference to `input`, it becomes a detached node.
+    return () => {
+      // Nothing to clean up here since we didn't store the ref externally,
+      // but the pattern matters when you do.
+    };
+  }, []);
+
+  return <input ref={inputRef} type="text" placeholder="Auto-focused" />;
+}
+```
+
+```tsx
+// components/PollingWidget.tsx — the risky pattern and its fix
+"use client";
+
+import { useEffect, useRef } from "react";
+
+export default function PollingWidget() {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const node = containerRef.current; // capture locally
+
+    const intervalId = setInterval(() => {
+      // ❌ Without cleanup, `node` is captured in this closure.
+      // If the component unmounts, `node` becomes detached but
+      // the interval keeps running and referencing it.
+      if (node) node.textContent = `Updated at ${Date.now()}`;
+    }, 1000);
+
+    // ✅ Clear interval on unmount to release the closure reference
+    return () => clearInterval(intervalId);
+  }, []);
+
+  return <div ref={containerRef} />;
+}
+```
+
+### Example 5: Finding Leaks with Chrome DevTools
+
+```bash
+# No CLI tool — use DevTools directly:
+# 1. Open Chrome DevTools → Memory tab
+# 2. Take a Heap Snapshot (baseline)
+# 3. Perform the action you suspect leaks (e.g., open/close a modal)
+# 4. Take a second Heap Snapshot
+# 5. Change the view dropdown from "Summary" to "Comparison"
+# 6. Filter by "Detached" in the class filter box
+# 7. Inspect "Detached HTMLDivElement", "Detached HTMLButtonElement", etc.
+# 8. Expand retainers at the bottom to find what's holding the reference
+```
+
+<Callout type="info">
+  The **Retainers** panel in a heap snapshot is your fastest path to the root
+  cause. It shows exactly which variable, closure, or data structure is keeping
+  the detached node alive.
+</Callout>
+
+## Real-World Use Case
+
+In a dashboard app with a dynamic sidebar, panels are frequently mounted and unmounted as the user navigates. Each panel registers a `ResizeObserver` to respond to layout changes:
+
+```ts
+// sidebar/PanelManager.ts
+
+const observers = new Map<string, ResizeObserver>();
+
+function mountPanel(id: string, element: HTMLElement) {
+  const observer = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      console.log(`${id} resized to`, entry.contentRect.width);
+    }
+  });
+
+  observer.observe(element);
+  observers.set(id, observer); // Store reference
+}
+
+function unmountPanel(id: string, element: HTMLElement) {
+  element.remove();
+
+  // ✅ Disconnect observer and remove from Map to prevent leak
+  const observer = observers.get(id);
+  if (observer) {
+    observer.disconnect();
+    observers.delete(id);
+  }
+}
+```
+
+Without calling `observer.disconnect()` and removing from the Map, every unmounted panel element would remain in memory as a detached node referenced by its `ResizeObserver`.
+
+## Common Mistakes / Gotchas
+
+**1. Storing DOM references in module-level variables and never clearing them**
+
+Module scope persists for the lifetime of the page. Any DOM node stored at module level that gets removed from the document will never be GC'd unless you explicitly set the variable to `null`.
+
+```ts
+// ❌ Module-level reference never cleared
+export let activeModal: HTMLElement | null = document.querySelector("#modal");
+
+// ✅ Clear when done
+export function closeModal() {
+  activeModal?.remove();
+  activeModal = null; // release
+}
+```
+
+**2. Forgetting to remove event listeners before node removal**
+
+`removeEventListener` must be called with the _exact same function reference_ used in `addEventListener`. Inline arrow functions create new references every time, making removal impossible.
+
+```ts
+// ❌ Can't remove this — new function reference each call
+element.addEventListener("scroll", () => handleScroll());
+
+// ✅ Store the reference
+const boundHandler = () => handleScroll();
+element.addEventListener("scroll", boundHandler);
+// later:
+element.removeEventListener("scroll", boundHandler);
+```
+
+**3. Not cleaning up React effects that reference DOM nodes**
+
+When a `useEffect` captures a DOM ref and uses it inside a timer, interval, or async callback, forgetting to return a cleanup function means the callback runs after unmount — holding a reference to a now-detached node.
+
+```tsx
+// ❌ No cleanup — detached node leak after unmount
+useEffect(() => {
+  const el = ref.current;
+  const id = setInterval(() => {
+    el?.classList.toggle("blink");
+  }, 500);
+  // missing: return () => clearInterval(id);
+}, []);
+```
+
+**4. Using WeakRef correctly vs. incorrectly**
+
+`WeakRef` allows the GC to collect the referenced object if no strong references remain — useful for caches. But if you also store the node in a strong reference somewhere else, the `WeakRef` buys you nothing.
+
+```ts
+// ✅ WeakRef alone — GC can collect the node
+const weakNode = new WeakRef(document.createElement("div"));
+
+// ❌ Strong reference defeats the WeakRef
+const strongNode = document.createElement("div");
+const weakNode2 = new WeakRef(strongNode); // GC cannot collect — strongNode holds it
+```
+
+<Callout type="warn">
+  `WeakMap` and `WeakSet` are better tools than `WeakRef` for most DOM caching
+  scenarios. They automatically drop entries when the key node is GC'd, with no
+  manual cleanup required.
+</Callout>
+
+## Summary
+
+Detached DOM nodes are removed elements still referenced in JavaScript, preventing garbage collection and causing memory leaks. They arise from module-level variables, unremoved event listeners, uncleaned React effects, and observer callbacks that outlive their targets. You can locate them using Chrome DevTools heap snapshots filtered by "Detached". The fix is always the same: release the reference — set it to `null`, call `removeEventListener`, `disconnect()` observers, or return a cleanup function from `useEffect`. Adopting `WeakMap` for DOM-keyed caches is a structural way to avoid entire categories of this problem.
