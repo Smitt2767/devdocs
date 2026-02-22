@@ -1,0 +1,313 @@
+---
+title: Technical Debt
+description: How to systematically identify, categorize, and prioritize technical debt in a modern web codebase so your team can act on it without stalling feature delivery.
+---
+
+## Overview
+
+Technical debt is the accumulated cost of shortcuts, outdated patterns, and deferred refactoring in a codebase. Like financial debt, it accrues interest — the longer you ignore it, the more expensive future changes become.
+
+Identifying debt is straightforward. Prioritizing it is the hard part. Not all debt is worth paying down immediately, and some debt is intentional. This doc gives you a concrete system to find, categorize, and rank technical debt so engineering teams can act on it with confidence.
+
+---
+
+## How It Works
+
+Technical debt falls into four broad categories:
+
+**1. Deliberate debt** — A known shortcut taken consciously to ship faster. Example: hardcoding a config value with a TODO comment.
+
+**2. Accidental debt** — Introduced unintentionally through lack of knowledge or oversight. Example: a component re-fetching data it could have received as a prop.
+
+**3. Bit rot** — Code that was once correct but became outdated as the ecosystem evolved. Example: using the Next.js `pages/` router in a codebase migrating to App Router.
+
+**4. Architectural debt** — Structural problems that affect the whole system. Example: a monolithic API that should be split into focused route handlers.
+
+Once categorized, debt is prioritized using two axes:
+
+- **Impact** — How much does this debt slow down development, cause bugs, or degrade UX?
+- **Effort** — How costly is it to fix?
+
+High impact + low effort items are your immediate wins. High impact + high effort items need to be planned as dedicated engineering work. Low impact items may never be worth touching.
+
+---
+
+## Code Example(s)
+
+### Automated Debt Detection with ESLint and TypeScript
+
+Static analysis catches accidental debt continuously. Set up strict rules so debt doesn't silently accumulate.
+
+```bash
+npm install --save-dev eslint @typescript-eslint/parser @typescript-eslint/eslint-plugin eslint-plugin-react-hooks
+```
+
+```ts
+// eslint.config.mjs
+import tseslint from "@typescript-eslint/eslint-plugin";
+import tsparser from "@typescript-eslint/parser";
+import reactHooks from "eslint-plugin-react-hooks";
+
+export default [
+  {
+    files: ["**/*.ts", "**/*.tsx"],
+    languageOptions: {
+      parser: tsparser,
+      parserOptions: {
+        project: "./tsconfig.json", // enables type-aware linting rules
+      },
+    },
+    plugins: {
+      "@typescript-eslint": tseslint,
+      "react-hooks": reactHooks,
+    },
+    rules: {
+      // Catches untyped any — a major source of accidental debt
+      "@typescript-eslint/no-explicit-any": "error",
+
+      // Forces explicit return types on exported functions
+      "@typescript-eslint/explicit-module-boundary-types": "warn",
+
+      // Catches stale closures and missing deps in useEffect
+      "react-hooks/exhaustive-deps": "error",
+
+      // Prevents floating promises — a common source of silent bugs
+      "@typescript-eslint/no-floating-promises": "error",
+
+      // Discourages non-null assertions that mask real type debt
+      "@typescript-eslint/no-non-null-assertion": "warn",
+    },
+  },
+];
+```
+
+### Debt Inventory as a Structured Data File
+
+Keep a machine-readable debt registry that your team updates alongside the codebase. This prevents debt from living only in someone's head or a Slack thread.
+
+```ts
+// lib/tech-debt/registry.ts
+
+export type DebtCategory =
+  | "deliberate"
+  | "accidental"
+  | "bit-rot"
+  | "architectural";
+
+export type DebtPriority = "critical" | "high" | "medium" | "low";
+
+export interface DebtItem {
+  id: string;
+  title: string;
+  category: DebtCategory;
+  priority: DebtPriority;
+  impactScore: 1 | 2 | 3 | 4 | 5; // 5 = blocks development or causes prod bugs
+  effortScore: 1 | 2 | 3 | 4 | 5; // 5 = multi-week refactor
+  affectedPaths: string[]; // file or module paths
+  owner?: string; // team or individual responsible
+  trackerUrl?: string; // link to Jira/Linear/GitHub issue
+  createdAt: string; // ISO date
+}
+
+export const debtRegistry: DebtItem[] = [
+  {
+    id: "DEBT-001",
+    title: "Replace hardcoded API base URL with environment variable",
+    category: "deliberate",
+    priority: "high",
+    impactScore: 4,
+    effortScore: 1,
+    affectedPaths: ["lib/api/client.ts"],
+    owner: "platform-team",
+    trackerUrl: "https://linear.app/myapp/issue/ENG-412",
+    createdAt: "2024-11-03",
+  },
+  {
+    id: "DEBT-002",
+    title: "Migrate remaining pages/ routes to App Router",
+    category: "bit-rot",
+    priority: "critical",
+    impactScore: 5,
+    effortScore: 4,
+    affectedPaths: ["pages/account.tsx", "pages/settings.tsx"],
+    owner: "frontend-team",
+    trackerUrl: "https://linear.app/myapp/issue/ENG-388",
+    createdAt: "2024-10-15",
+  },
+  {
+    id: "DEBT-003",
+    title: "Extract inline SQL in /api/orders/route.ts into a repository layer",
+    category: "architectural",
+    priority: "medium",
+    impactScore: 3,
+    effortScore: 3,
+    affectedPaths: ["app/api/orders/route.ts"],
+    owner: "backend-team",
+    createdAt: "2025-01-20",
+  },
+];
+```
+
+### Priority Scoring Utility
+
+Use a weighted formula to objectively rank debt items rather than arguing about gut feelings in planning meetings.
+
+```ts
+// lib/tech-debt/prioritize.ts
+import type { DebtItem } from "./registry";
+
+/**
+ * Calculates a priority score for a debt item.
+ * Higher score = fix sooner.
+ *
+ * Formula: (impact * 2) - effort
+ * Impact is weighted double because developer-hour cost matters more than fix cost.
+ */
+export function calculatePriorityScore(item: DebtItem): number {
+  return item.impactScore * 2 - item.effortScore;
+}
+
+export function rankDebtItems(items: DebtItem[]): DebtItem[] {
+  return [...items].sort(
+    (a, b) => calculatePriorityScore(b) - calculatePriorityScore(a),
+  );
+}
+```
+
+```ts
+// Usage in a script or admin tool
+import { debtRegistry } from "./registry";
+import { rankDebtItems, calculatePriorityScore } from "./prioritize";
+
+const ranked = rankDebtItems(debtRegistry);
+
+for (const item of ranked) {
+  console.log(`[${calculatePriorityScore(item)}] ${item.id}: ${item.title}`);
+}
+
+// Output:
+// [7] DEBT-001: Replace hardcoded API base URL with environment variable
+// [6] DEBT-002: Migrate remaining pages/ routes to App Router
+// [3] DEBT-003: Extract inline SQL into a repository layer
+```
+
+### Surfacing Debt in a Next.js Admin Route
+
+Expose the debt registry through a protected internal route so non-engineers (PMs, tech leads) can see it without digging through code.
+
+```tsx
+// app/internal/tech-debt/page.tsx
+// This is a Server Component — no 'use client' needed for a read-only view
+
+import { debtRegistry } from "@/lib/tech-debt/registry";
+import { rankDebtItems, calculatePriorityScore } from "@/lib/tech-debt/prioritize";
+
+export const metadata = {
+  title: "Tech Debt Registry",
+};
+
+export default function TechDebtPage() {
+  const rankedItems = rankDebtItems(debtRegistry);
+
+  return (
+    <main className="p-8 max-w-4xl mx-auto">
+      <h1 className="text-2xl font-bold mb-6">Technical Debt Registry</h1>
+      <table className="w-full text-sm border-collapse">
+        <thead>
+          <tr className="bg-gray-100 text-left">
+            <th className="p-3 border">ID</th>
+            <th className="p-3 border">Title</th>
+            <th className="p-3 border">Category</th>
+            <th className="p-3 border">Priority</th>
+            <th className="p-3 border">Score</th>
+            <th className="p-3 border">Owner</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rankedItems.map((item) => (
+            <tr key={item.id} className="border-b hover:bg-gray-50">
+              <td className="p-3 border font-mono">{item.id}</td>
+              <td className="p-3 border">
+                {item.trackerUrl ? (
+
+                    href={item.trackerUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-600 underline"
+                  >
+                    {item.title}
+                  </a>
+                ) : (
+                  item.title
+                )}
+              </td>
+              <td className="p-3 border capitalize">{item.category}</td>
+              <td className="p-3 border capitalize">{item.priority}</td>
+              <td className="p-3 border font-bold">
+                {calculatePriorityScore(item)}
+              </td>
+              <td className="p-3 border">{item.owner ?? "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </main>
+  );
+}
+```
+
+<Callout type="info">
+  Protect `/internal/*` routes with middleware that checks for an internal
+  session or IP allowlist. Never expose this page publicly.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+An e-commerce platform has been shipping features for 18 months. The checkout flow was built quickly during a launch crunch and now contains:
+
+- Inline SQL queries directly in API route handlers
+- A hardcoded Stripe API key fallback in `lib/payments.ts`
+- Two remaining `pages/` router pages that haven't been migrated to App Router
+- A `useEffect` with a missing dependency that causes a stale cart total on mobile
+
+During sprint planning, the team debates what to fix. Without a structured approach, the loudest voice wins. With the registry and scoring system above:
+
+1. The hardcoded key gets fixed this sprint (score: 7, effort: 1 day).
+2. The `useEffect` bug is caught by the ESLint rule before it even reaches review.
+3. The App Router migration is planned as a two-sprint epic (score: 6, effort: high).
+4. The inline SQL is logged and scheduled for Q3 (score: 3, effort: medium).
+
+The team ships features without ignoring debt, and every decision is traceable.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Treating all debt as equal urgency**
+Developers often either ignore debt entirely or want to fix everything before shipping anything. Neither works. Use the impact/effort matrix. Low-impact debt may never justify the opportunity cost of fixing it.
+
+**2. Storing debt knowledge only in people's heads**
+When the engineer who knew about a workaround leaves the team, the context disappears. A written registry — even a simple TypeScript file — ensures debt is visible and transferable.
+
+**3. Using TODOs as your only tracking mechanism**
+`// TODO: fix this later` comments are invisible to planning tools, can't be assigned to owners, and have no priority signal. They are fine for quick notes during development, but every significant TODO should be promoted to a registry entry or a tracked issue within the same sprint.
+
+**4. Fixing debt without a test harness**
+Refactoring a high-debt module without test coverage first is how rewrites introduce regressions. Always add tests before touching debt-heavy code — even basic integration tests for the affected behavior.
+
+**5. Conflating debt with bugs**
+A bug is a defect that produces incorrect behavior right now. Debt is structural or design-level drag. Mixing the two in the same backlog muddles prioritization. Track them separately.
+
+<Callout type="warn">
+  Never schedule a "tech debt sprint" once a year. Debt paid down continuously —
+  15–20% of each sprint — stays manageable. Batching it creates rewrites, and
+  rewrites fail.
+</Callout>
+
+---
+
+## Summary
+
+Technical debt is unavoidable, but unmanaged debt compounds until it stops a team cold. Categorizing debt (deliberate, accidental, bit rot, architectural) and scoring it on impact vs. effort gives engineering teams an objective basis for prioritization. Automated tooling — strict TypeScript, exhaustive ESLint rules — catches accidental debt at the source before it enters the codebase. A structured, version-controlled registry keeps debt visible to the whole team, not just the engineers who wrote the shortcuts. Paying down debt incrementally each sprint is more effective and less risky than scheduled rewrites.

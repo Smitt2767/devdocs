@@ -1,0 +1,181 @@
+---
+title: Framework Selection
+description: A practical guide to evaluating and choosing the right web framework for your project based on technical and organizational criteria.
+---
+
+## Overview
+
+Picking a framework is one of the highest-leverage decisions on a project. Get it right and the framework fades into the background, accelerating your team. Get it wrong and you spend months fighting abstractions that don't fit your problem.
+
+This guide gives you a concrete set of criteria to evaluate frameworks systematically — covering rendering strategies, ecosystem maturity, team fit, scalability, and long-term maintenance cost.
+
+---
+
+## How It Works
+
+Framework selection is a multi-axis decision. No single criterion wins — you're looking for the best fit across several dimensions simultaneously:
+
+| Criterion                 | What to Ask                                                            |
+| ------------------------- | ---------------------------------------------------------------------- |
+| **Rendering model**       | Do you need SSR, SSG, CSR, or a hybrid?                                |
+| **Data fetching**         | Is server-side async data fetching first-class?                        |
+| **Ecosystem**             | Are the libraries you depend on well-supported?                        |
+| **Team familiarity**      | How steep is the learning curve?                                       |
+| **Performance baseline**  | What does the framework ship by default (bundle size, TTFB)?           |
+| **Deployment target**     | Edge, serverless, Node.js, static CDN?                                 |
+| **Community & longevity** | Is the project actively maintained? Who is behind it?                  |
+| **Scalability**           | Can it grow with your app (monorepo support, module federation, etc.)? |
+
+The goal is to rule out poor fits early, not to find a "perfect" framework — one doesn't exist.
+
+---
+
+## Code Example: Automated Scoring Matrix
+
+Use this TypeScript utility to score framework candidates against your project's weighted priorities. Run it in any Node.js 18+ environment.
+
+```ts
+// framework-scorer.ts
+// Run with: npx tsx framework-scorer.ts
+
+type Criterion =
+  | "ssrSupport"
+  | "ecosystemSize"
+  | "teamFamiliarity"
+  | "bundleSize"
+  | "edgeCompatibility"
+  | "communityHealth";
+
+type FrameworkScore = Record<Criterion, number>; // scores 1–10
+
+interface ProjectWeights extends Record<Criterion, number> {} // weights must sum to 1
+
+const weights: ProjectWeights = {
+  ssrSupport: 0.25,
+  ecosystemSize: 0.2,
+  teamFamiliarity: 0.2,
+  bundleSize: 0.1,
+  edgeCompatibility: 0.15,
+  communityHealth: 0.1,
+};
+
+const frameworks: Record<string, FrameworkScore> = {
+  "Next.js": {
+    ssrSupport: 10,
+    ecosystemSize: 10,
+    teamFamiliarity: 8,
+    bundleSize: 7,
+    edgeCompatibility: 9,
+    communityHealth: 10,
+  },
+  Remix: {
+    ssrSupport: 10,
+    ecosystemSize: 7,
+    teamFamiliarity: 6,
+    bundleSize: 8,
+    edgeCompatibility: 8,
+    communityHealth: 8,
+  },
+  Astro: {
+    ssrSupport: 7,
+    ecosystemSize: 7,
+    teamFamiliarity: 6,
+    bundleSize: 10, // ships zero JS by default
+    edgeCompatibility: 9,
+    communityHealth: 8,
+  },
+  SvelteKit: {
+    ssrSupport: 9,
+    ecosystemSize: 6,
+    teamFamiliarity: 5,
+    bundleSize: 9,
+    edgeCompatibility: 8,
+    communityHealth: 8,
+  },
+};
+
+function scoreFramework(
+  scores: FrameworkScore,
+  weights: ProjectWeights,
+): number {
+  return (Object.keys(scores) as Criterion[]).reduce((total, criterion) => {
+    return total + scores[criterion] * weights[criterion];
+  }, 0);
+}
+
+const results = Object.entries(frameworks)
+  .map(([name, scores]) => ({
+    name,
+    score: scoreFramework(scores, weights).toFixed(2),
+  }))
+  .sort((a, b) => parseFloat(b.score) - parseFloat(a.score));
+
+console.table(results);
+// ┌─────────┬────────────┬────────┐
+// │ (index) │    name    │ score  │
+// ├─────────┼────────────┼────────┤
+// │    0    │  'Next.js' │ '9.10' │
+// │    1    │   'Remix'  │ '8.25' │
+// ...
+```
+
+Adjust `weights` to match your project's actual priorities before running.
+
+---
+
+## Real-World Use Case
+
+**Scenario:** A fintech startup is building a customer-facing dashboard showing real-time account balances, transaction history, and a public-facing marketing site — all in one product.
+
+Their decision process:
+
+- **SSR is required** for the marketing pages (SEO matters for acquisition).
+- **Dynamic, personalized data** means SSG alone won't work for the dashboard.
+- **The team knows React** well — Angular or Svelte would mean a slow ramp.
+- **Edge rendering** is preferred to minimize latency for users across regions.
+- **Auth and session handling** must be server-side (security requirement).
+
+Running the scoring matrix above with those priorities heavily weighted toward `ssrSupport`, `edgeCompatibility`, and `teamFamiliarity` points clearly to **Next.js App Router** — which supports React Server Components, edge middleware, and has first-class Vercel/Cloudflare deployment support.
+
+If the product were documentation-heavy with minimal interactivity, **Astro** would score higher due to its zero-JS-by-default model and MDX support.
+
+---
+
+## Common Mistakes / Gotchas
+
+### 1. Choosing based on hype, not requirements
+
+Frameworks trend on social media. A framework being popular on Twitter or topping GitHub stars does not mean it's right for your use case. Always start with your rendering and data requirements — not what's trending.
+
+<Callout type="warn">
+  SPA frameworks like plain Vite + React are a poor default for content-heavy or
+  SEO-sensitive apps. They ship zero server rendering out of the box.
+</Callout>
+
+### 2. Underweighting team familiarity
+
+A technically superior framework your team doesn't know costs weeks of productivity. Unless you have a long runway and time to learn, weight familiarity heavily. A team that knows Next.js well will outship a team struggling with a new framework's mental model every time.
+
+### 3. Ignoring deployment constraints too late
+
+Some frameworks are optimized for specific runtimes. Remix and Next.js both support edge and Node.js targets, but the configuration differs significantly. If your infrastructure is locked to bare Node.js VMs or a specific cloud provider, validate deployment compatibility **before** committing.
+
+<Callout type="info">
+  Next.js `output: 'export'` generates a fully static build but disables all
+  server features. Don't choose Next.js for its SSR capabilities and then
+  static-export it — use Astro instead.
+</Callout>
+
+### 4. Treating the decision as permanent
+
+Most modern frameworks share similar primitives (JSX, file-based routing, async data fetching). If your codebase is well-structured with clean separation of concerns, migrating between frameworks — while painful — is not catastrophic. Don't let fear of the wrong choice lead to paralysis.
+
+### 5. Skipping the "escape hatch" test
+
+Before committing, identify your three most complex requirements and verify the framework handles them. If you can't find clear documentation or working examples for your hardest cases, that's a signal.
+
+---
+
+## Summary
+
+Framework selection is a structured trade-off process, not a matter of preference. Identify your project's rendering requirements, deployment target, team skills, and performance constraints first. Score candidates against weighted criteria rather than relying on gut feel or community popularity. The best framework is the one that solves your actual constraints with the least friction for your specific team. Revisit the decision matrix if your requirements change significantly — and don't over-engineer the choice early in a project when requirements are still uncertain.

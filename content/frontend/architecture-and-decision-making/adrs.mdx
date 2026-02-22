@@ -1,0 +1,182 @@
+---
+title: ADRs
+description: A guide to writing and maintaining Architecture Decision Records to document the reasoning behind significant technical decisions in your codebase.
+---
+
+## Overview
+
+An Architecture Decision Record (ADR) is a short document that captures a single architectural decision: what was decided, why it was decided, and what the trade-offs are. ADRs live in your repository alongside your code, making them version-controlled, searchable, and directly tied to the history of your project.
+
+Without ADRs, the reasoning behind critical decisions disappears when team members leave or memories fade. Six months later, no one knows why a specific library was chosen, why a service was split, or why a particular pattern was avoided. ADRs solve that problem.
+
+## How It Works
+
+Each ADR is a standalone Markdown (or MDX) file stored in a dedicated directory — typically `docs/adr/` or `docs/decisions/`. Files are numbered sequentially and never deleted. If a decision is reversed, a new ADR supersedes the old one rather than modifying it. This preserves a full audit trail.
+
+The lifecycle of an ADR follows a simple state machine:
+
+- **Proposed** — the decision is under discussion
+- **Accepted** — the team agreed and it is in effect
+- **Deprecated** — the decision is outdated but not yet replaced
+- **Superseded** — a newer ADR replaces this one
+
+Think of each ADR like a Git commit message for your architecture: it explains the _why_, not just the _what_.
+
+## Code Example(s)
+
+### ADR File Structure
+
+```
+docs/
+  adr/
+    0001-use-nextjs-app-router.md
+    0002-adopt-postgresql-over-mysql.md
+    0003-use-zod-for-runtime-validation.md
+```
+
+### ADR Template
+
+```md
+# ADR-0003: Use Zod for Runtime Validation
+
+**Date:** 2025-06-12  
+**Status:** Accepted  
+**Deciders:** @alice, @bob, @carol  
+**Supersedes:** N/A  
+**Superseded by:** N/A
+
+---
+
+## Context
+
+Our API routes accept user-supplied JSON payloads. We had no consistent mechanism
+to validate the shape of incoming data at runtime. TypeScript types are erased at
+runtime, so type annotations alone cannot protect against malformed input.
+
+We evaluated three options:
+
+- **Yup** — mature, but verbose API and slower parse performance
+- **Joi** — battle-tested, but no first-class TypeScript inference
+- **Zod** — TypeScript-first, infers static types from schemas, fast
+
+## Decision
+
+We will use **Zod** as the standard library for all runtime schema validation
+across API route handlers and server actions.
+
+## Consequences
+
+**Positive:**
+
+- Single source of truth: one Zod schema produces both the runtime validator
+  and the static TypeScript type via `z.infer<>`.
+- Consistent error formatting via `ZodError` across all endpoints.
+- Strong ecosystem support (React Hook Form, tRPC, etc.).
+
+**Negative:**
+
+- Adds a dependency (~12 kB minified + gzipped).
+- Team members unfamiliar with Zod need a short onboarding ramp.
+- Highly complex schemas (recursive types) can be verbose to express.
+
+## Implementation Notes
+
+All schemas live in `lib/schemas/`. Route handlers import and call
+`schema.parse(payload)` — throwing on invalid input — or `schema.safeParse(payload)`
+when a graceful error response is preferred.
+```
+
+### Applying the Decision in Code
+
+```ts
+// lib/schemas/create-order.ts
+import { z } from "zod";
+
+// Schema is the single source of truth — Zod infers the TS type from it.
+export const createOrderSchema = z.object({
+  userId: z.string().uuid(),
+  items: z
+    .array(
+      z.object({
+        productId: z.string().uuid(),
+        quantity: z.number().int().min(1),
+      }),
+    )
+    .min(1, "An order must contain at least one item."),
+  couponCode: z.string().optional(),
+});
+
+// Derive the TypeScript type — no duplication needed.
+export type CreateOrderInput = z.infer<typeof createOrderSchema>;
+```
+
+```ts
+// app/api/orders/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { createOrderSchema } from "@/lib/schemas/create-order";
+
+export async function POST(request: NextRequest) {
+  const body = await request.json();
+
+  // safeParse returns { success, data } or { success, error } — never throws.
+  const result = createOrderSchema.safeParse(body);
+
+  if (!result.success) {
+    return NextResponse.json(
+      { errors: result.error.flatten().fieldErrors },
+      { status: 422 },
+    );
+  }
+
+  // result.data is fully typed as CreateOrderInput here.
+  const order = await createOrder(result.data);
+
+  return NextResponse.json(order, { status: 201 });
+}
+```
+
+## Real-World Use Case
+
+Imagine a team of five engineers building a SaaS platform. In month two, a developer adds `pg` (node-postgres) directly. In month four, a different developer installs `kysely`. By month eight, two database access patterns coexist, onboarding is confusing, and a bug surfaces because connection pooling is configured differently in each.
+
+An ADR written in month two — _ADR-0004: Use Kysely as the Query Builder_ — would have surfaced the decision explicitly, invited review before implementation, and left a permanent record explaining why `pg` alone was insufficient. New engineers read the ADR during onboarding and immediately understand the constraint.
+
+ADRs are especially valuable when:
+
+- Choosing between competing libraries with overlapping functionality
+- Deciding on a monorepo vs. multi-repo structure
+- Adopting or retiring an API style (REST vs. tRPC vs. GraphQL)
+- Defining authentication strategy (JWT vs. session cookies)
+
+## Common Mistakes / Gotchas
+
+**1. Writing ADRs after the decision is already implemented and forgotten.**
+An ADR written retroactively without the original participants is speculation, not documentation. Write the ADR during the decision process — ideally as a PR that the team reviews before merging the implementation.
+
+**2. Editing an accepted ADR instead of superseding it.**
+Modifying a past ADR destroys the historical record. If a decision changes, mark the old ADR as _Superseded by ADR-XXXX_ and write a new one explaining the updated context and reasoning.
+
+**3. Making ADRs too broad.**
+An ADR titled "Frontend Architecture" covering routing, state management, styling, and testing is too large to be useful. Each significant decision gets its own ADR. Smaller scope means faster review and clearer accountability.
+
+**4. Skipping the "Consequences" section.**
+The consequences section — both positive and negative — is what separates a useful ADR from a simple changelog entry. If you only record _what_ was decided without the trade-offs, the document loses most of its value when context shifts.
+
+**5. Storing ADRs outside the repository.**
+ADRs in Confluence or Notion become stale and disconnected from the code. When the ADR lives in the repo, it shows up in `git log`, gets reviewed in PRs, and stays in sync with the codebase it documents.
+
+<Callout type="warn">
+  Never retroactively rewrite an accepted ADR to match what was actually built.
+  If the implementation diverged from the decision, write a new ADR that
+  acknowledges the divergence and explains why.
+</Callout>
+
+<Callout type="info">
+  Tools like [adr-tools](https://github.com/npryce/adr-tools) can scaffold new
+  ADR files from the command line with `adr new "Use Zod for Runtime
+  Validation"`, keeping numbering consistent automatically.
+</Callout>
+
+## Summary
+
+ADRs are lightweight, version-controlled documents that record significant architectural decisions alongside the code they affect. Each ADR captures the context, the decision, and the trade-offs — not just the outcome. They follow an immutable append-only model: supersede rather than edit. Stored in the repository, they survive team turnover and make onboarding significantly faster. The cost of writing an ADR is low; the cost of not writing one compounds over the lifetime of the project.

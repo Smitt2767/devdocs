@@ -1,0 +1,363 @@
+---
+title: Build vs Buy UI
+description: A practical framework for deciding when to build custom UI components from scratch versus adopting a third-party component library or design system.
+---
+
+## Overview
+
+Every frontend team eventually faces the same question: should we build this UI component ourselves, or use something that already exists?
+
+"Build vs buy" (or build vs adopt, since most UI libraries are free) is a decision framework for evaluating whether a given UI need is better served by:
+
+- **Building** — writing the component yourself, owning every line of code
+- **Buying/Adopting** — using a third-party library, headless component primitive, or fully styled system
+
+Getting this wrong has real consequences. Adopting a library that doesn't fit your design system leads to painful workarounds. Building something a mature library already solves perfectly wastes weeks of engineering time.
+
+---
+
+## How It Works
+
+The decision comes down to five axes: **control**, **time**, **complexity**, **maintenance**, and **brand differentiation**.
+
+### Control
+
+When you build, you own 100% of the behavior, accessibility semantics, styling, and API surface. When you adopt, you accept the constraints and opinions of the library's authors.
+
+### Time
+
+Libraries collapse weeks of work into an install. But if you spend three weeks fighting a library's API to make it fit your product, you've lost the time advantage entirely.
+
+### Complexity
+
+Some UI components — data tables with virtual scrolling, rich text editors, drag-and-drop boards, date pickers with timezone support — are genuinely hard to build correctly. Others (a badge, a card, a simple button) are not.
+
+### Maintenance
+
+Every external dependency is a liability: breaking changes, abandoned repos, security vulnerabilities, bundle size regressions. Internal components have a different cost: you are the maintainer now.
+
+### Brand Differentiation
+
+If your UI is a core product differentiator (you're building a design tool, a dashboard product, a dev tool), custom components may be essential. If you're building internal tooling or a CRUD app, the default look of a well-chosen library is fine.
+
+---
+
+## Decision Framework
+
+Use this rubric before deciding:
+
+| Question                                     | Build                       | Adopt                   |
+| -------------------------------------------- | --------------------------- | ----------------------- |
+| Is this a commodity UI pattern?              | No                          | Yes                     |
+| Do you need full design control?             | Yes                         | No                      |
+| Is accessibility critical and complex here?  | Maybe build or use headless | Yes — use battle-tested |
+| Does your team have bandwidth?               | Yes                         | No                      |
+| Will this component be maintained long-term? | Team commits to it          | Prefer library          |
+| Is this a core product differentiator?       | Yes                         | No                      |
+
+<Callout type="info">
+  The best answer is often **both**: adopt a headless or unstyled primitive
+  (like Radix UI or React Aria) for behavior and accessibility, then build the
+  visual layer yourself. This is the modern middle ground.
+</Callout>
+
+---
+
+## Code Examples
+
+### Scenario 1: Adopting a Headless Primitive (Recommended Middle Ground)
+
+You need a fully accessible modal. Instead of building focus trapping, ARIA attributes, and scroll locking from scratch, use Radix UI's `Dialog` primitive and apply your own styles.
+
+```tsx
+// components/ui/modal.tsx
+// Radix handles: focus trap, aria-modal, scroll lock, escape key
+// You handle: all visual design
+
+import * as Dialog from "@radix-ui/react-dialog";
+
+interface ModalProps {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  children: React.ReactNode;
+}
+
+export function Modal({ open, onClose, title, children }: ModalProps) {
+  return (
+    <Dialog.Root open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
+      <Dialog.Portal>
+        {/* Radix injects aria and focus management — you own the CSS */}
+        <Dialog.Overlay className="fixed inset-0 bg-black/40 backdrop-blur-sm" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg rounded-xl bg-white p-6 shadow-xl">
+          <Dialog.Title className="text-lg font-semibold text-gray-900">
+            {title}
+          </Dialog.Title>
+          <div className="mt-4">{children}</div>
+          <Dialog.Close
+            onClick={onClose}
+            className="absolute right-4 top-4 text-gray-400 hover:text-gray-600"
+            aria-label="Close modal"
+          >
+            ✕
+          </Dialog.Close>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+```
+
+```tsx
+// app/settings/page.tsx
+// Server Component — Modal is used inside a Client Component
+
+import { SettingsPanel } from "@/components/settings-panel";
+
+export default function SettingsPage() {
+  return (
+    <main className="p-8">
+      <h1 className="text-2xl font-bold">Settings</h1>
+      <SettingsPanel />
+    </main>
+  );
+}
+```
+
+```tsx
+// components/settings-panel.tsx
+"use client";
+
+import { useState } from "react";
+import { Modal } from "@/components/ui/modal";
+
+export function SettingsPanel() {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className="mt-4 rounded-md bg-blue-600 px-4 py-2 text-white"
+      >
+        Edit Profile
+      </button>
+
+      <Modal open={open} onClose={() => setOpen(false)} title="Edit Profile">
+        <p className="text-gray-600">Profile editing form goes here.</p>
+      </Modal>
+    </>
+  );
+}
+```
+
+<Callout type="info">
+  This is the "adopt the primitive, build the surface" pattern. You get
+  accessibility for free and keep full visual ownership. Libraries like **Radix
+  UI**, **React Aria** (Adobe), and **Headless UI** (Tailwind Labs) are built
+  for exactly this.
+</Callout>
+
+---
+
+### Scenario 2: When to Build From Scratch
+
+You're building a custom multi-step form wizard with complex conditional logic tied to your domain model. No library maps cleanly to your UX requirements. Build it.
+
+```tsx
+// components/onboarding/wizard.tsx
+"use client";
+
+import { useState } from "react";
+import { PlanStep } from "./steps/plan-step";
+import { TeamStep } from "./steps/team-step";
+import { ConfirmStep } from "./steps/confirm-step";
+
+type WizardStep = "plan" | "team" | "confirm";
+
+const STEPS: WizardStep[] = ["plan", "team", "confirm"];
+
+export function OnboardingWizard() {
+  const [currentStep, setCurrentStep] = useState<WizardStep>("plan");
+  const [formData, setFormData] = useState({
+    plan: "",
+    teamSize: 0,
+    billingEmail: "",
+  });
+
+  const stepIndex = STEPS.indexOf(currentStep);
+
+  function advance(update: Partial<typeof formData>) {
+    setFormData((prev) => ({ ...prev, ...update }));
+    if (stepIndex < STEPS.length - 1) {
+      setCurrentStep(STEPS[stepIndex + 1]);
+    }
+  }
+
+  function goBack() {
+    if (stepIndex > 0) setCurrentStep(STEPS[stepIndex - 1]);
+  }
+
+  return (
+    <div className="mx-auto max-w-xl py-12">
+      {/* Step indicator */}
+      <div className="mb-8 flex gap-2">
+        {STEPS.map((step, i) => (
+          <div
+            key={step}
+            className={`h-1.5 flex-1 rounded-full ${
+              i <= stepIndex ? "bg-blue-600" : "bg-gray-200"
+            }`}
+          />
+        ))}
+      </div>
+
+      {/* Conditional step rendering */}
+      {currentStep === "plan" && (
+        <PlanStep onNext={(plan) => advance({ plan })} />
+      )}
+      {currentStep === "team" && (
+        <TeamStep
+          onNext={(teamSize) => advance({ teamSize })}
+          onBack={goBack}
+        />
+      )}
+      {currentStep === "confirm" && (
+        <ConfirmStep data={formData} onBack={goBack} />
+      )}
+    </div>
+  );
+}
+```
+
+No library solves this better than well-structured, domain-aware component code. The logic is yours — own it.
+
+---
+
+### Scenario 3: When Fully Adopting a Component Library Makes Sense
+
+Internal admin dashboard. Speed matters, design differentiation doesn't. Use shadcn/ui (which itself wraps Radix primitives) to ship fast.
+
+```bash
+npx shadcn@latest init
+npx shadcn@latest add table button badge input
+```
+
+```tsx
+// app/admin/users/page.tsx
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  status: "active" | "suspended";
+}
+
+async function getUsers(): Promise<User[]> {
+  // Replace with your actual data fetch
+  return [
+    { id: "1", name: "Alice Chen", email: "alice@acme.com", status: "active" },
+    { id: "2", name: "Bob Russo", email: "bob@acme.com", status: "suspended" },
+  ];
+}
+
+export default async function UsersPage() {
+  const users = await getUsers();
+
+  return (
+    <div className="p-8">
+      <h1 className="mb-6 text-2xl font-bold">Users</h1>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Name</TableHead>
+            <TableHead>Email</TableHead>
+            <TableHead>Status</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {users.map((user) => (
+            <TableRow key={user.id}>
+              <TableCell>{user.name}</TableCell>
+              <TableCell>{user.email}</TableCell>
+              <TableCell>
+                <Badge
+                  variant={user.status === "active" ? "default" : "destructive"}
+                >
+                  {user.status}
+                </Badge>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+```
+
+<Callout type="info">
+  shadcn/ui gives you the source code of each component directly in your repo.
+  It's "adopt but own" — you get the speed of a library with the control of
+  building it yourself.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+**Scenario: SaaS product with a public-facing dashboard and an internal admin panel.**
+
+- **Public dashboard** — This is customer-facing and reflects your brand. Charts, data visualizations, and core navigation components should be custom-built or heavily adapted from headless primitives. Use Recharts or Victory for charts (complex math, not worth rebuilding), but wrap them in your own styled components.
+
+- **Internal admin panel** — Your ops team uses this daily. Design differentiation doesn't matter. Ship it with shadcn/ui or Mantine in a week instead of a month.
+
+- **Date picker** — Always adopt. Timezone handling, localization, keyboard navigation, and accessibility in a date picker is a months-long project. Use React DayPicker or a headless primitive.
+
+- **Custom token input (e.g., email tag input)** — Probably build. It's simple enough, highly specific to your domain, and no library will match your exact UX requirements without significant fighting.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Adopting a library and then fighting its defaults for months**
+
+If you spend more time overriding a library's styles or behavior than it would have taken to build the component, you made the wrong call. Watch for this signal early — one or two hacky overrides is fine, but if every component in the library requires a workaround, cut your losses and build.
+
+**2. Building what you should have adopted (especially for accessibility)**
+
+Focus management, ARIA roles, keyboard interactions, and screen reader support are notoriously difficult to get right. Developers regularly underestimate this cost. Components like modals, dropdowns, comboboxes, tooltips, and date pickers have complex accessibility requirements. Always check whether a well-tested headless library handles this before building from scratch.
+
+<Callout type="warn">
+  WCAG compliance for interactive components is not optional. If your
+  hand-rolled dropdown fails keyboard navigation, it's a bug — and a legal risk
+  in some jurisdictions. Headless UI libraries like Radix UI and React Aria have
+  invested heavily in getting this right so you don't have to.
+</Callout>
+
+**3. Treating the decision as permanent**
+
+Build vs adopt isn't a one-time call. A library you adopted two years ago may now be unmaintained. A component you built may now have a better open-source equivalent. Revisit these decisions during major refactors or when a component becomes a significant maintenance burden.
+
+**4. Ignoring bundle size when adopting**
+
+Some UI libraries are massive. Importing a full component library to use three components is a common mistake. Check bundle impact with tools like [bundlephobia.com](https://bundlephobia.com) before committing. shadcn/ui and Radix UI are tree-shakeable and install only what you use.
+
+**5. Adopting a fully styled library when your brand is a differentiator**
+
+If your UI is part of what customers pay for, a fully styled library (like Chakra UI or Ant Design with default styles) will make your product look generic. Use headless primitives and build the visual layer yourself.
+
+---
+
+## Summary
+
+The build vs buy decision for UI is not binary — the modern best practice is often to adopt behavior (headless primitives for accessibility and interaction logic) while building the visual layer. Fully adopt when speed matters and design differentiation doesn't, such as internal tools. Build from scratch when the component is deeply domain-specific, or when your UI is a product differentiator. Never build what's genuinely complex to get right — date pickers, rich text editors, and accessible dropdowns are not good candidates for from-scratch builds. Revisit these decisions over time as libraries evolve and your product's needs change.
