@@ -3,37 +3,48 @@ import React from "react";
 export function OgLogo() {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-      {/* Hexagon SVG Icon */}
       <svg
-        width="40"
-        height="40"
-        viewBox="0 0 24 24"
+        width="32"
+        height="32"
+        viewBox="0 0 32 32"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
-        style={{ flexShrink: 0 }}
-        aria-hidden="true"
       >
-        <defs>
-          <linearGradient
-            id="logo-gradient"
-            x1="2"
-            y1="2"
-            x2="22"
-            y2="22"
-            gradientUnits="userSpaceOnUse"
-          >
-            <stop offset="0%" stopColor="#5b4cff" stopOpacity="0.6" />
-            <stop offset="100%" stopColor="#00d2ff" stopOpacity="0.4" />
-          </linearGradient>
-        </defs>
+        <rect width="32" height="32" fill="#0a0a0a" rx="6" />
+
         <path
-          d="M12 2L21.66 7.5V16.5L12 22L2.34 16.5V7.5L12 2Z"
-          fill="url(#logo-gradient)"
+          d="M16 6L23.8564 10.5V19.5L16 24L8.14359 19.5V10.5L16 6Z"
+          fill="url(#gradient)"
           stroke="#5b4cff"
           strokeWidth="1.5"
         />
-      </svg>
 
+        <defs>
+          <linearGradient
+            id="gradient"
+            x1="8"
+            y1="6"
+            x2="23"
+            y2="24"
+            gradientUnits="userSpaceOnUse"
+          >
+            <stop offset="0%" stopColor="#5b4cff" stopOpacity="0.3" />
+            <stop offset="100%" stopColor="#00d2ff" stopOpacity="0.2" />
+          </linearGradient>
+        </defs>
+
+        <text
+          x="16"
+          y="20.5"
+          fontFamily="monospace"
+          fontSize="14"
+          fontWeight="bold"
+          fill="#ffffff"
+          textAnchor="middle"
+        >
+          D
+        </text>
+      </svg>
       {/* devdocs text */}
       <span
         style={{

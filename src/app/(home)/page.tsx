@@ -46,7 +46,7 @@ export default async function HomePage() {
     <main className="min-h-screen bg-[#121212] text-white font-mono">
       {/* Sticky nav with glacier (frosted glass) effect */}
       <header className="sticky top-0 z-50 w-full border-b border-white/6 bg-[#121212]/80 backdrop-blur-xl backdrop-saturate-150">
-        <div className="mx-auto flex max-w-3xl items-center justify-between px-6 py-4">
+        <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3 md:px-6 md:py-4">
           <Logo />
           <div className="flex items-center gap-6">
             <Link
@@ -100,7 +100,7 @@ export default async function HomePage() {
               >
                 <div className="flex items-center gap-4">
                   <span
-                    className="text-[#444] text-[10px] w-5 tabular-nums select-none"
+                    className="text-[#999] text-[10px] w-5 tabular-nums select-none"
                     aria-hidden="true"
                   >
                     {String(i + 1).padStart(2, "0")}
@@ -115,7 +115,7 @@ export default async function HomePage() {
                     {section.count}
                   </span>
                   <span
-                    className="text-[#555] text-xs group-hover:text-[#888] transition-colors shrink-0"
+                    className="text-[#555] text-sm group-hover:text-[#888] transition-colors shrink-0 font-semibold"
                     aria-hidden="true"
                   >
                     →
@@ -132,7 +132,7 @@ export default async function HomePage() {
             Always learning
           </span>
           <span
-            className="text-[#555] text-[10px] font-mono"
+            className="text-[#777] text-[10px] font-mono"
             aria-hidden="true"
           >
             {new Date().getFullYear()}
