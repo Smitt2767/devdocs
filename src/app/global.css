@@ -2,84 +2,39 @@
 @import "fumadocs-ui/css/neutral.css";
 @import "fumadocs-ui/css/preset.css";
 
-/* ============================================================
-   DESIGN TOKENS
-   Raw values live here. Tailwind utilities are generated from
-   the @theme block below — so classes like bg-background,
-   text-muted, border-border, from-brand all Just Work.
-   ============================================================ */
-
 :root {
-  /* --- Brand --- */
-  --brand: #5b4cff; /* primary brand — indigo/purple     */
-  --accent: #00d2ff; /* secondary brand — cyan            */
+  --brand: #5b4cff;
+  --accent: #00d2ff;
 
-  /* --- Surfaces --- */
-  --background: #121212; /* page background                   */
-  --logo-bg: #0a0a0a; /* SVG logo rect — slightly darker   */
-  --surface: #181818; /* slightly raised surface (cards)   */
-  --surface-hover: #1e1e1e; /* card / row hover state            */
-  --overlay: #222222; /* modals, dropdowns, tooltips       */
+  --background: #121212;
+  --logo-bg: #0a0a0a;
+  --surface: #181818;
+  --surface-hover: #1e1e1e;
+  --overlay: #222222;
 
-  /* --- Borders --- */
-  --border: #1e1e1e; /* default border / divider          */
-  --border-subtle: #161616; /* very faint rule, barely visible   */
+  --border: #1e1e1e;
+  --border-subtle: #161616;
 
-  /* --- Text --- */
-  --foreground: #ffffff; /* primary text                      */
-  --muted: #c0c0c0; /* secondary / readable dimmed text  */
-  --subtle: #888888; /* tertiary / decorative text        */
+  --foreground: #ffffff;
+  --muted: #c0c0c0;
+  --subtle: #888888;
 
-  /* --- Fumadocs layout override --- */
   --fd-layout-width: 100vw;
 }
 
-/* ============================================================
-   TAILWIND v4 THEME REGISTRATION
-   @theme inline means Tailwind reads the CSS var at runtime
-   rather than baking the hex at build time — so variables
-   remain overridable (e.g. future light mode via data-theme).
-
-   Generated utilities (non-exhaustive):
-
-   Brand
-     text-brand         bg-brand         border-brand
-     text-accent        bg-accent        border-accent
-     from-brand         to-brand         via-brand
-     from-accent        to-accent        via-accent
-
-   Surfaces
-     bg-background      bg-logo-bg
-     bg-surface         bg-surface-hover
-     bg-overlay
-
-   Borders
-     border-border      divide-border    ring-border
-     border-border-subtle
-
-   Text
-     text-foreground
-     text-muted
-     text-subtle
-   ============================================================ */
-
 @theme inline {
-  /* Brand */
   --color-brand: var(--brand);
   --color-accent: var(--accent);
 
-  /* Surfaces */
   --color-background: var(--background);
   --color-logo-bg: var(--logo-bg);
   --color-surface: var(--surface);
   --color-surface-hover: var(--surface-hover);
   --color-overlay: var(--overlay);
 
-  /* Borders */
   --color-border: var(--border);
   --color-border-subtle: var(--border-subtle);
 
-  /* Text */
   --color-foreground: var(--foreground);
   --color-muted: var(--muted);
   --color-subtle: var(--subtle);

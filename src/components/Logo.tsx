@@ -33,12 +33,6 @@ export function Logo() {
           </linearGradient>
         </defs>
 
-        {/*
-          "D" as a path — avoids <text> which is unsupported in Satori.
-          Bounding box: x=12.5–20, y=11–19.5 (7.5px wide, 8.5px tall)
-          Centered in the hexagon (center ≈ 16, 15).
-          fillRule="evenodd": inner sub-path punches the counter hole.
-        */}
         <path
           d="M 12.5,11 H 14.5 Q 20,11 20,15.25 Q 20,19.5 14.5,19.5 H 12.5 Z
              M 14.5,13 Q 18,13 18,15.25 Q 18,17.5 14.5,17.5 Z"

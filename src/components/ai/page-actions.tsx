@@ -7,15 +7,7 @@ import { buttonVariants } from "fumadocs-ui/components/ui/button";
 
 const cache = new Map<string, string>();
 
-export function LLMCopyButton({
-  markdownUrl,
-}: {
-  /**
-   * A URL to fetch the raw Markdown/MDX content of the page.
-   * The button copies that content to the clipboard when clicked.
-   */
-  markdownUrl: string;
-}) {
+export function LLMCopyButton({ markdownUrl }: { markdownUrl: string }) {
   const [isLoading, setLoading] = useState(false);
   const [checked, onClick] = useCopyButton(async () => {
     const cached = cache.get(markdownUrl);
@@ -40,8 +32,6 @@ export function LLMCopyButton({
 
   return (
     <button
-      // type="button" prevents accidental form submission if this button
-      // is ever rendered inside a <form> ancestor (omitting type defaults to "submit")
       type="button"
       disabled={isLoading}
       className={cn(

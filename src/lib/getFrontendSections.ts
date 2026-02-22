@@ -12,16 +12,10 @@ type MetaJson = {
   pages: string[];
 };
 
-/**
- * Reads /content/frontend and builds sections from meta.json files.
- * - Root meta.json pages (excluding "index") = folder names.
- * - Each folder's meta.json: title → label, folder name → slug, pages count (excluding "index") → count.
- */
 export async function getFrontendSections(): Promise<Section[]> {
   const contentDir = path.join(process.cwd(), "content", "frontend");
   const rootMetaPath = path.join(contentDir, "meta.json");
 
-  // Read root meta.json — if this fails the entire content directory is broken
   let rootMeta: MetaJson;
   try {
     const raw = await fs.readFile(rootMetaPath, "utf-8");
@@ -44,8 +38,6 @@ export async function getFrontendSections(): Promise<Section[]> {
       const raw = await fs.readFile(folderMetaPath, "utf-8");
       folderMeta = JSON.parse(raw) as MetaJson;
     } catch (err) {
-      // Warn and skip the section rather than crashing the whole page.
-      // This way a single missing/malformed meta.json doesn't take down the site.
       console.warn(
         `[getFrontendSections] Skipping section "${folderName}" — ` +
           `could not read "${folderMetaPath}": ${err}`,

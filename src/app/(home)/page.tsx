@@ -43,8 +43,6 @@ export default async function HomePage() {
 
   return (
     <main className="min-h-screen bg-background text-foreground font-mono">
-      {/* Sticky nav — border-white/6 gives a semi-transparent rule that reads
-          better than the opaque border-border token against the frosted glass bg */}
       <header className="sticky top-0 z-50 w-full border-b border-white/6 bg-background/80 backdrop-blur-xl backdrop-saturate-150">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3 md:px-6 md:py-4">
           <Logo />
@@ -68,7 +66,6 @@ export default async function HomePage() {
       </header>
 
       <div className="relative max-w-3xl mx-auto px-6 py-6 md:py-24">
-        {/* Hero */}
         <section className="mb-20">
           <p className="text-[10px] text-subtle tracking-[0.3em] uppercase mb-6">
             Frontend Engineering
@@ -95,7 +92,6 @@ export default async function HomePage() {
           {sections.map((section, i) => {
             return (
               <li key={section.slug}>
-                {/* UX #8: bg-surface-hover on hover gives clear row feedback */}
                 <Link
                   href={`/docs/frontend/${section.slug}`}
                   className="group flex items-center justify-between px-2 py-3.5 hover:bg-surface-hover hover:pl-4 transition-all duration-200"
@@ -129,7 +125,6 @@ export default async function HomePage() {
           })}
         </ul>
 
-        {/* Footer */}
         <footer className="border-t border-border mt-20 pt-8 flex items-center justify-between">
           <span className="text-subtle text-[10px] tracking-[0.2em] uppercase">
             Always learning

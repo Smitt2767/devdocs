@@ -4,7 +4,6 @@ import { source } from "@/lib/source";
 export default function sitemap(): MetadataRoute.Sitemap {
   const baseUrl = process.env.NEXT_PUBLIC_SITE_URL!;
 
-  // Home page
   const routes: MetadataRoute.Sitemap = [
     {
       url: baseUrl,
@@ -12,7 +11,6 @@ export default function sitemap(): MetadataRoute.Sitemap {
     },
   ];
 
-  // All documentation pages
   const pages = source.getPages();
 
   for (const page of pages) {

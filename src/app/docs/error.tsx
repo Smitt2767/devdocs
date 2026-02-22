@@ -10,7 +10,6 @@ interface Props {
 
 export default function DocsError({ error, reset }: Props) {
   useEffect(() => {
-    // Log to your error tracking service (e.g. Sentry) here
     console.error("[docs/error]", error);
   }, [error]);
 
