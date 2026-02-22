@@ -1,0 +1,382 @@
+---
+title: Keyboard Navigation Patterns
+description: A practical guide to implementing accessible, standards-compliant keyboard navigation in modern React and Next.js applications.
+---
+
+## Overview
+
+Keyboard navigation lets users interact with your UI using only a keyboard — no mouse required. It's a core pillar of web accessibility (a11y), required by WCAG 2.1, and critical for users who rely on assistive technologies like screen readers, switch devices, or keyboard-only workflows.
+
+If your app can't be navigated without a mouse, it's broken for a meaningful portion of your users — and likely non-compliant with accessibility law in many jurisdictions.
+
+Good keyboard navigation means:
+
+- Every interactive element is reachable via `Tab` / `Shift+Tab`
+- Focus is always visible
+- Widgets like modals, dropdowns, and menus follow established ARIA keyboard interaction patterns
+- Focus is managed programmatically when the UI changes
+
+---
+
+## How It Works
+
+Browsers maintain a **focus ring** — a pointer to the currently active element. Users move this ring by pressing `Tab` (forward) or `Shift+Tab` (backward). The browser's default tab order follows DOM order, which is why logical, semantic HTML is the foundation of accessible keyboard navigation.
+
+Beyond basic tabbing, complex widgets (menus, dialogs, tabs, comboboxes) require **roving tabindex** or **focus trapping** patterns, defined by the [ARIA Authoring Practices Guide (APG)](https://www.w3.org/WAI/ARIA/apg/).
+
+Key browser APIs you'll use:
+
+- `element.focus()` — programmatically move focus
+- `tabIndex` attribute — control whether/where an element appears in tab order
+- `document.activeElement` — read the currently focused element
+- `KeyboardEvent` — listen for `keydown` / `keyup` to handle arrow keys, `Escape`, `Enter`, etc.
+
+<Callout type="info">
+  Native HTML elements (`<button>`, `<a href>`, `<input>`, `<select>`) are keyboard-accessible by default. Use them wherever possible before reaching for `div` + ARIA.
+</Callout>
+
+---
+
+## Code Examples
+
+### 1. Roving Tabindex — Arrow-Key Navigation in a Toolbar
+
+The roving tabindex pattern keeps only one element in the tab sequence at a time. Arrow keys move focus within the group.
+
+```tsx
+// components/Toolbar.tsx
+"use client";
+
+import { useRef, KeyboardEvent } from "react";
+
+const tools = ["Bold", "Italic", "Underline", "Strikethrough"];
+
+export function Toolbar() {
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  // Track which item "owns" the tab stop
+  const focusedIndex = useRef(0);
+
+  function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const total = tools.length;
+
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      focusedIndex.current = (focusedIndex.current + 1) % total;
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      focusedIndex.current = (focusedIndex.current - 1 + total) % total;
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      focusedIndex.current = 0;
+    } else if (event.key === "End") {
+      event.preventDefault();
+      focusedIndex.current = total - 1;
+    } else {
+      return; // don't re-render for unhandled keys
+    }
+
+    itemRefs.current[focusedIndex.current]?.focus();
+  }
+
+  return (
+    <div role="toolbar" aria-label="Text formatting" onKeyDown={handleKeyDown}>
+      {tools.map((tool, index) => (
+        <button
+          key={tool}
+          ref={(el) => {
+            itemRefs.current[index] = el;
+          }}
+          // Only the first item is in the tab sequence initially
+          tabIndex={index === 0 ? 0 : -1}
+          onClick={() => {
+            focusedIndex.current = index;
+          }}
+        >
+          {tool}
+        </button>
+      ))}
+    </div>
+  );
+}
+```
+
+---
+
+### 2. Focus Trap — Keeping Focus Inside a Modal Dialog
+
+When a modal opens, focus must be trapped inside it. When it closes, focus must return to the trigger element.
+
+```tsx
+// components/Modal.tsx
+"use client";
+
+import { useEffect, useRef, RefObject, ReactNode } from "react";
+
+interface ModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  triggerRef: RefObject<HTMLElement>;
+  children: ReactNode;
+}
+
+// All elements that can receive focus
+const FOCUSABLE_SELECTORS =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+export function Modal({ isOpen, onClose, triggerRef, children }: ModalProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isOpen || !dialogRef.current) return;
+
+    const dialog = dialogRef.current;
+    const focusableElements = Array.from(
+      dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTORS),
+    );
+    const firstFocusable = focusableElements[0];
+    const lastFocusable = focusableElements[focusableElements.length - 1];
+
+    // Move focus into the dialog when it opens
+    firstFocusable?.focus();
+
+    function trapFocus(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+        return;
+      }
+
+      if (event.key !== "Tab") return;
+
+      if (event.shiftKey) {
+        // Shift+Tab: if on first element, wrap to last
+        if (document.activeElement === firstFocusable) {
+          event.preventDefault();
+          lastFocusable?.focus();
+        }
+      } else {
+        // Tab: if on last element, wrap to first
+        if (document.activeElement === lastFocusable) {
+          event.preventDefault();
+          firstFocusable?.focus();
+        }
+      }
+    }
+
+    dialog.addEventListener("keydown", trapFocus);
+
+    return () => {
+      dialog.removeEventListener("keydown", trapFocus);
+      // Return focus to the element that opened the modal
+      triggerRef.current?.focus();
+    };
+  }, [isOpen, onClose, triggerRef]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="modal-title"
+      ref={dialogRef}
+      style={{
+        position: "fixed",
+        inset: 0,
+        display: "grid",
+        placeItems: "center",
+        background: "rgba(0,0,0,0.5)",
+      }}
+    >
+      <div>
+        <h2 id="modal-title">Confirm Action</h2>
+        {children}
+        <button onClick={onClose}>Cancel</button>
+        <button onClick={onClose}>Confirm</button>
+      </div>
+    </div>
+  );
+}
+```
+
+```tsx
+// app/page.tsx (Server Component — no 'use client' needed here)
+import { ModalDemo } from "@/components/ModalDemo";
+
+export default function Page() {
+  return <ModalDemo />;
+}
+```
+
+```tsx
+// components/ModalDemo.tsx
+"use client";
+
+import { useRef, useState } from "react";
+import { Modal } from "./Modal";
+
+export function ModalDemo() {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  return (
+    <>
+      <button ref={triggerRef} onClick={() => setOpen(true)}>
+        Delete Account
+      </button>
+      <Modal
+        isOpen={open}
+        onClose={() => setOpen(false)}
+        triggerRef={triggerRef}
+      >
+        <p>This action cannot be undone. Are you sure?</p>
+      </Modal>
+    </>
+  );
+}
+```
+
+---
+
+### 3. Skip Navigation Link
+
+A "skip to main content" link lets keyboard users bypass repeated navigation on every page.
+
+```tsx
+// components/SkipNav.tsx
+// This is a Server Component — no interactivity needed
+export function SkipNav() {
+  return (
+
+      href="#main-content"
+      className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:px-4 focus:py-2 focus:bg-white focus:text-black focus:rounded"
+    >
+      Skip to main content
+    </a>
+  )
+}
+```
+
+```tsx
+// app/layout.tsx
+import { SkipNav } from "@/components/SkipNav";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        <SkipNav />
+        <nav>{/* site navigation */}</nav>
+        <main id="main-content" tabIndex={-1}>
+          {children}
+        </main>
+      </body>
+    </html>
+  );
+}
+```
+
+<Callout type="info">
+  The `tabIndex={-1}` on `<main>` allows it to receive programmatic focus (from the skip link) without inserting it into the natural tab order.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+In a **SaaS dashboard**, your app likely has:
+
+- A top navigation bar with dropdown menus
+- A data table with sortable column headers
+- A modal for editing records
+- A command palette (like `⌘K`) for power users
+
+Without intentional keyboard patterns, a screen reader user lands on your page and can't reach the table's sort buttons, gets trapped outside modals, or loses their place in the page every time a dropdown closes. Applying roving tabindex to the nav, focus trapping to modals, and restoring focus after interactions makes the app fully operable without a mouse — and significantly improves the experience for all keyboard users.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Removing focus styles without a replacement**
+
+```css
+/* ❌ Never do this */
+* {
+  outline: none;
+}
+```
+
+This makes it impossible for keyboard users to see where they are. Use `:focus-visible` to suppress outlines only for mouse clicks while keeping them for keyboard users:
+
+```css
+/* ✅ Correct approach */
+:focus-visible {
+  outline: 2px solid #0070f3;
+  outline-offset: 2px;
+}
+```
+
+---
+
+**2. Using `div` or `span` for interactive elements**
+
+```tsx
+// ❌ Not keyboard accessible — no focus, no Enter/Space handling
+<div onClick={handleDelete}>Delete</div>
+
+// ✅ Use the right element
+<button onClick={handleDelete}>Delete</button>
+```
+
+If you must use a non-semantic element, add `role`, `tabIndex={0}`, and keyboard event handlers — but this is almost always more work than using the correct HTML element.
+
+---
+
+**3. Not restoring focus after UI changes**
+
+When a modal closes, a dropdown collapses, or a panel is removed from the DOM, focus often falls back to `<body>`, disorienting keyboard users. Always track the trigger element and restore focus to it:
+
+```tsx
+// ✅ Store the trigger before opening, restore on close
+const triggerRef = useRef<HTMLButtonElement>(null);
+
+// On close:
+triggerRef.current?.focus();
+```
+
+---
+
+**4. Incorrect tab order due to CSS reordering**
+
+Using `flex-direction: row-reverse`, CSS `order`, or `position: absolute` can visually reorder elements while the DOM (and therefore tab) order stays the same. The visual order and DOM order must match.
+
+<Callout type="warn">
+  WCAG 2.1 Success Criterion 1.3.2 requires that the reading and navigation
+  order match the visual presentation. Mismatches are a real accessibility
+  failure, not just a minor issue.
+</Callout>
+
+---
+
+**5. Forgetting `aria-expanded`, `aria-haspopup`, and state attributes**
+
+Keyboard interaction alone isn't enough — screen readers need ARIA attributes to announce the current state of widgets:
+
+```tsx
+<button
+  aria-haspopup="menu"
+  aria-expanded={isOpen}
+  onClick={() => setIsOpen(!isOpen)}
+>
+  Options
+</button>
+```
+
+---
+
+## Summary
+
+Keyboard navigation is not an optional enhancement — it's a baseline accessibility requirement. Use native HTML elements wherever possible, since they come with keyboard support built in. For complex widgets like toolbars, menus, and dialogs, follow the ARIA APG patterns: roving tabindex for arrow-key navigation, focus trapping for modal dialogs, and programmatic focus restoration after UI transitions. Always keep focus visible and ensure your visual order matches your DOM order. Getting these patterns right benefits not just assistive technology users, but all keyboard-proficient developers and power users of your app.

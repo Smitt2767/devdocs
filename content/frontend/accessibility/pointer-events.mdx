@@ -1,0 +1,283 @@
+---
+title: Pointer Events
+description: A comprehensive guide to the Pointer Events API for handling mouse, touch, and stylus input in modern web applications.
+---
+
+## Overview
+
+The Pointer Events API is a unified input model that handles mouse, touch, and stylus interactions through a single set of events. Instead of juggling `mousedown`, `touchstart`, and vendor-prefixed stylus events separately, you write one handler that works across all input types.
+
+This matters because modern devices blur the line between pointer types — a laptop can have a touchscreen, a tablet can have a stylus and a mouse. The Pointer Events API gives you a single, consistent way to respond to all of them, with extra metadata (pressure, tilt, contact geometry) when the hardware supports it.
+
+## How It Works
+
+Every pointer interaction — whether from a finger, mouse, or pen — fires a `PointerEvent`. This extends the base `MouseEvent`, so properties like `clientX`, `clientY`, and `button` still work exactly as you'd expect.
+
+Each event carries a `pointerType` property (`"mouse"`, `"touch"`, or `"pen"`) so you can branch behavior when needed. Every active pointer also gets a unique `pointerId`, which lets you track multiple simultaneous touches independently.
+
+Think of it like a universal adapter: the underlying hardware sends its signal, the browser normalizes it into a `PointerEvent`, and your handler receives a clean, consistent object regardless of the input source.
+
+**Core events:**
+
+| Event                                      | Fires when...                                                   |
+| ------------------------------------------ | --------------------------------------------------------------- |
+| `pointerdown`                              | A pointer makes contact with the element                        |
+| `pointermove`                              | A pointer moves while over or captured by the element           |
+| `pointerup`                                | A pointer is released                                           |
+| `pointerenter` / `pointerleave`            | A pointer enters or leaves the element boundary                 |
+| `pointercancel`                            | The browser cancels a pointer interaction (e.g., scroll starts) |
+| `gotpointercapture` / `lostpointercapture` | Pointer capture is acquired or released                         |
+
+### Pointer Capture
+
+Pointer capture is one of the most powerful (and underused) features. Calling `element.setPointerCapture(pointerId)` routes all future events from that pointer to your element — even if the pointer moves outside it. This is essential for drag interactions.
+
+## Code Examples
+
+### Basic Multi-Input Drawing Canvas
+
+```tsx
+"use client";
+
+import { useRef } from "react";
+
+export default function DrawingCanvas() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Track active strokes by pointerId so multi-touch works correctly
+  const activeStrokes = useRef<Map<number, { x: number; y: number }>>(
+    new Map(),
+  );
+
+  function getContext() {
+    const canvas = canvasRef.current;
+    return canvas?.getContext("2d") ?? null;
+  }
+
+  function handlePointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    // Capture this pointer so we keep receiving events even if the
+    // cursor/finger moves outside the canvas boundary
+    canvas.setPointerCapture(e.pointerId);
+
+    const rect = canvas.getBoundingClientRect();
+    activeStrokes.current.set(e.pointerId, {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    });
+  }
+
+  function handlePointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
+    const ctx = getContext();
+    const canvas = canvasRef.current;
+    if (!ctx || !canvas) return;
+
+    const stroke = activeStrokes.current.get(e.pointerId);
+    if (!stroke) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    ctx.beginPath();
+    ctx.moveTo(stroke.x, stroke.y);
+    ctx.lineTo(x, y);
+
+    // Use pressure for line width when the hardware supports it (pen/touch).
+    // Mouse always reports pressure of 0.5, so we fall back to a fixed width.
+    ctx.lineWidth = e.pointerType === "mouse" ? 2 : e.pressure * 8;
+    ctx.lineCap = "round";
+    ctx.strokeStyle = e.pointerType === "pen" ? "#0ea5e9" : "#111827";
+    ctx.stroke();
+
+    // Update the last known position for this pointer
+    activeStrokes.current.set(e.pointerId, { x, y });
+  }
+
+  function handlePointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
+    activeStrokes.current.delete(e.pointerId);
+  }
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={800}
+      height={500}
+      className="border border-gray-200 rounded-lg touch-none"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      // Also clean up if the browser cancels the pointer (e.g., scroll gesture)
+      onPointerCancel={handlePointerUp}
+    />
+  );
+}
+```
+
+<Callout type="warn">
+  Always add `touch-action: none` (or the Tailwind class `touch-none`) to
+  elements that handle pointer events manually. Without it, the browser may
+  intercept touch gestures (like scrolling) and fire `pointercancel` before your
+  handler gets meaningful data.
+</Callout>
+
+### Draggable Element with Pointer Capture
+
+```tsx
+"use client";
+
+import { useRef, useState } from "react";
+
+export default function DraggableCard() {
+  const cardRef = useRef<HTMLDivElement>(null);
+  const dragState = useRef<{
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+  } | null>(null);
+  const [position, setPosition] = useState({ x: 0, y: 0 });
+
+  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    // Only drag on primary button (left mouse / single finger / pen tip)
+    if (!e.isPrimary) return;
+
+    cardRef.current?.setPointerCapture(e.pointerId);
+
+    dragState.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      originX: position.x,
+      originY: position.y,
+    };
+  }
+
+  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (!dragState.current) return;
+
+    const dx = e.clientX - dragState.current.startX;
+    const dy = e.clientY - dragState.current.startY;
+
+    setPosition({
+      x: dragState.current.originX + dx,
+      y: dragState.current.originY + dy,
+    });
+  }
+
+  function handlePointerUp() {
+    dragState.current = null;
+  }
+
+  return (
+    <div
+      ref={cardRef}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      style={{ transform: `translate(${position.x}px, ${position.y}px)` }}
+      className="w-48 p-4 bg-white rounded-xl shadow-lg cursor-grab active:cursor-grabbing select-none touch-none"
+    >
+      Drag me anywhere
+    </div>
+  );
+}
+```
+
+### Reading Pen/Stylus Metadata
+
+```tsx
+"use client";
+
+import { useState } from "react";
+
+interface PenStats {
+  pressure: number;
+  tiltX: number;
+  tiltY: number;
+  twist: number;
+  width: number;
+  height: number;
+}
+
+export default function PenDebugger() {
+  const [stats, setStats] = useState<PenStats | null>(null);
+
+  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.pointerType !== "pen") return;
+
+    setStats({
+      pressure: e.pressure, // 0–1, how hard the pen is pressed
+      tiltX: e.tiltX, // –90 to 90 degrees from vertical (X axis)
+      tiltY: e.tiltY, // –90 to 90 degrees from vertical (Y axis)
+      twist: e.twist, // 0–359 degrees rotation around its own axis
+      width: e.width, // contact area width in CSS pixels
+      height: e.height, // contact area height in CSS pixels
+    });
+  }
+
+  return (
+    <div
+      className="w-full h-64 border-2 border-dashed border-gray-300 rounded-lg flex items-center justify-center touch-none"
+      onPointerMove={handlePointerMove}
+    >
+      {stats ? (
+        <pre className="text-sm text-gray-700">
+          {JSON.stringify(stats, null, 2)}
+        </pre>
+      ) : (
+        <p className="text-gray-400">Move a stylus over this area</p>
+      )}
+    </div>
+  );
+}
+```
+
+## Real-World Use Cases
+
+**Signature pad** — A legal or fintech app needs users to sign documents on a tablet. Using `pointerdown`/`pointermove` with `setPointerCapture` and pressure data from a stylus produces smooth, realistic signatures that work equally well with a finger or mouse on devices without a pen.
+
+**Whiteboard / collaborative canvas** — A design tool like an online whiteboard needs to support multiple simultaneous touch points (two-finger zoom, each user drawing at once). The `pointerId` system makes tracking each contact trivial — no index juggling like with the Touch Events API.
+
+**Custom drag-and-drop** — When the native HTML Drag and Drop API is too constrained (no touch support, limited visual control), building drag with Pointer Events gives you consistent behavior across desktop and mobile without a library.
+
+**Game controls** — A browser game that needs analog input (how hard is the player pressing?) or pen tilt for aiming can read `pressure` and `tiltX`/`tiltY` directly from `PointerEvent`.
+
+## Common Mistakes / Gotchas
+
+### 1. Forgetting `touch-action: none`
+
+If you don't disable the browser's default touch handling, the browser may scroll or zoom instead of forwarding pointer events to your handler. Worse, it may fire `pointercancel` mid-gesture, silently killing your interaction. Always set `touch-action: none` on interactive elements that manage their own pointer input.
+
+```css
+.interactive-element {
+  touch-action: none; /* disable browser pan/zoom so pointer events fire cleanly */
+}
+```
+
+### 2. Not using `setPointerCapture` for drag interactions
+
+Without pointer capture, `pointermove` events stop firing the moment the pointer leaves the element boundary. Users who drag quickly will "drop" their element mid-gesture. Always call `setPointerCapture(e.pointerId)` in your `pointerdown` handler for any drag or drawing scenario.
+
+### 3. Treating all pointers as primary
+
+When multiple fingers are on screen, only the first is `isPrimary === true`. If your handler unconditionally reads `e.clientX` without checking `pointerId`, simultaneous touches will corrupt each other's state. Use a `Map<number, ...>` keyed by `pointerId` to track each pointer independently.
+
+### 4. Assuming `pressure` is accurate for all devices
+
+A mouse always reports `pressure` as `0.5` when a button is held and `0` otherwise — it cannot actually measure pressure. Only genuine pen and touch hardware provides meaningful pressure values. Gate pressure-sensitive behavior on `e.pointerType !== 'mouse'` or check if `e.pressure > 0 && e.pointerType === 'pen'`.
+
+### 5. Ignoring `pointercancel`
+
+The browser fires `pointercancel` when it takes over — for example, a system gesture interrupts your interaction. If you only listen for `pointerup`, leaked state (active strokes, drag positions) will accumulate. Always handle `pointercancel` the same way you handle `pointerup`.
+
+<Callout type="info">
+  The Pointer Events API is supported in all modern browsers (Chrome, Firefox,
+  Safari, Edge). Safari added full support in version 13. You don't need a
+  polyfill for any current browser target.
+</Callout>
+
+## Summary
+
+The Pointer Events API unifies mouse, touch, and stylus input into a single, consistent event model — eliminating the need to maintain separate `mouse*` and `touch*` handlers. Each pointer gets a unique `pointerId` for independent multi-touch tracking, and hardware metadata like `pressure`, `tiltX`, and `tiltY` is available when the device supports it. Pointer capture (`setPointerCapture`) is critical for robust drag and drawing interactions, ensuring events continue firing even when the pointer leaves the element. Always pair pointer event listeners with `touch-action: none` to prevent the browser from intercepting gestures before your handlers can process them. Together, these features give you a production-grade input system that works across every modern device and input method.

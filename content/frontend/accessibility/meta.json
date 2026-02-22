@@ -1,1 +1,11 @@
-{ "title": "Accessibility", "pages": [] }
+{
+  "title": "Accessibility",
+  "pages": [
+    "accessibility-tree",
+    "aria-live-regions-internals",
+    "pointer-events",
+    "focus-management-in-spas",
+    "keyboard-navigation-patterns",
+    "color-contrast-reduced-motion"
+  ]
+}

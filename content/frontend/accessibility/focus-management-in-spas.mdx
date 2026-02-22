@@ -1,0 +1,316 @@
+---
+title: Focus Management in SPAs
+description: How to correctly manage keyboard focus during client-side navigation and dynamic UI changes in Single Page Applications.
+---
+
+## Overview
+
+In traditional multi-page apps, the browser resets focus to the top of the document on every page load. In a Single Page Application (SPA), navigation happens without a full page reload — so the browser never resets focus automatically. This breaks keyboard and screen reader navigation silently: a user activates a link, the URL changes, new content renders, but focus stays stuck on the element they just clicked.
+
+Focus management is the practice of deliberately moving focus to the right place after route changes, modal opens/closes, dynamic content insertions, and async data loads. Getting it wrong makes your app inaccessible to keyboard-only users and assistive technology users.
+
+## How It Works
+
+The browser tracks a single "focused element" at all times via the DOM. JavaScript can move focus programmatically using `element.focus()`. The challenge in SPAs is knowing _when_ and _where_ to move it.
+
+Three situations require explicit focus management:
+
+1. **Route changes** — move focus to the new page's heading or a landmark region so screen readers announce the new content.
+2. **Modal / dialog open** — trap focus inside the dialog; return focus to the trigger element when it closes.
+3. **Dynamic content** — after an async action (form submit, search results), move focus to the result or a status message.
+
+React doesn't handle any of this for you by default. You use `useRef` to hold a reference to the target element and `useEffect` (or a framework router callback) to trigger `.focus()` after the DOM has updated.
+
+## Code Examples
+
+### 1. Route Change Focus Management (Next.js App Router)
+
+Next.js App Router does not automatically manage focus on navigation. A common pattern is to render a visually hidden "skip target" heading at the top of each page and focus it after navigation.
+
+```tsx
+// components/RouteAnnouncer.tsx
+"use client";
+
+import { useEffect, useRef } from "react";
+import { usePathname } from "next/navigation";
+
+export function RouteAnnouncer() {
+  const pathname = usePathname();
+  const headingRef = useRef<HTMLHeadingElement>(null);
+
+  useEffect(() => {
+    // Focus the heading whenever the route changes
+    headingRef.current?.focus();
+  }, [pathname]);
+
+  return (
+    <h1
+      ref={headingRef}
+      // tabIndex={-1} makes a non-interactive element programmatically focusable
+      tabIndex={-1}
+      // Visually hide but keep accessible to screen readers
+      className="sr-only"
+    >
+      {/* Each page layout renders its own visible h1; this one is for focus only */}
+      Page navigation complete
+    </h1>
+  );
+}
+```
+
+```tsx
+// app/layout.tsx
+import { RouteAnnouncer } from "@/components/RouteAnnouncer";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        <RouteAnnouncer />
+        <main id="main-content">{children}</main>
+      </body>
+    </html>
+  );
+}
+```
+
+<Callout type="info">
+  The `sr-only` Tailwind class (or equivalent CSS) hides the element visually
+  while keeping it in the accessibility tree. Never use `display: none` or
+  `visibility: hidden` on elements you need screen readers to announce — those
+  remove them from the tree entirely.
+</Callout>
+
+---
+
+### 2. Modal Focus Trap
+
+When a modal opens, focus must move inside it. When it closes, focus must return to the element that opened it.
+
+```tsx
+// components/Modal.tsx
+"use client";
+
+import { useEffect, useRef } from "react";
+
+interface ModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  triggerRef: React.RefObject<HTMLElement>;
+  children: React.ReactNode;
+}
+
+export function Modal({ isOpen, onClose, triggerRef, children }: ModalProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+
+    // Move focus into the modal when it opens
+    const firstFocusable = dialog.querySelector<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    firstFocusable?.focus();
+
+    // Trap focus within the modal
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+
+      if (e.key !== "Tab") return;
+
+      const focusableElements = dialog!.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      const first = focusableElements[0];
+      const last = focusableElements[focusableElements.length - 1];
+
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, onClose]);
+
+  useEffect(() => {
+    // Return focus to the trigger when the modal closes
+    if (!isOpen) {
+      triggerRef.current?.focus();
+    }
+  }, [isOpen, triggerRef]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      ref={dialogRef}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+    >
+      <div className="rounded-lg bg-white p-6 shadow-xl">
+        {children}
+        <button
+          onClick={onClose}
+          className="mt-4 rounded bg-gray-200 px-4 py-2"
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+```tsx
+// app/products/page.tsx
+"use client";
+
+import { useRef, useState } from "react";
+import { Modal } from "@/components/Modal";
+
+export default function ProductsPage() {
+  const [isOpen, setIsOpen] = useState(false);
+  // Hold a ref to the trigger so focus returns to it on close
+  const openButtonRef = useRef<HTMLButtonElement>(null);
+
+  return (
+    <main>
+      <h1>Products</h1>
+      <button ref={openButtonRef} onClick={() => setIsOpen(true)}>
+        View product details
+      </button>
+
+      <Modal
+        isOpen={isOpen}
+        onClose={() => setIsOpen(false)}
+        triggerRef={openButtonRef}
+      >
+        <h2>Product Details</h2>
+        <p>This is a size 12 running shoe.</p>
+      </Modal>
+    </main>
+  );
+}
+```
+
+---
+
+### 3. Focus After Async Action (Form Submit)
+
+After a form submission, focus should move to a success or error message so the user gets feedback without hunting for it.
+
+```tsx
+// components/ContactForm.tsx
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+export function ContactForm() {
+  const [status, setStatus] = useState<"idle" | "success" | "error">("idle");
+  const statusRef = useRef<HTMLParagraphElement>(null);
+
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget);
+
+    try {
+      await fetch("/api/contact", { method: "POST", body: formData });
+      setStatus("success");
+    } catch {
+      setStatus("error");
+    }
+  }
+
+  useEffect(() => {
+    // After status changes, move focus to the feedback message
+    if (status !== "idle") {
+      statusRef.current?.focus();
+    }
+  }, [status]);
+
+  return (
+    <form onSubmit={handleSubmit} noValidate>
+      <label htmlFor="email">Email</label>
+      <input id="email" name="email" type="email" required />
+
+      <button type="submit">Send message</button>
+
+      {status !== "idle" && (
+        <p
+          ref={statusRef}
+          tabIndex={-1} // Required so a <p> can receive programmatic focus
+          role="status" // Announces to screen readers as a live region
+          className={status === "success" ? "text-green-700" : "text-red-700"}
+        >
+          {status === "success"
+            ? "Your message was sent successfully."
+            : "Something went wrong. Please try again."}
+        </p>
+      )}
+    </form>
+  );
+}
+```
+
+## Real-World Use Case
+
+In an e-commerce checkout flow, a user tabs through the cart summary and activates "Proceed to payment." The route changes to `/checkout/payment`. Without focus management, a screen reader user hears nothing — focus stays on the now-gone "Proceed" button in the previous route's DOM. With a `RouteAnnouncer`, the screen reader immediately announces the new page, and the user can start tabbing through the payment form fields.
+
+Similarly, when the user submits a promo code and it fails, moving focus to the inline error message means they don't have to navigate the entire form again to discover what went wrong.
+
+## Common Mistakes / Gotchas
+
+**1. Calling `.focus()` before the DOM updates**
+
+Triggering focus synchronously inside an event handler means the target element may not exist yet. Always use `useEffect` to defer focus until after React has committed the new render to the DOM.
+
+```tsx
+// ❌ Wrong — element may not be mounted yet
+function handleOpen() {
+  setIsOpen(true);
+  modalRef.current?.focus(); // modalRef.current is still null here
+}
+
+// ✅ Correct — useEffect runs after the DOM update
+useEffect(() => {
+  if (isOpen) modalRef.current?.focus();
+}, [isOpen]);
+```
+
+**2. Forgetting `tabIndex={-1}` on non-interactive elements**
+
+Only natively interactive elements (buttons, inputs, links) are focusable by default. Calling `.focus()` on a `<div>`, `<p>`, or `<h1>` does nothing unless you add `tabIndex={-1}`. This attribute makes the element programmatically focusable without adding it to the natural tab order.
+
+**3. Not returning focus after a modal closes**
+
+Moving focus into a modal on open is half the job. Forgetting to return focus to the trigger element on close leaves keyboard users stranded — their position in the page is lost and they must navigate from the top.
+
+**4. Relying solely on `aria-live` regions instead of moving focus**
+
+`aria-live` regions announce content changes passively and are good for non-critical updates (e.g., a shopping cart count). They are not a replacement for focus management after route changes or modal interactions, where the user's explicit context has changed.
+
+<Callout type="warn">
+  Never move focus on every render or in response to events the user didn't
+  initiate (e.g., auto-advancing carousels). Unexpected focus jumps are highly
+  disorienting and violate WCAG 2.4.3 (Focus Order).
+</Callout>
+
+## Summary
+
+SPAs break the browser's default focus reset behavior, making explicit focus management mandatory for accessible navigation. After route changes, move focus to a landmark or heading that announces the new page. For modals, trap focus inside on open and return it to the trigger on close. After async actions like form submissions, move focus to the feedback element. Always use `tabIndex={-1}` to make non-interactive elements focusable, and always trigger `.focus()` inside `useEffect` to ensure the DOM is ready.

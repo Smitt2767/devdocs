@@ -1,0 +1,284 @@
+---
+title: Accessibility Tree
+description: An overview of the accessibility tree, how browsers construct it, and how to write markup that produces a correct, navigable tree for assistive technologies.
+---
+
+## Overview
+
+Every time a browser parses your HTML it builds two parallel structures: the DOM tree you already know, and a second structure called the **accessibility tree**. Screen readers, voice-control software, and other assistive technologies (AT) never read the DOM directly — they query this second tree through a platform-level API (MSAA, UI Automation, AX API, ATK/AT-SPI depending on the OS).
+
+If your accessibility tree is wrong, broken, or empty in the wrong places, AT users may receive no information at all about parts of your interface — even when the visual UI looks perfect.
+
+Understanding the accessibility tree is the foundation of every other accessibility practice: ARIA, focus management, live regions, and keyboard navigation all work by shaping what ends up in this tree.
+
+## How It Works
+
+The browser derives the accessibility tree from the DOM, but the two are not identical.
+
+1. **Mapping** — Each DOM element is mapped to an _accessible object_ using the browser's built-in role mapping. `<button>` becomes a node with role `button`, `<nav>` becomes `navigation`, `<div>` and `<span>` are typically **pruned** (given role `none` / `presentation`) unless they receive a focusable attribute or an explicit ARIA role.
+
+2. **Pruning** — Elements that are hidden (`display: none`, `visibility: hidden`, `hidden` attribute, or `aria-hidden="true"`) are removed from the tree entirely. This is intentional — AT should not announce content the visual user cannot see.
+
+3. **Accessible name computation** — Each node in the tree gets a _computed accessible name_ resolved in a defined priority order:
+   - `aria-labelledby` (references another element's text)
+   - `aria-label` (inline string)
+   - Native labelling (`<label for="…">`, `<caption>`, `alt`, `title`, `<figcaption>`)
+   - Text content of the element itself
+
+4. **Role, state, and properties** — Nodes also carry semantic state (`aria-expanded`, `aria-checked`, `aria-disabled`, `aria-live`, etc.) that AT announces to the user in real time.
+
+Think of the DOM as source code and the accessibility tree as the compiled output that assistive technologies actually execute against.
+
+<Callout type="info">
+  You can inspect the live accessibility tree in Chrome DevTools → Elements
+  panel → **Accessibility** tab, or in Firefox via the Accessibility panel. Both
+  show the computed role, name, and state for any selected node.
+</Callout>
+
+## Code Examples
+
+### 1. A button with a correct accessible name
+
+```tsx
+// app/components/IconButton.tsx
+// 'use client' is NOT needed — this is a pure Server Component.
+
+export function DeleteButton({ productName }: { productName: string }) {
+  return (
+    /*
+     * aria-label gives the button an accessible name when its visible
+     * content is only an icon. Without this, a screen reader would
+     * announce "button" with no further context.
+     */
+    <button
+      type="button"
+      aria-label={`Delete ${productName}`}
+      className="icon-btn"
+    >
+      {/* SVG is decorative; aria-hidden removes it from the tree */}
+      <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
+        <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" />
+      </svg>
+    </button>
+  );
+}
+```
+
+### 2. A custom disclosure widget with correct ARIA state
+
+```tsx
+// app/components/Disclosure.tsx
+"use client";
+
+import { useState } from "react";
+
+export function Disclosure({
+  summary,
+  children,
+}: {
+  summary: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div>
+      <button
+        type="button"
+        /*
+         * aria-expanded communicates open/closed state to the
+         * accessibility tree without requiring the AT to infer it
+         * from visual styles.
+         */
+        aria-expanded={open}
+        /*
+         * aria-controls ties this button to the region it governs.
+         * Some AT use this relationship to jump directly to the content.
+         */
+        aria-controls="disclosure-panel"
+        onClick={() => setOpen((prev) => !prev)}
+      >
+        {summary}
+      </button>
+
+      <div
+        id="disclosure-panel"
+        /*
+         * aria-hidden removes the panel from the tree when collapsed,
+         * preventing AT from reading off-screen content.
+         */
+        aria-hidden={!open}
+        hidden={!open}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+```
+
+### 3. A live region that announces async updates
+
+```tsx
+// app/components/SaveStatus.tsx
+"use client";
+
+import { useEffect, useState } from "react";
+
+export function SaveStatus({ isSaving }: { isSaving: boolean }) {
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    if (isSaving) {
+      setMessage("Saving…");
+    } else {
+      setMessage("All changes saved.");
+    }
+  }, [isSaving]);
+
+  return (
+    /*
+     * role="status" is a polite live region. The browser pushes text
+     * changes inside this element into the accessibility tree and AT
+     * announces them without interrupting the user's current focus.
+     *
+     * aria-live="polite" is equivalent; role="status" is preferred
+     * because it also carries semantic meaning.
+     */
+    <p role="status" aria-live="polite" className="sr-only">
+      {message}
+    </p>
+  );
+}
+```
+
+### 4. Hiding decorative elements and exposing meaningful ones
+
+```tsx
+// app/components/ProductCard.tsx
+
+export function ProductCard({
+  name,
+  price,
+  badge,
+}: {
+  name: string;
+  price: string;
+  badge?: string;
+}) {
+  return (
+    <article aria-label={`${name}, ${price}`}>
+      {badge && (
+        /*
+         * The badge is meaningful content — do NOT use aria-hidden here.
+         * It will appear in the tree as a text node inside the article.
+         */
+        <span className="badge">{badge}</span>
+      )}
+
+      {/*
+       * The product image conveys information; alt text is required.
+       * An empty alt="" would remove it from the tree entirely, which
+       * is wrong when the image is the primary content identifier.
+       */}
+      <img src={`/products/${name}.webp`} alt={name} />
+
+      <p>{price}</p>
+
+      {/*
+       * Decorative divider — no semantic value, so aria-hidden keeps
+       * the tree clean.
+       */}
+      <hr aria-hidden="true" />
+    </article>
+  );
+}
+```
+
+## Real-World Use Case
+
+In an e-commerce checkout flow you have a multi-step form. Each step is conditionally rendered and the visible step heading changes as the user progresses. Without live-region or focus management, a screen reader user submits step 1, the DOM updates silently, and they have no idea they are now on step 2.
+
+By moving focus programmatically to the new step's `<h2>` (using a `ref` and `.focus()`) or by placing the heading inside a `role="status"` container, the AT reads the new heading automatically. The accessibility tree is the mechanism that makes this announcement possible — focus movement and live regions both operate by pushing updates through it.
+
+## Common Mistakes / Gotchas
+
+**1. Using `aria-hidden="true"` on a focusable element**
+
+```tsx
+// ❌ Wrong — the element is hidden from AT but still reachable by keyboard
+<button aria-hidden="true">Close</button>
+
+// ✅ Correct — remove from tab order too, or don't hide it at all
+<button aria-hidden="true" tabIndex={-1}>Close</button>
+```
+
+If a keyboard user tabs to an element that is `aria-hidden`, their screen reader announces nothing. This is a WCAG 2.1 failure (1.3.1).
+
+---
+
+**2. Overusing `role="presentation"` or `aria-hidden` on wrapper divs**
+
+Developers sometimes mass-apply `aria-hidden` to layout wrappers to "clean up" the tree. This strips out all descendant content — including interactive children — from the accessibility tree entirely.
+
+<Callout type="warn">
+  `aria-hidden="true"` is inherited by **all descendants**. If any focusable
+  element is inside that subtree, it becomes unreachable to AT even though a
+  keyboard user can still focus it.
+</Callout>
+
+---
+
+**3. Relying on placeholder text as the accessible name of an input**
+
+```tsx
+// ❌ Wrong — placeholder disappears on input and is not a proper accessible name
+<input type="email" placeholder="Email address" />
+
+// ✅ Correct — visible label associated with the input
+<label htmlFor="email">Email address</label>
+<input id="email" type="email" placeholder="you@example.com" />
+```
+
+Placeholder text has a low-contrast default and is not reliably exposed as the accessible name in all AT/browser combinations.
+
+---
+
+**4. Recreating native semantics with ARIA instead of HTML**
+
+```tsx
+// ❌ Fragile — you must now reimplement click, keyboard, and focus behaviour manually
+<div role="button" tabIndex={0} onClick={handleClick}>Submit</div>
+
+// ✅ Correct — the browser provides all expected behaviour for free
+<button type="button" onClick={handleClick}>Submit</button>
+```
+
+The first rule of ARIA: don't use ARIA if a native HTML element provides the same semantics.
+
+---
+
+**5. Creating dynamic content without updating the tree**
+
+When you conditionally render an error message below an input after validation, the node appears in the DOM but AT may not announce it unless you either move focus to it or associate it with the input via `aria-describedby`.
+
+```tsx
+// ✅ Associate the error with the input so AT reads it on focus
+<input
+  id="card-number"
+  type="text"
+  aria-describedby={error ? "card-error" : undefined}
+  aria-invalid={!!error}
+/>;
+{
+  error && (
+    <p id="card-error" role="alert">
+      {error}
+    </p>
+  );
+}
+```
+
+## Summary
+
+The accessibility tree is a parallel representation of your UI that assistive technologies query instead of the DOM. Browsers build it automatically from semantic HTML, but custom components, ARIA misuse, and careless `aria-hidden` usage can corrupt it. Every interactive element needs a computable accessible name, a correct role, and accurate state exposed through the tree. Use browser DevTools to inspect the live tree during development — it is the fastest way to catch issues before they reach users. Prefer semantic HTML over ARIA; reach for ARIA only to fill gaps the native elements cannot cover.

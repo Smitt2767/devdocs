@@ -1,0 +1,277 @@
+---
+title: Color Contrast & Motion
+description: How to implement accessible color contrast and respect user motion preferences using CSS and React.
+---
+
+## Overview
+
+Accessibility in UI development covers more than screen readers. Two of the most impactful — and commonly skipped — areas are:
+
+- **Color contrast**: ensuring text and UI elements are readable for users with low vision or color blindness.
+- **Motion sensitivity**: respecting the operating system preference `prefers-reduced-motion` for users who experience nausea, vertigo, or seizures from on-screen animations.
+
+Both are covered by WCAG 2.1 guidelines and are testable with browser dev tools today.
+
+---
+
+## How It Works
+
+### Color Contrast
+
+The WCAG contrast ratio is calculated between a foreground and background color. The minimum ratios are:
+
+- **4.5:1** for normal text (Level AA)
+- **3:1** for large text (18pt / 14pt bold) and UI components (Level AA)
+- **7:1** for enhanced readability (Level AAA)
+
+Browsers don't enforce this — it's your responsibility. Tools like the Chrome DevTools color picker, Figma's contrast plugin, or libraries like `colorjs.io` can calculate ratios programmatically.
+
+### `prefers-reduced-motion`
+
+This is a CSS media query that reflects the user's OS-level "Reduce Motion" setting (available on macOS, iOS, Windows, and Android). When enabled, your UI should either remove animations entirely or replace them with simpler cross-fades or instant transitions.
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  /* Override or remove animations here */
+}
+```
+
+In JavaScript and React, you can read this preference via `window.matchMedia`.
+
+---
+
+## Code Examples
+
+### 1. CSS: Globally Respecting Reduced Motion
+
+Add this near the top of your global stylesheet. It acts as a safe baseline — animations still work for users who haven't set a preference.
+
+```css
+/* globals.css */
+
+/* Base animation for all users */
+.card {
+  transition:
+    transform 0.3s ease,
+    opacity 0.3s ease;
+}
+
+.card:hover {
+  transform: translateY(-4px);
+}
+
+/* Override for users who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    transition: opacity 0.15s ease; /* Keep a subtle fade, remove the transform */
+  }
+
+  .card:hover {
+    transform: none; /* Remove the lift effect entirely */
+  }
+}
+```
+
+<Callout type="tip">
+  Prefer `prefers-reduced-motion: reduce` over `no-preference`. You want to opt
+  **in** to reduced motion, not opt out of it.
+</Callout>
+
+---
+
+### 2. React Hook: Reading Motion Preference at Runtime
+
+```tsx
+// hooks/useReducedMotion.ts
+import { useEffect, useState } from "react";
+
+export function useReducedMotion(): boolean {
+  const [reducedMotion, setReducedMotion] = useState(false);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+    // Set initial value
+    setReducedMotion(mediaQuery.matches);
+
+    // Update if the user changes their OS setting while the tab is open
+    const handleChange = (event: MediaQueryListEvent) => {
+      setReducedMotion(event.matches);
+    };
+
+    mediaQuery.addEventListener("change", handleChange);
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, []);
+
+  return reducedMotion;
+}
+```
+
+```tsx
+// components/AnimatedBanner.tsx
+"use client";
+
+import { useReducedMotion } from "@/hooks/useReducedMotion";
+
+export function AnimatedBanner() {
+  const reducedMotion = useReducedMotion();
+
+  return (
+    <div
+      style={{
+        // Use a simple fade if motion is reduced, otherwise use a slide-in
+        animation: reducedMotion
+          ? "fadeIn 0.2s ease"
+          : "slideInFromBottom 0.5s cubic-bezier(0.16, 1, 0.3, 1)",
+      }}
+    >
+      Welcome back!
+    </div>
+  );
+}
+```
+
+---
+
+### 3. Checking Color Contrast Programmatically
+
+Use `colorjs.io` to validate contrast ratios in tests or Storybook.
+
+```bash
+npm install colorjs.io
+```
+
+```ts
+// utils/checkContrast.ts
+import Color from "colorjs.io";
+
+export function getContrastRatio(
+  foreground: string,
+  background: string,
+): number {
+  const fg = new Color(foreground);
+  const bg = new Color(background);
+  // contrast() returns the WCAG 2.1 contrast ratio
+  return Math.abs(fg.contrast(bg, "WCAG21"));
+}
+
+export function meetsWCAGAA(
+  foreground: string,
+  background: string,
+  largeText = false,
+): boolean {
+  const ratio = getContrastRatio(foreground, background);
+  return largeText ? ratio >= 3 : ratio >= 4.5;
+}
+
+// Example usage
+const passes = meetsWCAGAA("#6b7280", "#ffffff"); // gray-500 on white
+console.log(passes); // false — gray-500 on white is only ~4.48:1, borderline
+```
+
+<Callout type="warn">
+  Gray text on white backgrounds is one of the most common contrast failures in
+  production UIs. Always verify with a contrast checker before shipping.
+  `gray-500` (`#6b7280`) on white fails WCAG AA for body text.
+</Callout>
+
+---
+
+### 4. Tailwind CSS: Motion-Safe and Motion-Reduce Variants
+
+Tailwind ships with built-in variants for this:
+
+```tsx
+// A button that animates on hover only for users without motion sensitivity
+export function PulseButton() {
+  return (
+    <button
+      className="
+        bg-blue-600 text-white px-4 py-2 rounded-lg
+        motion-safe:hover:animate-pulse
+        motion-reduce:transition-none
+      "
+    >
+      Subscribe
+    </button>
+  );
+}
+```
+
+- `motion-safe:` — applies styles **only when** the user has no reduced-motion preference
+- `motion-reduce:` — applies styles **only when** the user prefers reduced motion
+
+<Callout type="tip">
+  Prefer `motion-safe:` over `motion-reduce:`. Design your default state as
+  reduced, and layer in motion as an enhancement rather than stripping it out
+  reactively.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+**E-commerce product page with an "Add to Cart" confirmation animation:**
+
+When a user adds an item to their cart, you want a satisfying bounce or slide animation to confirm the action. But for a user with vestibular disorders, that animation could cause real physical discomfort.
+
+Using `useReducedMotion`, you can swap the bounce animation for a simple color flash or immediate state update — the confirmation is still clear, just not motion-heavy. Combine this with a cart icon that has sufficient contrast against your header background (at least 3:1 as a UI component) and you've covered both dimensions of this spec.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Using `prefers-reduced-motion: no-preference` as your query**
+
+```css
+/* ❌ Wrong — this only applies when the user has NOT set a preference */
+@media (prefers-reduced-motion: no-preference) {
+  .element {
+    animation: spin 1s linear infinite;
+  }
+}
+
+/* ✅ Correct — animate by default, strip animation for sensitive users */
+.element {
+  animation: spin 1s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .element {
+    animation: none;
+  }
+}
+```
+
+**2. Removing all transitions, including opacity**
+
+Completely removing all motion can actually hurt usability — a dropdown that appears instantly with no transition is jarring. Instead, replace transforms and keyframe animations with a quick `opacity` transition:
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  .dropdown {
+    transition: opacity 0.1s ease; /* Keep this */
+    animation: none; /* Remove this */
+    transform: none; /* Remove this */
+  }
+}
+```
+
+**3. Only checking contrast for the happy path**
+
+Developers check contrast on default light mode but forget:
+
+- Hover and focus states (the focused button outline must also contrast 3:1 against adjacent colors)
+- Dark mode variants
+- Disabled state text (WCAG exempts disabled elements, but many design systems still aim for 3:1)
+- Placeholder text in inputs (often fails at the gray shades designers pick)
+
+**4. Trusting your monitor**
+
+High-end displays make colors look more vibrant and distinct than they are for users with standard monitors or color deficiencies. Always use a contrast checker tool rather than eyeballing it.
+
+---
+
+## Summary
+
+Color contrast and motion sensitivity are two distinct but related accessibility concerns that affect a significant portion of your users. WCAG AA requires a minimum 4.5:1 contrast ratio for body text and 3:1 for large text and UI components. The `prefers-reduced-motion` CSS media query and its React counterpart `window.matchMedia` let you respond to OS-level user preferences in real time. In CSS, prefer Tailwind's `motion-safe:` variant or a `@media (prefers-reduced-motion: reduce)` override block to keep animation as a progressive enhancement. Always test both light and dark mode contrast, and don't forget interactive states like focus and hover.
