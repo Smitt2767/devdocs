@@ -44,11 +44,19 @@ export default async function HomePage() {
 
   return (
     <main className="min-h-screen bg-[#121212] text-white font-mono">
-      <div className="relative max-w-3xl mx-auto px-6 py-6 md:py-28">
-        {/* Nav */}
-        <nav className="flex items-center justify-between mb-24">
+      {/* Sticky nav with glacier (frosted glass) effect */}
+      <header className="sticky top-0 z-50 w-full border-b border-white/6 bg-[#121212]/80 backdrop-blur-xl backdrop-saturate-150">
+        <div className="mx-auto flex max-w-3xl items-center justify-between px-6 py-4">
           <Logo />
           <div className="flex items-center gap-6">
+            <Link
+              href={githubUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-[#a0a0a0] hover:text-[#ebebeb] transition-colors tracking-wide"
+            >
+              GitHub
+            </Link>
             <Link
               href="/docs/frontend"
               className="text-xs text-[#a0a0a0] hover:text-[#ebebeb] transition-colors tracking-wide"
@@ -56,8 +64,10 @@ export default async function HomePage() {
               browse →
             </Link>
           </div>
-        </nav>
+        </div>
+      </header>
 
+      <div className="relative max-w-3xl mx-auto px-6 py-6 md:py-24">
         {/* Hero */}
         <section className="mb-20">
           <p className="text-[10px] text-[#888] tracking-[0.3em] uppercase mb-6">
@@ -121,22 +131,12 @@ export default async function HomePage() {
           <span className="text-[#777] text-[10px] tracking-[0.2em] uppercase">
             Always learning
           </span>
-          <div className="flex items-center gap-4">
-            <Link
-              href={githubUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[#555] text-[10px] hover:text-[#888] transition-colors"
-            >
-              GitHub
-            </Link>
-            <span
-              className="text-[#555] text-[10px] font-mono"
-              aria-hidden="true"
-            >
-              {new Date().getFullYear()}
-            </span>
-          </div>
+          <span
+            className="text-[#555] text-[10px] font-mono"
+            aria-hidden="true"
+          >
+            {new Date().getFullYear()}
+          </span>
         </footer>
       </div>
     </main>
