@@ -36,7 +36,7 @@ export function Logo() {
       {/* devdocs text with gradient on "docs" */}
       <span className="font-bold text-base tracking-tight">
         <span className="text-foreground">dev</span>
-        <span className="text-transparent bg-clip-text bg-gradient-to-r from-[#5b4cff] to-[#00d2ff]">
+        <span className="text-transparent bg-clip-text bg-linear-to-r from-[#5b4cff] to-[#00d2ff]">
           docs
         </span>
       </span>

@@ -2,6 +2,8 @@ import { getPageImage, source } from "@/lib/source";
 import { notFound } from "next/navigation";
 import { ImageResponse } from "next/og";
 import { generate as DefaultImage } from "fumadocs-ui/og";
+import { Logo } from "@/components/Logo";
+import { OgDescription, OgLogo, OgTitle } from "@/components/OG";
 
 export const revalidate = false;
 
@@ -15,11 +17,11 @@ export async function GET(
 
   return new ImageResponse(
     <DefaultImage
-      title={page.data.title}
-      description={page.data.description}
-      site="devdocs"
-      primaryColor="#5b4cff"
-      primaryTextColor="#00d2ff"
+      title={<OgTitle>{page.data.title}</OgTitle>}
+      description={<OgDescription>{page.data.description}</OgDescription>}
+      primaryColor="#121212"
+      primaryTextColor="#5b4cff"
+      icon={<OgLogo />}
     />,
     {
       width: 1200,
