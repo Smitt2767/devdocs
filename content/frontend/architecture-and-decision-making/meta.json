@@ -3,7 +3,6 @@
   "pages": [
     "index",
     "framework-selection-criteria",
-    "build-vs-buy-ui",
     "technical-debt-identification-prioritization",
     "adrs",
     "api-contract-design"

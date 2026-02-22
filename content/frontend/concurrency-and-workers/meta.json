@@ -1,10 +1,4 @@
 {
   "title": "Concurrency & Workers",
-  "pages": [
-    "index",
-    "web-workers-vs-service-workers",
-    "offscreen-canvas",
-    "shared-array-buffer-and-atomics",
-    "worklets"
-  ]
+  "pages": ["index", "web-workers-vs-service-workers"]
 }
