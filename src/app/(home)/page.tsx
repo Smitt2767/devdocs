@@ -8,21 +8,21 @@ const githubUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
 const baseUrl = process.env.NEXT_PUBLIC_SITE_URL;
 
 export const metadata: Metadata = {
-  title: "devdocs - Frontend Engineering Handbook",
+  title: "FrontCore - Frontend Engineering Handbook",
   description:
     "A curated reference of frontend engineering concepts. Built to understand the why, not just the how.",
   openGraph: {
-    title: "devdocs - Frontend Engineering Handbook",
+    title: "FrontCore - Frontend Engineering Handbook",
     description:
       "A curated reference of frontend engineering concepts. Built to understand the why, not just the how.",
     url: baseUrl,
-    siteName: "devdocs",
+    siteName: "FrontCore",
     images: [
       {
         url: `${baseUrl}/og/home/image.png`,
         width: 1200,
         height: 630,
-        alt: "devdocs - Frontend Engineering Handbook",
+        alt: "FrontCore - Frontend Engineering Handbook",
       },
     ],
     locale: "en_US",
@@ -30,7 +30,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "devdocs - Frontend Engineering Handbook",
+    title: "FrontCore - Frontend Engineering Handbook",
     description:
       "A curated reference of frontend engineering concepts. Built to understand the why, not just the how.",
     images: [`${baseUrl}/og/home/image.png`],
@@ -76,66 +76,47 @@ export default async function HomePage() {
             <span className="text-subtle">the how.</span>
           </h1>
           <p className="text-muted text-sm leading-relaxed max-w-sm">
-            {sections.length} categories &middot; {totalArticles} articles. A
-            personal reference built to understand browser internals, rendering
-            pipelines, and system-level thinking — not just copy patterns.
+            {sections.length} categories &middot; {totalArticles} articles. Deep
+            references for frontend architecture, performance, and system
+            design.
           </p>
         </section>
 
-        <div className="border-t border-border mb-12" />
-
-        <p className="text-[10px] text-subtle tracking-[0.25em] uppercase mb-6">
-          Frontend
-        </p>
-
-        <ul className="divide-y divide-border">
-          {sections.map((section, i) => {
-            return (
-              <li key={section.slug}>
-                <Link
-                  href={`/docs/frontend/${section.slug}`}
-                  className="group flex items-center justify-between px-2 py-3.5 hover:bg-surface-hover hover:pl-4 transition-all duration-200"
-                >
-                  <div className="flex items-center gap-4">
-                    <span
-                      className="text-subtle text-[10px] w-5 tabular-nums select-none"
-                      aria-hidden="true"
-                    >
-                      {String(i + 1).padStart(2, "0")}
-                    </span>
-                    <span className="text-muted text-sm group-hover:text-foreground transition-colors duration-150">
+        <section>
+          <div className="grid gap-4">
+            {sections.map((section) => (
+              <Link
+                key={section.slug}
+                href={`/docs/frontend/${section.slug}`}
+                className="group relative block rounded-lg border border-white/6 bg-surface/30 p-6 transition-all hover:border-white/12 hover:bg-surface/50"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex-1">
+                    <h2 className="text-base font-semibold text-foreground group-hover:text-brand transition-colors">
                       {section.label}
-                    </span>
+                    </h2>
                   </div>
-
-                  <div className="flex items-center gap-4">
-                    <span className="text-subtle text-[10px] tabular-nums group-hover:text-muted transition-colors">
-                      {section.count}
-                    </span>
-                    <span
-                      className="text-subtle text-sm group-hover:text-muted transition-colors shrink-0 font-semibold"
-                      aria-hidden="true"
+                  <div className="flex items-center gap-2 text-xs text-muted">
+                    <span>{section.count} articles</span>
+                    <svg
+                      className="w-4 h-4 opacity-40 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
                     >
-                      →
-                    </span>
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M9 5l7 7-7 7"
+                      />
+                    </svg>
                   </div>
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
-
-        <footer className="border-t border-border mt-20 pt-8 flex items-center justify-between">
-          <span className="text-subtle text-[10px] tracking-[0.2em] uppercase">
-            Always learning
-          </span>
-          <span
-            className="text-subtle text-[10px] font-mono"
-            aria-hidden="true"
-          >
-            {new Date().getFullYear()}
-          </span>
-        </footer>
+                </div>
+              </Link>
+            ))}
+          </div>
+        </section>
       </div>
     </main>
   );

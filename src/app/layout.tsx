@@ -12,7 +12,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "devdocs",
+  title: "FrontCore",
   description: "A curated reference of frontend engineering concepts",
   icons: {
     icon: [

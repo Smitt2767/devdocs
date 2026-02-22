@@ -42,9 +42,9 @@ export function Logo() {
       </svg>
 
       <span className="font-bold text-base tracking-tight">
-        <span className="text-foreground">dev</span>
+        <span className="text-foreground">Front</span>
         <span className="text-transparent bg-clip-text bg-linear-to-r from-brand to-accent">
-          docs
+          Core
         </span>
       </span>
     </div>

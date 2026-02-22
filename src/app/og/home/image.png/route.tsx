@@ -8,7 +8,7 @@ export const revalidate = false;
 export async function GET() {
   return new ImageResponse(
     <DefaultImage
-      title={<OgTitle>devdocs</OgTitle>}
+      title={<OgTitle>frontcore</OgTitle>}
       description={
         <OgDescription>
           A curated reference of frontend engineering concepts. Built to

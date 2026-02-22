@@ -11,7 +11,7 @@ export function OgLogo() {
         letterSpacing: "-0.025em",
       }}
     >
-      <div style={{ color: colors.foreground }}>dev</div>
+      <div style={{ color: colors.foreground }}>Front</div>
       <div
         style={{
           backgroundImage: `linear-gradient(to right, ${colors.brand}, ${colors.accent})`,
@@ -20,7 +20,7 @@ export function OgLogo() {
           color: "transparent",
         }}
       >
-        docs
+        Core
       </div>
     </div>
   );

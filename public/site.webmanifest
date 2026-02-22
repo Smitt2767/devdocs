@@ -1,6 +1,6 @@
 {
-  "name": "devdocs",
-  "short_name": "devdocs",
+  "name": "FrontCore",
+  "short_name": "FrontCore",
   "icons": [
     {
       "src": "/android-chrome-192x192.png",

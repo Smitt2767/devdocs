@@ -1,11 +1,11 @@
 {
-  "name": "devdocs",
+  "name": "frontcore",
   "version": "1.0.0",
   "private": true,
   "description": "Frontend Engineering Handbook — curated reference for the why behind the how (Next.js, Fumadocs, MDX)",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/smitt2767/devdocs.git"
+    "url": "git+https://github.com/smitt2767/frontcore.git"
   },
   "scripts": {
     "build": "next build",
