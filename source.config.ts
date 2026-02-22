@@ -1,8 +1,8 @@
 import { defineConfig, defineDocs } from "fumadocs-mdx/config";
 import { metaSchema, pageSchema } from "fumadocs-core/source/schema";
+import rehypeSlug from "rehype-slug";
+import rehypeAutolinkHeadings from "rehype-autolink-headings";
 
-// You can customise Zod schemas for frontmatter and `meta.json` here
-// see https://fumadocs.dev/docs/mdx/collections
 export const docs = defineDocs({
   dir: "content",
   docs: {
@@ -18,6 +18,21 @@ export const docs = defineDocs({
 
 export default defineConfig({
   mdxOptions: {
-    // MDX options
+    rehypePlugins: [
+      // Adds `id` attributes to all headings so the TOC links work reliably
+      rehypeSlug,
+      // Wraps each heading in an anchor tag — clicking the heading copies
+      // a deep link. The `#` symbol is injected as a visually-hidden span.
+      [
+        rehypeAutolinkHeadings,
+        {
+          behavior: "wrap",
+          properties: {
+            className: ["subheading-anchor"],
+            ariaLabel: "Link to section",
+          },
+        },
+      ],
+    ],
   },
 });

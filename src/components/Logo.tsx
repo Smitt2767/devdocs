@@ -20,11 +20,6 @@ export function Logo() {
         />
 
         <defs>
-          {/*
-            SVG linearGradient stopColor cannot reliably consume CSS custom
-            properties across all browsers, so we pull from colors.ts directly.
-            colors.brand === var(--brand), colors.accent === var(--accent).
-          */}
           <linearGradient
             id="logo-gradient"
             x1="8"
@@ -38,20 +33,20 @@ export function Logo() {
           </linearGradient>
         </defs>
 
-        <text
-          x="16"
-          y="20.5"
-          fontFamily="monospace"
-          fontSize="14"
-          fontWeight="bold"
+        {/*
+          "D" as a path — avoids <text> which is unsupported in Satori.
+          Bounding box: x=12.5–20, y=11–19.5 (7.5px wide, 8.5px tall)
+          Centered in the hexagon (center ≈ 16, 15).
+          fillRule="evenodd": inner sub-path punches the counter hole.
+        */}
+        <path
+          d="M 12.5,11 H 14.5 Q 20,11 20,15.25 Q 20,19.5 14.5,19.5 H 12.5 Z
+             M 14.5,13 Q 18,13 18,15.25 Q 18,17.5 14.5,17.5 Z"
           fill={colors.foreground}
-          textAnchor="middle"
-        >
-          D
-        </text>
+          fillRule="evenodd"
+        />
       </svg>
 
-      {/* Tailwind token classes: text-foreground, from-brand, to-accent */}
       <span className="font-bold text-base tracking-tight">
         <span className="text-foreground">dev</span>
         <span className="text-transparent bg-clip-text bg-linear-to-r from-brand to-accent">

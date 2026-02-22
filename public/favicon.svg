@@ -17,10 +17,10 @@
   </defs>
   
   <!-- Letter D -->
-  <text x="16" y="20.5" 
-        font-family="monospace" 
-        font-size="14" 
-        font-weight="bold" 
-        fill="#ffffff" 
-        text-anchor="middle">D</text>
+   <path
+          d="M 12.5,11 H 14.5 Q 20,11 20,15.25 Q 20,19.5 14.5,19.5 H 12.5 Z
+             M 14.5,13 Q 18,13 18,15.25 Q 18,17.5 14.5,17.5 Z"
+          fill="#ffffff"
+          fill-rule="evenodd"
+        />
 </svg>

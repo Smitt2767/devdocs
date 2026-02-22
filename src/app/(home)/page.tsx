@@ -43,8 +43,9 @@ export default async function HomePage() {
 
   return (
     <main className="min-h-screen bg-background text-foreground font-mono">
-      {/* Sticky nav with frosted glass effect */}
-      <header className="sticky top-0 z-50 w-full border-b border-border bg-background/80 backdrop-blur-xl backdrop-saturate-150">
+      {/* Sticky nav — border-white/6 gives a semi-transparent rule that reads
+          better than the opaque border-border token against the frosted glass bg */}
+      <header className="sticky top-0 z-50 w-full border-b border-white/6 bg-background/80 backdrop-blur-xl backdrop-saturate-150">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3 md:px-6 md:py-4">
           <Logo />
           <div className="flex items-center gap-6">
@@ -90,39 +91,42 @@ export default async function HomePage() {
           Frontend
         </p>
 
-        <ul className="space-y-0 divide-y divide-border">
-          {sections.map((section, i) => (
-            <li key={section.slug}>
-              <Link
-                href={`/docs/frontend/${section.slug}`}
-                className="group flex items-center justify-between py-3.5 hover:pl-2 transition-all duration-200"
-              >
-                <div className="flex items-center gap-4">
-                  <span
-                    className="text-subtle text-[10px] w-5 tabular-nums select-none"
-                    aria-hidden="true"
-                  >
-                    {String(i + 1).padStart(2, "0")}
-                  </span>
-                  <span className="text-muted text-sm group-hover:text-foreground transition-colors duration-150">
-                    {section.label}
-                  </span>
-                </div>
+        <ul className="divide-y divide-border">
+          {sections.map((section, i) => {
+            return (
+              <li key={section.slug}>
+                {/* UX #8: bg-surface-hover on hover gives clear row feedback */}
+                <Link
+                  href={`/docs/frontend/${section.slug}`}
+                  className="group flex items-center justify-between px-2 py-3.5 hover:bg-surface-hover hover:pl-4 transition-all duration-200"
+                >
+                  <div className="flex items-center gap-4">
+                    <span
+                      className="text-subtle text-[10px] w-5 tabular-nums select-none"
+                      aria-hidden="true"
+                    >
+                      {String(i + 1).padStart(2, "0")}
+                    </span>
+                    <span className="text-muted text-sm group-hover:text-foreground transition-colors duration-150">
+                      {section.label}
+                    </span>
+                  </div>
 
-                <div className="flex items-center gap-4">
-                  <span className="text-subtle text-[10px] tabular-nums group-hover:text-muted transition-colors">
-                    {section.count}
-                  </span>
-                  <span
-                    className="text-subtle text-sm group-hover:text-muted transition-colors shrink-0 font-semibold"
-                    aria-hidden="true"
-                  >
-                    →
-                  </span>
-                </div>
-              </Link>
-            </li>
-          ))}
+                  <div className="flex items-center gap-4">
+                    <span className="text-subtle text-[10px] tabular-nums group-hover:text-muted transition-colors">
+                      {section.count}
+                    </span>
+                    <span
+                      className="text-subtle text-sm group-hover:text-muted transition-colors shrink-0 font-semibold"
+                      aria-hidden="true"
+                    >
+                      →
+                    </span>
+                  </div>
+                </Link>
+              </li>
+            );
+          })}
         </ul>
 
         {/* Footer */}

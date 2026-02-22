@@ -24,13 +24,13 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
       <DocsDescription className="mb-0">
         {page.data.description}
       </DocsDescription>
-      <div className="flex flex-row gap-2 items-center border-b pb-6">
+      {/* border-border uses our token so it matches the rest of the design system */}
+      <div className="flex flex-row gap-2 items-center border-b border-border pb-6">
         <LLMCopyButton markdownUrl={`${page.url}.mdx`} />
       </div>
       <DocsBody>
         <MDX
           components={getMDXComponents({
-            // this allows you to link to other pages with relative file paths
             a: createRelativeLink(source, page),
           })}
         />

@@ -4,6 +4,7 @@ import { Inter } from "next/font/google";
 import type { Metadata } from "next";
 import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
+import { colors } from "@/lib/colors";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -12,6 +13,9 @@ const inter = Inter({
 export const metadata: Metadata = {
   title: "devdocs",
   description: "A curated reference of frontend engineering concepts",
+  // themeColor matches site.webmanifest theme_color (colors.brand)
+  // Controls the browser address bar / tab strip color on mobile
+  themeColor: colors.brand,
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "any" },

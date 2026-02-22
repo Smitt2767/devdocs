@@ -1,23 +1,19 @@
 "use client";
 import { useMemo, useState } from "react";
-import { Check, ChevronDown, Copy, ExternalLinkIcon } from "lucide-react";
+import { Check, Copy } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useCopyButton } from "fumadocs-ui/utils/use-copy-button";
 import { buttonVariants } from "fumadocs-ui/components/ui/button";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "fumadocs-ui/components/ui/popover";
 
 const cache = new Map<string, string>();
 
 export function LLMCopyButton({
-  /**
-   * A URL to fetch the raw Markdown/MDX content of page
-   */
   markdownUrl,
 }: {
+  /**
+   * A URL to fetch the raw Markdown/MDX content of the page.
+   * The button copies that content to the clipboard when clicked.
+   */
   markdownUrl: string;
 }) {
   const [isLoading, setLoading] = useState(false);
@@ -33,7 +29,6 @@ export function LLMCopyButton({
           "text/plain": fetch(markdownUrl).then(async (res) => {
             const content = await res.text();
             cache.set(markdownUrl, content);
-
             return content;
           }),
         }),
@@ -45,6 +40,9 @@ export function LLMCopyButton({
 
   return (
     <button
+      // type="button" prevents accidental form submission if this button
+      // is ever rendered inside a <form> ancestor (omitting type defaults to "submit")
+      type="button"
       disabled={isLoading}
       className={cn(
         buttonVariants({
