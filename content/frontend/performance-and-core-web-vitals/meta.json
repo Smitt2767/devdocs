@@ -7,6 +7,7 @@
     "largest-contentful-paint",
     "lighthouse-ci-integration",
     "rum-vs-synthetic-monitoring",
-    "performance-budgets"
+    "performance-budgets",
+    "third-party-script-management"
   ]
 }

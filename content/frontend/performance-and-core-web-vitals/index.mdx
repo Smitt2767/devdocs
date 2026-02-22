@@ -5,7 +5,7 @@ description: Measurable, user-impacting performance — from individual Core Web
 
 ## Performance & Core Web Vitals
 
-Core Web Vitals are Google's standardized metrics for user experience quality. They're used in search ranking, but more importantly they represent real dimensions of how users experience your site: loading speed, visual stability, and interaction responsiveness. This section covers each current metric in depth and the infrastructure for tracking and enforcing them.
+Core Web Vitals are Google's standardized metrics for user experience quality. They're used in search ranking, but more importantly they represent real dimensions of how users experience your site: loading speed, visual stability, and interaction responsiveness. This section covers each current metric in depth, the infrastructure for tracking and enforcing them, and the most impactful class of real-world performance regressions.
 
 ## What's covered
 
@@ -20,3 +20,5 @@ Core Web Vitals are Google's standardized metrics for user experience quality. T
 **RUM vs Synthetic Monitoring** — Real User Monitoring collects field data from actual users; synthetic monitoring runs automated tests in controlled conditions. Both are necessary for a complete picture.
 
 **Performance Budgets** — Setting enforceable limits on bundle size, metric values, and third-party script weight — and integrating those limits into CI so regressions are caught before deploy.
+
+**Third-Party Script Management** — How analytics, chat widgets, and A/B testing scripts degrade INP and LCP — and how to audit, defer, and contain their impact using `next/script` strategies and the facade pattern.

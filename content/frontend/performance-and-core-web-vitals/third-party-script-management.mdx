@@ -1,0 +1,409 @@
+---
+title: Third-Party Script Management
+description: How analytics, chat widgets, and A/B testing scripts degrade INP and LCP — and how to load, audit, and contain their impact using next/script and facade patterns.
+---
+
+## Overview
+
+Third-party scripts are the single most common cause of performance regressions in production web applications. They arrive after launch, added one at a time by product, marketing, and analytics teams — each with a plausible business reason. By the time performance becomes a problem, a typical e-commerce or SaaS page is running 10–20 third-party scripts that collectively block the main thread for hundreds of milliseconds.
+
+The problem isn't that third-party scripts are inherently bad. It's that they execute on the same main thread as your application, they arrive late-discovered (long after your bundle is optimized), and they're outside your control — a vendor can ship a slow update and your INP score degrades overnight without any code change on your end.
+
+This article covers how to audit what you're loading, how to load it correctly with `next/script`, how to contain the damage with facade patterns, and how to detect regressions before users do.
+
+---
+
+## How It Works
+
+### Why third-party scripts hurt performance
+
+Every script — first or third party — competes for the main thread. The browser can only do one thing at a time on the main thread: execute JavaScript, handle input events, calculate layout, paint. A third-party analytics script that takes 200ms to parse and execute is 200ms the browser cannot respond to a user tap. That's an INP regression.
+
+The damage comes from three sources:
+
+**Parse and compile time** — JavaScript must be parsed and JIT-compiled before execution. A 300KB analytics bundle adds significant CPU time on mid-range Android devices, even before a single line of your code runs.
+
+**Execution time** — Long tasks (>50ms) block the main thread entirely. Many third-party scripts — particularly chat widgets, full-featured analytics suites, and A/B testing platforms — execute long tasks during initialization.
+
+**Render-blocking** — Scripts loaded without `async` or `defer` block HTML parsing. Even with those attributes, scripts that inject `<link>` tags or trigger additional fetches can delay LCP indirectly.
+
+### The `next/script` loading strategies
+
+Next.js provides three loading strategies that control when a third-party script is fetched and executed relative to your page lifecycle:
+
+| Strategy            | When it loads             | Use for                                                                      |
+| ------------------- | ------------------------- | ---------------------------------------------------------------------------- |
+| `beforeInteractive` | Before page hydration     | Critical scripts that must run before any JS (consent banners, anti-flicker) |
+| `afterInteractive`  | After hydration completes | Tag managers, analytics that need `window` and `document`                    |
+| `lazyOnload`        | During browser idle time  | Low-priority scripts: chat widgets, survey tools, social embeds              |
+
+The default for a raw `<Script>` tag without a strategy is `afterInteractive`. `lazyOnload` is almost always the right choice for anything that isn't needed for the first interaction.
+
+---
+
+## Code Examples
+
+### 1. Loading third-party scripts with `next/script`
+
+```tsx
+// app/layout.tsx
+import Script from "next/script";
+import type { ReactNode } from "react";
+
+export default function RootLayout({ children }: { children: ReactNode }) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+
+      {/*
+        Google Analytics — afterInteractive is correct here.
+        It needs window and document, but doesn't need to run before hydration.
+        Using beforeInteractive would delay Time to Interactive.
+      */}
+      <Script
+        src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"
+        strategy="afterInteractive"
+      />
+      <Script id="google-analytics" strategy="afterInteractive">
+        {`
+          window.dataLayer = window.dataLayer || [];
+          function gtag(){dataLayer.push(arguments);}
+          gtag('js', new Date());
+          gtag('config', 'G-XXXXXXXXXX');
+        `}
+      </Script>
+
+      {/*
+        Chat widget — lazyOnload is correct.
+        Users don't interact with chat in the first seconds.
+        Deferring it until idle time keeps INP clean during page load.
+      */}
+      <Script
+        src="https://cdn.chatwidget.com/widget.js"
+        strategy="lazyOnload"
+        onLoad={() => {
+          // Initialize the widget only after the script has loaded
+          window.ChatWidget?.init({ appId: "your-app-id" });
+        }}
+      />
+    </html>
+  );
+}
+```
+
+---
+
+### 2. Auditing third-party impact with `PerformanceObserver`
+
+Before you can fix a problem, you need to know which scripts are causing it. This observer logs long tasks and their attribution — which script or frame is responsible.
+
+```ts
+// lib/third-party-audit.ts
+// Run this in development or a staging environment to identify slow scripts
+
+export function auditThirdPartyImpact() {
+  if (typeof window === "undefined") return;
+  if (!("PerformanceObserver" in window)) return;
+
+  const observer = new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      // Long tasks are any tasks > 50ms on the main thread
+      if (entry.duration > 50) {
+        // attribution is available on PerformanceLongTaskTiming
+        const taskEntry = entry as PerformanceLongTaskTiming;
+        const attribution = taskEntry.attribution?.[0];
+
+        console.warn("[Long Task]", {
+          duration: `${entry.duration.toFixed(1)}ms`,
+          // containerSrc identifies the script or iframe responsible
+          source:
+            attribution?.containerSrc ||
+            attribution?.containerName ||
+            "unknown",
+          containerType: attribution?.containerType,
+          startTime: `${entry.startTime.toFixed(0)}ms after navigation`,
+        });
+      }
+    }
+  });
+
+  observer.observe({ type: "longtask", buffered: true });
+
+  return () => observer.disconnect();
+}
+```
+
+```tsx
+// app/layout.tsx — enable audit in development only
+"use client";
+
+import { useEffect } from "react";
+import { auditThirdPartyImpact } from "@/lib/third-party-audit";
+
+export function DevAudit() {
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
+    const cleanup = auditThirdPartyImpact();
+    return cleanup;
+  }, []);
+
+  return null;
+}
+```
+
+---
+
+### 3. Measuring third-party script weight with `next/bundle-analyzer` and `Resource Timing`
+
+Track which third-party domains are loading resources and how large they are:
+
+```ts
+// lib/resource-timing-audit.ts
+// Logs all third-party resources loaded on the page, sorted by transfer size
+
+export function logThirdPartyResources() {
+  if (typeof window === "undefined") return;
+
+  window.addEventListener("load", () => {
+    const entries = performance.getEntriesByType(
+      "resource",
+    ) as PerformanceResourceTiming[];
+
+    const currentOrigin = window.location.origin;
+
+    const thirdParty = entries
+      .filter((entry) => !entry.name.startsWith(currentOrigin))
+      .map((entry) => ({
+        url: entry.name,
+        // transferSize is 0 for cached resources
+        transferSize: `${(entry.transferSize / 1024).toFixed(1)}KB`,
+        duration: `${entry.duration.toFixed(0)}ms`,
+        initiatorType: entry.initiatorType, // "script", "img", "css", "fetch", etc.
+      }))
+      .sort((a, b) => parseFloat(b.transferSize) - parseFloat(a.transferSize));
+
+    console.table(thirdParty);
+  });
+}
+```
+
+---
+
+### 4. Facade pattern — defer heavy widgets until user interaction
+
+A facade is a lightweight placeholder that looks like the real widget but loads the actual third-party script only when the user interacts with it. This is the single highest-impact optimization for chat widgets, video embeds, and map components.
+
+```tsx
+// components/chat-widget-facade.tsx
+"use client";
+
+import { useState, useCallback } from "react";
+import Script from "next/script";
+
+export function ChatWidgetFacade() {
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [isOpen, setIsOpen] = useState(false);
+
+  const handleOpen = useCallback(() => {
+    // First click: load the real script and open the widget
+    setIsLoaded(true);
+    setIsOpen(true);
+  }, []);
+
+  return (
+    <>
+      {/* Only load the real script after the user clicks */}
+      {isLoaded && (
+        <Script
+          src="https://cdn.chatwidget.com/widget.js"
+          strategy="afterInteractive"
+          onLoad={() => {
+            // Open the real widget once the script is ready
+            window.ChatWidget?.open();
+          }}
+        />
+      )}
+
+      {/* Lightweight placeholder — no third-party JS loaded yet */}
+      {!isOpen && (
+        <button
+          onClick={handleOpen}
+          className="fixed bottom-6 right-6 flex h-14 w-14 items-center justify-center rounded-full bg-primary shadow-lg transition-transform hover:scale-105"
+          aria-label="Open chat"
+        >
+          {/* Static SVG icon — zero JS weight */}
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            className="h-6 w-6 text-primary-foreground"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+            aria-hidden="true"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
+            />
+          </svg>
+        </button>
+      )}
+    </>
+  );
+}
+```
+
+```tsx
+// components/youtube-facade.tsx
+// YouTube embeds load ~500KB of JS. A facade loads nothing until the user clicks play.
+"use client";
+
+import { useState } from "react";
+import Image from "next/image";
+import Script from "next/script";
+
+interface YouTubeFacadeProps {
+  videoId: string;
+  title: string;
+}
+
+export function YouTubeFacade({ videoId, title }: YouTubeFacadeProps) {
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  if (isPlaying) {
+    return (
+      <div className="relative aspect-video w-full overflow-hidden rounded-xl">
+        <iframe
+          src={`https://www.youtube.com/embed/${videoId}?autoplay=1`}
+          title={title}
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+          allowFullScreen
+          className="absolute inset-0 h-full w-full border-0"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <button
+      onClick={() => setIsPlaying(true)}
+      className="group relative aspect-video w-full overflow-hidden rounded-xl bg-black"
+      aria-label={`Play ${title}`}
+    >
+      {/* Thumbnail from YouTube's CDN — a single image, no iframe */}
+      <Image
+        src={`https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`}
+        alt={title}
+        fill
+        className="object-cover opacity-80 transition-opacity group-hover:opacity-60"
+        sizes="(max-width: 768px) 100vw, 800px"
+      />
+
+      {/* Play button overlay */}
+      <div className="absolute inset-0 flex items-center justify-center">
+        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-red-600 shadow-xl transition-transform group-hover:scale-110">
+          <svg
+            className="h-7 w-7 translate-x-0.5 text-white"
+            fill="currentColor"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+          >
+            <path d="M8 5v14l11-7z" />
+          </svg>
+        </div>
+      </div>
+    </button>
+  );
+}
+```
+
+---
+
+### 5. Monitoring third-party regressions in CI
+
+Add third-party resource weight to your Lighthouse CI budget so vendor updates that bloat their scripts fail your build:
+
+```js
+// lighthouserc.js
+export default {
+  ci: {
+    collect: {
+      url: ["http://localhost:3000/"],
+      startServerCommand: "npm run start",
+      numberOfRuns: 3,
+    },
+    assert: {
+      assertions: {
+        // Total third-party script weight — catches vendor bundle bloat
+        "third-party-summary": [
+          "warn",
+          {
+            // Fail if any single third-party origin exceeds 150KB
+            // or total blocking time from third parties exceeds 250ms
+            maxLength: 10, // max number of third-party origins
+          },
+        ],
+        // INP and LCP catch runtime regressions from third-party execution
+        "categories:performance": ["error", { minScore: 0.9 }],
+        "largest-contentful-paint": ["error", { maxNumericValue: 2500 }],
+        "total-blocking-time": ["error", { maxNumericValue: 300 }],
+      },
+    },
+  },
+};
+```
+
+---
+
+## Real-World Use Case
+
+An e-commerce checkout page has: Google Analytics, a Hotjar session recorder, a Zendesk chat widget, a TrustPilot reviews widget, and a Klaviyo email capture popup. Each was added over 18 months by different teams. Collectively they add 1.2MB of JavaScript and push INP on mid-range Android devices to 650ms — well into the "poor" range.
+
+The remediation:
+
+1. **Audit** — `logThirdPartyResources()` in staging identifies Hotjar (380KB) and the TrustPilot widget (290KB) as the largest offenders.
+2. **Defer** — Move Hotjar and Klaviyo to `lazyOnload`. They don't need to run before the user interacts.
+3. **Facade** — Replace the Zendesk widget with `ChatWidgetFacade`. The 320KB Zendesk script no longer loads unless the user clicks the chat button.
+4. **Remove** — TrustPilot reviews aren't on the checkout page — the script was included in the global layout. Move it to only the product pages that actually show reviews.
+5. **Monitor** — Add `total-blocking-time` and `third-party-summary` to Lighthouse CI so any future script addition that crosses the threshold fails the PR check.
+
+Result: INP drops from 650ms to 180ms. The Zendesk script is now loaded by fewer than 8% of users — the ones who actually click the chat button.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Using `beforeInteractive` for analytics**
+
+`beforeInteractive` loads and executes the script before React hydrates — it blocks Time to Interactive. It exists for scripts that genuinely must run before any JavaScript (consent management platforms, anti-flicker snippets for A/B testing). Analytics do not qualify. Use `afterInteractive`.
+
+**2. Loading tag managers without controlling what they load**
+
+Google Tag Manager is itself lightweight — the problem is what it fires. A GTM container that loads 15 tags on every page defeats every optimization you make in Next.js. Audit the GTM container with Tag Manager's built-in debugger and remove or defer tags that aren't needed on every page.
+
+**3. Not setting a `strategy` on `<Script>`**
+
+The default strategy is `afterInteractive`, which is reasonable — but being explicit makes intent clear and prevents a future engineer from assuming the script is lazy-loaded when it isn't.
+
+```tsx
+// ❌ Implicit — easy to misread as lazy
+<Script src="https://cdn.example.com/widget.js" />
+
+// ✅ Explicit — intent is clear
+<Script src="https://cdn.example.com/widget.js" strategy="afterInteractive" />
+```
+
+**4. Assuming `lazyOnload` means "never affects performance"**
+
+`lazyOnload` fires during browser idle time — but "idle" on a loaded page with React hydration, image decoding, and user interactions happening simultaneously can mean the script runs within a few seconds of load. A 500KB script on `lazyOnload` still parses on the main thread and can cause INP spikes if a user interacts at the wrong moment. Facades are the only way to truly eliminate the cost until the user opt-in.
+
+**5. Not measuring third-party impact in field data**
+
+Lab tools (Lighthouse) run without third-party cookies and in controlled conditions — some scripts don't fully initialize in a headless Chrome environment. Field data from real users (via `useReportWebVitals`) is the only reliable signal for third-party impact. A script that looks fine in Lighthouse can crush INP for users in a specific geography where the CDN is slow.
+
+---
+
+## Summary
+
+Third-party scripts compete for the same main thread as your application — every millisecond they spend parsing, compiling, and executing is a millisecond the browser cannot respond to user input. Load scripts with `next/script` using the minimum strategy needed: `beforeInteractive` only for scripts that must precede hydration, `afterInteractive` for tag managers and analytics, `lazyOnload` for chat widgets and low-priority tools. Use the facade pattern to eliminate the cost of heavy widgets entirely until the user explicitly requests them. Audit script weight with Resource Timing and long task attribution in staging, enforce limits in Lighthouse CI to catch vendor-side regressions, and monitor field INP via `useReportWebVitals` to catch what lab tools miss.
