@@ -1,0 +1,515 @@
+---
+title: Data Fetching Patterns
+description: The mental models behind client-side data fetching — cache keys, deduplication, background revalidation, and how SWR and React Query relate to React Server Components.
+---
+
+## Overview
+
+Data fetching in a React application is not just `fetch()` inside `useEffect`. The moment you care about loading states, error states, caching, deduplication, background refresh, optimistic updates, and pagination — you are building a client-side cache. SWR and React Query exist because that cache is hard to build correctly, and teams kept rebuilding it badly.
+
+This article covers the underlying mechanics those libraries implement, when to use them versus React Server Components, and the patterns that apply regardless of which tool you reach for.
+
+---
+
+## How It Works
+
+### The client-side cache model
+
+Every serious data fetching library is built around the same core idea: a **cache keyed by request identity**. When a component requests data, the library checks the cache first. If a fresh entry exists, it returns it immediately — no network request. If the entry is stale or missing, it fetches, stores the result, and notifies all subscribers.
+
+This model solves several problems that raw `useEffect` fetching cannot:
+
+**Deduplication** — If three components on the same page all request `/api/user/42` simultaneously, a naive implementation fires three network requests. A cache-backed library fires one, and all three components receive the result when it resolves.
+
+**Background revalidation** — Stale-while-revalidate (SWR, the strategy the library is named after): return the cached value immediately so the UI renders instantly, then fetch a fresh copy in the background and update when it arrives. The user sees data right away — no loading spinner for data they've seen before.
+
+**Shared state without a global store** — Because both components read from the same cache key, two `useQuery({ queryKey: ['user', 42] })` calls in different parts of the tree are automatically synchronized. Mutate the data in one place — the cache updates everywhere.
+
+### Cache keys
+
+The cache key is the identity of a request. In React Query it's an array (`['user', userId]`). In SWR it's a string or function. The key must be:
+
+- **Deterministic** — the same logical request must always produce the same key
+- **Specific** — different requests must produce different keys
+- **Serializable** — no functions, class instances, or circular references
+
+Getting cache keys right is the most common source of bugs in both libraries.
+
+### Stale time vs cache time
+
+These two settings are confused constantly:
+
+- **Stale time** — how long cached data is considered fresh. During this window, no background refetch happens. After it expires, the next mount or focus event triggers a background refresh.
+- **Cache time / `gcTime`** — how long unused data stays in the cache before being garbage collected. A query that's been unmounted is still in cache for this duration, so remounting it renders the cached value instantly before refetching.
+
+```
+Request resolves → data is FRESH for staleTime
+                 → after staleTime, data is STALE (shown immediately, refetch in background)
+                 → after unmount + gcTime, data is EVICTED from cache
+```
+
+---
+
+## Code Examples
+
+### 1. React Query — foundational setup and a basic query
+
+```tsx
+// app/providers.tsx
+"use client";
+
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useState, type ReactNode } from "react";
+
+export function ReactQueryProvider({ children }: { children: ReactNode }) {
+  // Create the client inside useState so each request gets a fresh client in SSR
+  // Never create QueryClient outside a component — it would be shared across requests
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            // Data stays fresh for 60 seconds — no background refetch during this window
+            staleTime: 60 * 1000,
+            // Retry failed requests twice before showing an error
+            retry: 2,
+            // Refetch when the user focuses the tab — catches staleness from background tabs
+            refetchOnWindowFocus: true,
+          },
+        },
+      }),
+  );
+
+  return (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  );
+}
+```
+
+```tsx
+// app/layout.tsx
+import { ReactQueryProvider } from "./providers";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        <ReactQueryProvider>{children}</ReactQueryProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+```tsx
+// hooks/use-user.ts
+import { useQuery } from "@tanstack/react-query";
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: "admin" | "member";
+}
+
+async function fetchUser(userId: string): Promise<User> {
+  const res = await fetch(`/api/users/${userId}`);
+  if (!res.ok) throw new Error(`Failed to fetch user: ${res.status}`);
+  return res.json();
+}
+
+export function useUser(userId: string) {
+  return useQuery({
+    // Cache key: ['user', userId] — each userId gets its own cache entry
+    queryKey: ["user", userId],
+    queryFn: () => fetchUser(userId),
+    // Override the global staleTime for user data — stays fresh for 5 minutes
+    staleTime: 5 * 60 * 1000,
+    // Don't fetch if userId is empty — avoids a request with an invalid key
+    enabled: !!userId,
+  });
+}
+```
+
+```tsx
+// components/user-profile.tsx
+"use client";
+
+import { useUser } from "@/hooks/use-user";
+
+export function UserProfile({ userId }: { userId: string }) {
+  const { data: user, isLoading, isError, error } = useUser(userId);
+
+  if (isLoading) {
+    return <div className="h-16 animate-pulse rounded-md bg-muted" />;
+  }
+
+  if (isError) {
+    return (
+      <p className="text-sm text-destructive">
+        Failed to load profile: {error.message}
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-3">
+      <div className="h-10 w-10 rounded-full bg-primary/10" />
+      <div>
+        <p className="font-medium">{user.name}</p>
+        <p className="text-sm text-muted-foreground">{user.email}</p>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### 2. Mutations with cache invalidation
+
+Mutations don't just send data — they invalidate related cache entries so the UI reflects the updated server state.
+
+```tsx
+// hooks/use-update-user.ts
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+
+interface UpdateUserPayload {
+  name?: string;
+  email?: string;
+}
+
+async function updateUser(userId: string, payload: UpdateUserPayload) {
+  const res = await fetch(`/api/users/${userId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error("Failed to update user");
+  return res.json();
+}
+
+export function useUpdateUser(userId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (payload: UpdateUserPayload) => updateUser(userId, payload),
+
+    // onSuccess: invalidate the user cache so all components refetch fresh data
+    onSuccess: () => {
+      // Invalidate the specific user entry
+      queryClient.invalidateQueries({ queryKey: ["user", userId] });
+      // Also invalidate any list that might contain this user
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+
+    onError: (error) => {
+      console.error("User update failed:", error);
+    },
+  });
+}
+```
+
+```tsx
+// components/edit-user-form.tsx
+"use client";
+
+import { useState } from "react";
+import { useUser } from "@/hooks/use-user";
+import { useUpdateUser } from "@/hooks/use-update-user";
+
+export function EditUserForm({ userId }: { userId: string }) {
+  const { data: user } = useUser(userId);
+  const { mutate: updateUser, isPending, isError } = useUpdateUser(userId);
+  const [name, setName] = useState(user?.name ?? "");
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    updateUser({ name });
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+      <input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        className="rounded-md border border-input px-3 py-2 text-sm"
+        disabled={isPending}
+      />
+      {isError && (
+        <p className="text-sm text-destructive">Update failed. Try again.</p>
+      )}
+      <button
+        type="submit"
+        disabled={isPending}
+        className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground"
+      >
+        {isPending ? "Saving..." : "Save changes"}
+      </button>
+    </form>
+  );
+}
+```
+
+---
+
+### 3. Optimistic mutations with React Query
+
+Show the result immediately, roll back on error — without manual state management.
+
+```tsx
+// hooks/use-toggle-like.ts
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+
+interface Post {
+  id: string;
+  likeCount: number;
+  likedByUser: boolean;
+}
+
+export function useToggleLike(postId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/posts/${postId}/like`, { method: "POST" });
+      if (!res.ok) throw new Error("Failed to toggle like");
+      return res.json();
+    },
+
+    // onMutate runs before the request — apply the optimistic update here
+    onMutate: async () => {
+      // Cancel any in-flight refetches that would overwrite the optimistic update
+      await queryClient.cancelQueries({ queryKey: ["post", postId] });
+
+      // Snapshot the current value in case we need to roll back
+      const previousPost = queryClient.getQueryData<Post>(["post", postId]);
+
+      // Apply the optimistic update to the cache
+      queryClient.setQueryData<Post>(["post", postId], (old) => {
+        if (!old) return old;
+        return {
+          ...old,
+          likedByUser: !old.likedByUser,
+          likeCount: old.likedByUser ? old.likeCount - 1 : old.likeCount + 1,
+        };
+      });
+
+      // Return snapshot so onError can roll back
+      return { previousPost };
+    },
+
+    // onError: restore the previous value from the snapshot
+    onError: (_error, _variables, context) => {
+      if (context?.previousPost) {
+        queryClient.setQueryData(["post", postId], context.previousPost);
+      }
+    },
+
+    // onSettled: always refetch to ensure server and client are in sync
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["post", postId] });
+    },
+  });
+}
+```
+
+---
+
+### 4. SWR — the same patterns with a lighter API
+
+SWR is a leaner alternative. Same stale-while-revalidate model, simpler configuration surface.
+
+```tsx
+// hooks/use-dashboard-stats.ts
+import useSWR from "swr";
+
+interface DashboardStats {
+  totalUsers: number;
+  activeToday: number;
+  revenue: number;
+}
+
+// SWR uses a fetcher function — define it once and reuse
+const fetcher = (url: string) =>
+  fetch(url).then((res) => {
+    if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+    return res.json();
+  });
+
+export function useDashboardStats() {
+  return useSWR<DashboardStats>("/api/dashboard/stats", fetcher, {
+    // Refresh every 30 seconds — dashboard stats should be near-real-time
+    refreshInterval: 30_000,
+    // Keep showing stale data while revalidating — no loading spinner on refresh
+    keepPreviousData: true,
+  });
+}
+```
+
+```tsx
+// components/stats-panel.tsx
+"use client";
+
+import { useDashboardStats } from "@/hooks/use-dashboard-stats";
+
+export function StatsPanel() {
+  const { data, error, isLoading } = useDashboardStats();
+
+  if (isLoading)
+    return <p className="text-muted-foreground">Loading stats...</p>;
+  if (error) return <p className="text-destructive">Failed to load stats.</p>;
+
+  return (
+    <dl className="grid grid-cols-3 gap-4">
+      <div>
+        <dt className="text-sm text-muted-foreground">Total Users</dt>
+        <dd className="text-2xl font-bold">
+          {data.totalUsers.toLocaleString()}
+        </dd>
+      </div>
+      <div>
+        <dt className="text-sm text-muted-foreground">Active Today</dt>
+        <dd className="text-2xl font-bold">
+          {data.activeToday.toLocaleString()}
+        </dd>
+      </div>
+      <div>
+        <dt className="text-sm text-muted-foreground">Revenue</dt>
+        <dd className="text-2xl font-bold">${data.revenue.toLocaleString()}</dd>
+      </div>
+    </dl>
+  );
+}
+```
+
+---
+
+### 5. When to use Server Components instead
+
+React Query and SWR solve client-side caching. But if the data is only needed for the initial render and doesn't change based on user interaction, a Server Component with a direct `fetch` is simpler and ships zero JavaScript for the data layer.
+
+```tsx
+// app/dashboard/page.tsx — Server Component
+// No React Query, no SWR, no loading state, no client JS for fetching
+import { getUser, getDashboardStats } from "@/lib/db";
+
+export default async function DashboardPage() {
+  // Parallel fetches — both run simultaneously, not sequentially
+  const [user, stats] = await Promise.all([getUser(), getDashboardStats()]);
+
+  return (
+    <main>
+      <h1>Welcome back, {user.name}</h1>
+      <dl>
+        <dt>Total Users</dt>
+        <dd>{stats.totalUsers.toLocaleString()}</dd>
+      </dl>
+    </main>
+  );
+}
+```
+
+```tsx
+// app/dashboard/page.tsx — hybrid: static shell from server, live data on client
+import { StatsPanel } from "@/components/stats-panel"; // client, uses SWR
+import { getUser } from "@/lib/db";
+
+export default async function DashboardPage() {
+  // User identity fetched on the server — no client JS needed for this
+  const user = await getUser();
+
+  return (
+    <main>
+      <h1>Welcome back, {user.name}</h1>
+      {/* StatsPanel polls every 30s — genuinely needs client-side fetching */}
+      <StatsPanel />
+    </main>
+  );
+}
+```
+
+The decision rule: if data changes while the user is on the page and the UI needs to reflect that without a full navigation, use React Query or SWR. If the data is fetched once for the initial render and doesn't change, use a Server Component.
+
+---
+
+## Real-World Use Case
+
+A SaaS dashboard has three panels: an account summary (changes rarely), a live activity feed (updates every 10 seconds), and a notification count in the nav (updates whenever a notification arrives).
+
+**Account summary** — fetched in a Server Component. Rendered at request time with fresh data. No client-side cache needed — the page navigation itself is the refresh mechanism.
+
+**Activity feed** — `useQuery` with `refetchInterval: 10_000`. Cached so switching between tabs doesn't cause flicker. Background revalidation means the user always sees recent data without a loading spinner.
+
+**Notification count** — SWR with a short `refreshInterval` and `keepPreviousData`. The badge updates silently in the background. If the user opens the notifications panel (a mutation that marks them as read), `mutate()` invalidates the count immediately without waiting for the next poll.
+
+Three different fetching strategies, chosen based on how often data changes and whether the user needs to interact with it.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Creating `QueryClient` outside a component**
+
+```ts
+// ❌ Shared across all server-side requests — data leaks between users
+const queryClient = new QueryClient();
+
+// ✅ Created per-render inside useState
+const [queryClient] = useState(() => new QueryClient());
+```
+
+In a Next.js App Router app with server rendering, a module-level `QueryClient` is shared across every request on the server. One user's cached data leaks into another user's response.
+
+**2. Using objects or arrays as cache keys without stabilizing them**
+
+```ts
+// ❌ New array reference every render — triggers an infinite refetch loop
+useQuery({ queryKey: ["user", { id: userId, role }] });
+
+// ✅ Primitive values in the key array are compared by value, not reference
+useQuery({ queryKey: ["user", userId, role] });
+```
+
+React Query deep-compares cache keys, so nested objects work — but only if you're not recreating them inside the render. If the key object is built inline, move it outside the component or memoize it.
+
+**3. Treating `staleTime: 0` (the default) as acceptable**
+
+The default `staleTime` in React Query is `0` — every query is immediately stale after resolving, meaning every mount triggers a background refetch. This is safe but noisy. For data that doesn't change by the second, set a meaningful `staleTime` (60 seconds, 5 minutes) to avoid hammering your API.
+
+**4. Forgetting `enabled: false` for conditional queries**
+
+```ts
+// ❌ Fires a request with `userId = undefined` on first render
+useQuery({ queryKey: ["user", userId], queryFn: () => fetchUser(userId) });
+
+// ✅ Waits until userId is defined before fetching
+useQuery({
+  queryKey: ["user", userId],
+  queryFn: () => fetchUser(userId!),
+  enabled: !!userId,
+});
+```
+
+**5. Invalidating too broadly after mutations**
+
+```ts
+// ❌ Invalidates everything in the cache — nukes unrelated queries
+queryClient.invalidateQueries();
+
+// ✅ Invalidate only what the mutation actually affects
+queryClient.invalidateQueries({ queryKey: ["user", userId] });
+queryClient.invalidateQueries({ queryKey: ["users"] }); // only if a list exists
+```
+
+Broad invalidation causes every visible component to refetch simultaneously, creating a waterfall of requests and a flash of loading states across the page.
+
+---
+
+## Summary
+
+Client-side data fetching libraries — React Query and SWR — are client-side cache managers, not just fetch wrappers. Their core value is deduplication (one network request for many components), background revalidation (stale data shown immediately, fresh data applied silently), and cache invalidation on mutation. Cache keys are the identity of a request — they must be deterministic, specific, and stable across renders. Use `staleTime` to control how long data is considered fresh and avoid unnecessary background refetches. For data that only shapes the initial render, skip the client cache entirely and fetch directly in a Server Component. The right pattern is always the simplest one that matches how often the data changes and whether the user needs to interact with it.
