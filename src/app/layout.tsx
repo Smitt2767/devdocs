@@ -6,6 +6,7 @@ import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 import { colors } from "@/lib/colors";
 import { cn } from "@/lib/cn";
+import { env } from "@/env";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -47,8 +48,12 @@ export default function Layout({ children }: LayoutProps<"/">) {
       </head>
       <body className="flex flex-col min-h-screen">
         <RootProvider theme={{ forcedTheme: "dark" }}>
-          <Analytics />
-          <SpeedInsights />
+          {env.NEXT_PUBLIC_ENVIRONMENT === "prod" && (
+            <>
+              <Analytics />
+              <SpeedInsights />
+            </>
+          )}
           {children}
         </RootProvider>
       </body>
