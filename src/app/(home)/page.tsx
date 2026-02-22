@@ -1,67 +1,7 @@
 import { Logo } from "@/components/Logo";
+import { getFrontendSections } from "@/lib/getFrontendSections";
 import { Metadata } from "next";
 import Link from "next/link";
-
-const sections = [
-  {
-    slug: "rendering-and-browser-pipeline",
-    label: "Rendering & Browser Pipeline",
-    count: 15,
-  },
-  {
-    slug: "component-and-ui-architecture",
-    label: "Component & UI Architecture",
-    count: 7,
-  },
-  {
-    slug: "state-management-and-data-patterns",
-    label: "State Management & Data Patterns",
-    count: 9,
-  },
-  {
-    slug: "javascript-runtime-and-async",
-    label: "JavaScript Runtime & Async",
-    count: 5,
-  },
-  {
-    slug: "bundling-and-code-delivery",
-    label: "Bundling & Code Delivery",
-    count: 7,
-  },
-  { slug: "caching-and-storage", label: "Caching & Storage", count: 7 },
-  {
-    slug: "networking-and-protocols",
-    label: "Networking & Protocols",
-    count: 6,
-  },
-  { slug: "security", label: "Security", count: 6 },
-  { slug: "css-and-layout", label: "CSS & Layout", count: 6 },
-  {
-    slug: "browser-observation-apis",
-    label: "Browser Observation APIs",
-    count: 4,
-  },
-  {
-    slug: "performance-and-core-web-vitals",
-    label: "Performance & Core Web Vitals",
-    count: 7,
-  },
-  {
-    slug: "memory-and-garbage-collection",
-    label: "Memory & Garbage Collection",
-    count: 3,
-  },
-  { slug: "concurrency-and-workers", label: "Concurrency & Workers", count: 1 },
-  { slug: "accessibility", label: "Accessibility", count: 6 },
-  { slug: "devx-and-delivery", label: "DevX & Delivery", count: 5 },
-  {
-    slug: "architecture-and-decision-making",
-    label: "Architecture & Decision Making",
-    count: 5,
-  },
-];
-
-const totalArticles = sections.reduce((sum, s) => sum + s.count, 0);
 
 export const metadata: Metadata = {
   title: "devdocs - Frontend Engineering Handbook",
@@ -93,7 +33,10 @@ export const metadata: Metadata = {
   },
 };
 
-export default function HomePage() {
+export default async function HomePage() {
+  const sections = await getFrontendSections();
+  const totalArticles = sections.reduce((sum, s) => sum + s.count, 0);
+
   return (
     <main className="min-h-screen bg-[#121212] text-white font-mono">
       <div className="relative max-w-3xl mx-auto px-6 py-6 md:py-28">
