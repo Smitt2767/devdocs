@@ -1,0 +1,342 @@
+---
+title: Compound Components
+description: How to build flexible, composable component APIs using React Context to share implicit state across a cooperating set of components.
+---
+
+## Overview
+
+The compound component pattern lets you split a single UI concept across multiple cooperating components that share state implicitly — without threading props manually between them.
+
+The browser's own `<select>` and `<option>` are the canonical example. Neither works without the other, and the parent manages all the state. Compound components bring this model to custom React UI: a `<Tabs>` that owns the active state, and `<Tabs.List>`, `<Tabs.Trigger>`, and `<Tabs.Panel>` that read from it without the consumer ever wiring anything up.
+
+This is the architectural foundation of Radix UI, shadcn/ui, Headless UI, and most serious React component libraries.
+
+---
+
+## How It Works
+
+The parent component creates a React Context and provides it to its subtree. Each child component calls `useContext` to read whatever slice of state it needs. The consumer composes the children in JSX — the context wiring is invisible to them.
+
+This solves two problems at once. First, it eliminates prop drilling: you don't pass `activeTab` and `setActiveTab` through every intermediate node. Second, it enforces usage constraints: `<Tabs.Trigger>` will throw a clear error if used outside a `<Tabs>` parent, rather than silently failing.
+
+The dot-notation API (`Tabs.List`, `Tabs.Trigger`) is a TypeScript convention achieved by attaching subcomponents as static properties on the parent. It signals to the consumer that these components belong together and shouldn't be used independently.
+
+---
+
+## Code Examples
+
+### 1. Full Tabs implementation
+
+```tsx
+// components/tabs/index.tsx
+"use client";
+
+import {
+  createContext,
+  useContext,
+  useState,
+  useId,
+  type ReactNode,
+} from "react";
+
+// --- Context ---
+
+interface TabsContextValue {
+  activeTab: string;
+  setActiveTab: (value: string) => void;
+  baseId: string;
+}
+
+const TabsContext = createContext<TabsContextValue | null>(null);
+
+function useTabsContext() {
+  const ctx = useContext(TabsContext);
+  if (!ctx) {
+    // Gives consumers a clear error if they use subcomponents outside <Tabs>
+    throw new Error("Tabs subcomponents must be used inside a <Tabs> parent.");
+  }
+  return ctx;
+}
+
+// --- Root ---
+
+interface TabsProps {
+  defaultValue: string;
+  children: ReactNode;
+  className?: string;
+}
+
+function Tabs({ defaultValue, children, className }: TabsProps) {
+  const [activeTab, setActiveTab] = useState(defaultValue);
+  // useId generates a stable, unique ID for ARIA relationships
+  const baseId = useId();
+
+  return (
+    <TabsContext.Provider value={{ activeTab, setActiveTab, baseId }}>
+      <div className={className}>{children}</div>
+    </TabsContext.Provider>
+  );
+}
+
+// --- List (the tab button container) ---
+
+function TabsList({ children }: { children: ReactNode }) {
+  return (
+    <div role="tablist" className="flex gap-2 border-b border-border">
+      {children}
+    </div>
+  );
+}
+
+// --- Trigger (each tab button) ---
+
+interface TabsTriggerProps {
+  value: string;
+  children: ReactNode;
+}
+
+function TabsTrigger({ value, children }: TabsTriggerProps) {
+  const { activeTab, setActiveTab, baseId } = useTabsContext();
+  const isActive = activeTab === value;
+
+  return (
+    <button
+      role="tab"
+      // ARIA: links this button to its panel via matching IDs
+      id={`${baseId}-tab-${value}`}
+      aria-controls={`${baseId}-panel-${value}`}
+      aria-selected={isActive}
+      tabIndex={isActive ? 0 : -1}
+      onClick={() => setActiveTab(value)}
+      className={`px-4 py-2 text-sm font-medium transition-colors ${
+        isActive
+          ? "border-b-2 border-primary text-primary"
+          : "text-muted-foreground hover:text-foreground"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+// --- Panel (each tab content area) ---
+
+interface TabsPanelProps {
+  value: string;
+  children: ReactNode;
+}
+
+function TabsPanel({ value, children }: TabsPanelProps) {
+  const { activeTab, baseId } = useTabsContext();
+
+  if (activeTab !== value) return null;
+
+  return (
+    <div
+      role="tabpanel"
+      id={`${baseId}-panel-${value}`}
+      aria-labelledby={`${baseId}-tab-${value}`}
+      className="pt-4"
+    >
+      {children}
+    </div>
+  );
+}
+
+// --- Attach subcomponents as static properties ---
+// This creates the dot-notation API: <Tabs.List>, <Tabs.Trigger>, etc.
+
+Tabs.List = TabsList;
+Tabs.Trigger = TabsTrigger;
+Tabs.Panel = TabsPanel;
+
+export { Tabs };
+```
+
+```tsx
+// app/settings/page.tsx — Consumer usage
+import { Tabs } from "@/components/tabs";
+
+export default function SettingsPage() {
+  return (
+    <Tabs defaultValue="profile">
+      <Tabs.List>
+        <Tabs.Trigger value="profile">Profile</Tabs.Trigger>
+        <Tabs.Trigger value="security">Security</Tabs.Trigger>
+        <Tabs.Trigger value="billing">Billing</Tabs.Trigger>
+      </Tabs.List>
+
+      <Tabs.Panel value="profile">
+        <h2>Profile Settings</h2>
+        {/* profile form */}
+      </Tabs.Panel>
+
+      <Tabs.Panel value="security">
+        <h2>Security Settings</h2>
+        {/* security form */}
+      </Tabs.Panel>
+
+      <Tabs.Panel value="billing">
+        <h2>Billing Settings</h2>
+        {/* billing form */}
+      </Tabs.Panel>
+    </Tabs>
+  );
+}
+```
+
+The consumer composes the UI declaratively. They never touch `activeTab`, `setActiveTab`, or any ARIA wiring — that's all handled inside the compound component.
+
+---
+
+### 2. Controlled vs Uncontrolled
+
+The implementation above is uncontrolled — `Tabs` owns the state internally. For a controlled version, let the consumer drive state from outside:
+
+```tsx
+// Extend TabsProps to support controlled mode
+interface TabsProps {
+  defaultValue?: string; // uncontrolled: initial value
+  value?: string; // controlled: external value
+  onValueChange?: (value: string) => void; // controlled: change callback
+  children: ReactNode;
+}
+
+function Tabs({
+  defaultValue = "",
+  value,
+  onValueChange,
+  children,
+}: TabsProps) {
+  const [internalTab, setInternalTab] = useState(defaultValue);
+
+  // If `value` is provided, use it (controlled). Otherwise use internal state.
+  const activeTab = value !== undefined ? value : internalTab;
+
+  function setActiveTab(next: string) {
+    if (value === undefined) {
+      // Uncontrolled: manage state internally
+      setInternalTab(next);
+    }
+    // Always notify the consumer, whether controlled or not
+    onValueChange?.(next);
+  }
+
+  const baseId = useId();
+
+  return (
+    <TabsContext.Provider value={{ activeTab, setActiveTab, baseId }}>
+      <div>{children}</div>
+    </TabsContext.Provider>
+  );
+}
+```
+
+```tsx
+// Controlled usage — parent drives which tab is active
+"use client";
+
+import { useState } from "react";
+import { Tabs } from "@/components/tabs";
+
+export default function WizardPage() {
+  const [step, setStep] = useState("step-1");
+
+  return (
+    <>
+      <Tabs value={step} onValueChange={setStep}>
+        <Tabs.List>
+          <Tabs.Trigger value="step-1">Step 1</Tabs.Trigger>
+          <Tabs.Trigger value="step-2">Step 2</Tabs.Trigger>
+          <Tabs.Trigger value="step-3">Step 3</Tabs.Trigger>
+        </Tabs.List>
+        <Tabs.Panel value="step-1">...</Tabs.Panel>
+        <Tabs.Panel value="step-2">...</Tabs.Panel>
+        <Tabs.Panel value="step-3">...</Tabs.Panel>
+      </Tabs>
+
+      {/* External control — e.g. a "Next" button outside the Tabs tree */}
+      <button onClick={() => setStep("step-2")}>Next</button>
+    </>
+  );
+}
+```
+
+---
+
+### 3. Mixing Server Components inside a compound component
+
+The `<Tabs>` root needs `'use client'` because it manages state. But the content inside `<Tabs.Panel>` can still be a Server Component — pass it in as `children`:
+
+```tsx
+// app/dashboard/page.tsx — Server Component
+import { Tabs } from "@/components/tabs";
+import { UserStats } from "@/components/user-stats"; // Server Component
+import { ActivityFeed } from "@/components/activity-feed"; // Server Component
+
+export default async function DashboardPage() {
+  return (
+    // Tabs is 'use client' but its children are Server Components
+    // This works because children are passed as props (already-rendered RSC output)
+    <Tabs defaultValue="stats">
+      <Tabs.List>
+        <Tabs.Trigger value="stats">Stats</Tabs.Trigger>
+        <Tabs.Trigger value="activity">Activity</Tabs.Trigger>
+      </Tabs.List>
+
+      <Tabs.Panel value="stats">
+        <UserStats /> {/* fetches its own data on the server */}
+      </Tabs.Panel>
+
+      <Tabs.Panel value="activity">
+        <ActivityFeed /> {/* fetches its own data on the server */}
+      </Tabs.Panel>
+    </Tabs>
+  );
+}
+```
+
+<Callout type="warn">
+  Don't mark every subcomponent `'use client'` individually. Only the root that
+  holds the Context provider needs `'use client'`. Server Components can be
+  passed as `children` into a client boundary — they remain server-rendered.
+</Callout>
+
+---
+
+## Real-World Use Case
+
+You're building a settings page for a SaaS dashboard. The design calls for tabbed navigation between Profile, Security, Billing, and Notifications sections. Each section makes its own data fetch.
+
+With a compound `<Tabs>`:
+
+- The active tab logic is encapsulated — no `useState` scattered across the page.
+- Each panel's data fetch stays in its own Server Component, co-located with the UI it powers.
+- Keyboard navigation and ARIA roles are handled once inside the compound component, not repeated across every place tabs appear in the app.
+- When the design team asks to add a badge count to the Notifications tab trigger, you extend `<Tabs.Trigger>` with an optional `badge` prop — one change, all instances updated.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Forgetting the null check on context**
+
+`useContext` returns `undefined` if there's no matching provider above it in the tree. Without a null check, the error surfaces as `Cannot read properties of undefined` deep inside your subcomponent — not as "you used this outside a Tabs". Always throw a descriptive error from a `useTabsContext()` wrapper function.
+
+**2. Generating IDs with `Math.random()` or a module-level counter**
+
+ARIA attributes like `aria-controls` and `id` need to match between server and client renders. `Math.random()` generates different values on each side, causing a hydration mismatch. Use React's `useId()` hook — it produces stable, collision-safe IDs that are consistent across SSR and hydration.
+
+**3. Putting all subcomponents in the same file, forever**
+
+Fine to start that way, but as the component grows (keyboard event handling, animation, async content), split each subcomponent into its own file and re-export from an `index.tsx` barrel. The dot-notation API stays identical to consumers.
+
+**4. Controlled and uncontrolled state fighting each other**
+
+If you accept both `value` and `defaultValue`, you need to commit to one source of truth per instance. Switching from uncontrolled to controlled mid-lifecycle (i.e., `value` going from `undefined` to a string after mount) causes React warnings and unpredictable behavior. Follow the same contract React uses: `defaultValue` sets the initial state once; `value` makes the component fully controlled for its lifetime.
+
+---
+
+## Summary
+
+Compound components use React Context to let a parent share state with a set of cooperating children — without the consumer needing to wire anything up manually. The parent owns the state and provides it; subcomponents consume it via a context hook that throws a clear error if used outside the tree. Dot-notation attachment (`Tabs.List`, `Tabs.Trigger`) signals that these components belong together. Supporting both controlled (`value` + `onValueChange`) and uncontrolled (`defaultValue`) modes makes the component usable in a wider range of scenarios. Use `useId()` for any IDs that bridge server and client renders. This pattern is the foundation of every serious React component library — understanding it from the inside makes working with Radix, shadcn/ui, and Headless UI dramatically more productive.

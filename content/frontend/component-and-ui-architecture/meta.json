@@ -8,6 +8,7 @@
     "micro-frontend-orchestration",
     "shadow-dom",
     "error-boundaries",
-    "component-design-patterns"
+    "compound-components",
+    "headless-ui-pattern"
   ]
 }
