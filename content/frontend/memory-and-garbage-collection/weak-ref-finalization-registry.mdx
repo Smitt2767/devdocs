@@ -1,0 +1,247 @@
+---
+title: WeakRef & FinalizationRegistry
+description: A guide to using WeakRef and FinalizationRegistry for weak references and garbage collection callbacks in modern JavaScript.
+---
+
+## Overview
+
+`WeakRef` and `FinalizationRegistry` are two JavaScript built-ins that give you limited, careful visibility into the garbage collector (GC). They let you hold a _weak reference_ to an object — one that doesn't prevent the GC from reclaiming it — and optionally run a cleanup callback after the object is collected.
+
+This is useful in advanced scenarios like caches, object pools, and resource tracking, where you want to hold onto objects opportunistically without causing memory leaks.
+
+<Callout type="warn">
+  These APIs are intentionally non-deterministic. The garbage collector decides
+  *if* and *when* to collect objects. Never write logic that depends on cleanup
+  happening at a predictable time.
+</Callout>
+
+---
+
+## How It Works
+
+### WeakRef
+
+A `WeakRef` wraps an object and exposes a `.deref()` method. If the object is still alive, `.deref()` returns it. If the GC has collected it, `.deref()` returns `undefined`.
+
+Unlike a regular variable holding an object reference, a `WeakRef` does **not** keep the object alive. The GC is free to collect it at any point when no strong references remain.
+
+```ts
+const obj = { name: "session-data" };
+const ref = new WeakRef(obj);
+
+ref.deref(); // { name: "session-data" } — still alive
+```
+
+### FinalizationRegistry
+
+A `FinalizationRegistry` lets you register a callback to be called _after_ an object is garbage collected. You register an object along with a "held value" (any arbitrary data you want passed to the callback — often a key or identifier).
+
+```ts
+const registry = new FinalizationRegistry((heldValue) => {
+  console.log(`Cleaned up: ${heldValue}`);
+});
+
+let target = { data: "..." };
+registry.register(target, "my-target-key");
+
+// When `target` is GC'd, the callback fires with "my-target-key"
+```
+
+The registry holds the _held value_ strongly, but the registered _target_ weakly. The callback fires sometime after the target is collected — not immediately.
+
+---
+
+## Code Examples
+
+### Example 1: A WeakRef-based In-Memory Cache
+
+A cache that holds computed results without preventing GC from reclaiming them under memory pressure.
+
+```ts
+// lib/weak-cache.ts
+
+class WeakCache<K extends object, V> {
+  // Map keys are held strongly, but values are weak
+  private cache = new Map<K, WeakRef<V extends object ? V : never>>();
+  private registry: FinalizationRegistry<K>;
+
+  constructor() {
+    // When a cached value is GC'd, remove its stale map entry
+    this.registry = new FinalizationRegistry((key: K) => {
+      const ref = this.cache.get(key);
+      // Only delete if the ref is actually dead (deref returns undefined)
+      if (ref && ref.deref() === undefined) {
+        this.cache.delete(key);
+      }
+    });
+  }
+
+  set(key: K, value: V extends object ? V : never): void {
+    const ref = new WeakRef(value);
+    this.cache.set(key, ref);
+    // Register value for cleanup; pass the key as the held value
+    this.registry.register(value, key);
+  }
+
+  get(key: K): (V extends object ? V : never) | undefined {
+    return this.cache.get(key)?.deref();
+  }
+
+  has(key: K): boolean {
+    return this.get(key) !== undefined;
+  }
+}
+
+// Usage
+const requestKey = { id: "req-001" }; // object key for the map
+const cache = new WeakCache<typeof requestKey, { result: string }>();
+
+cache.set(requestKey, { result: "computed-value" });
+
+const cached = cache.get(requestKey);
+if (cached) {
+  console.log(cached.result); // "computed-value"
+} else {
+  console.log("Cache miss — recompute");
+}
+```
+
+### Example 2: Tracking DOM Node Lifecycle
+
+Detect when a DOM node is removed and GC'd to clean up associated resources.
+
+```ts
+// lib/dom-tracker.ts
+
+const domRegistry = new FinalizationRegistry((nodeId: string) => {
+  // This fires after the DOM node is garbage collected
+  console.log(`DOM node #${nodeId} has been collected. Releasing resources.`);
+  releaseResources(nodeId);
+});
+
+function releaseResources(id: string) {
+  // e.g., cancel subscriptions, close connections, clear intervals
+  console.log(`Resources for ${id} released.`);
+}
+
+function trackNode(node: Element) {
+  const id = node.id || crypto.randomUUID();
+  domRegistry.register(node, id);
+}
+
+// In your app
+const el = document.getElementById("live-chart");
+if (el) {
+  trackNode(el);
+}
+
+// When `el` is removed from the DOM and no other references exist,
+// the registry callback will eventually fire.
+```
+
+### Example 3: Safe Deref Pattern
+
+Always guard `.deref()` — treat a missing value as a cache miss.
+
+```ts
+// lib/resource-ref.ts
+
+function getOrRecompute<T extends object>(
+  ref: WeakRef<T> | undefined,
+  recompute: () => T,
+): { value: T; ref: WeakRef<T> } {
+  const cached = ref?.deref();
+
+  if (cached !== undefined) {
+    return { value: cached, ref: ref! };
+  }
+
+  // Ref is dead or never existed — recompute
+  const fresh = recompute();
+  return { value: fresh, ref: new WeakRef(fresh) };
+}
+
+// Usage
+let reportRef: WeakRef<{ rows: string[] }> | undefined;
+
+function getReport() {
+  const { value, ref } = getOrRecompute(reportRef, () => ({
+    rows: ["row1", "row2"], // simulate expensive computation
+  }));
+
+  reportRef = ref;
+  return value;
+}
+```
+
+---
+
+## Real-World Use Case
+
+**Scenario: Plugin system with optional resource cleanup**
+
+Imagine a browser-based IDE where plugins register editor instances. Each plugin holds a reference to a `CodeEditor` object. When the user closes a tab, the editor may be GC'd. Using `FinalizationRegistry`, the plugin host can automatically deregister the plugin's entry and free associated WebSocket connections — without requiring the plugin author to manually call a `dispose()` method.
+
+This is especially useful when you don't fully control the lifecycle of third-party plugin code.
+
+---
+
+## Common Mistakes / Gotchas
+
+### 1. Assuming the callback fires immediately (or at all)
+
+The GC is non-deterministic. In short-lived scripts or low-memory situations, cleanup may never run. `FinalizationRegistry` is a _best-effort_ mechanism, not a destructor.
+
+```ts
+// ❌ Wrong — do not rely on this for critical cleanup
+registry.register(socket, socketId);
+// Never assume the socket cleanup callback fires before your app exits
+```
+
+### 2. Storing primitives in WeakRef
+
+`WeakRef` only accepts objects (including functions and arrays). Passing a primitive throws a `TypeError`.
+
+```ts
+// ❌ TypeError: WeakRef target must be an object
+const ref = new WeakRef(42);
+
+// ✅ Correct
+const ref = new WeakRef({ value: 42 });
+```
+
+### 3. Using WeakRef as a substitute for proper lifecycle management
+
+`WeakRef` is not a replacement for explicit `dispose()` patterns or AbortControllers. For predictable cleanup (e.g., canceling a fetch, closing a DB connection), use explicit teardown. Reserve `WeakRef` / `FinalizationRegistry` for _supplemental_, opportunistic cleanup.
+
+<Callout type="info">
+  If your cleanup logic is critical to correctness (e.g., preventing data
+  corruption or closing a file handle), use an explicit lifecycle API.
+  `FinalizationRegistry` is for optional, best-effort cleanup only.
+</Callout>
+
+### 4. Holding strong references inside the registry callback's closure
+
+If your `FinalizationRegistry` callback closes over the same object it's meant to clean up, the GC will never collect it — the closure keeps it alive.
+
+```ts
+const target = { data: "..." };
+
+// ❌ Wrong — callback closure holds `target` alive
+const registry = new FinalizationRegistry(() => {
+  console.log(target); // strong reference inside callback!
+});
+registry.register(target, "key");
+
+// ✅ Correct — only the held value (a primitive/key) is in the callback
+const registry = new FinalizationRegistry((key: string) => {
+  console.log(`Cleaning up ${key}`);
+});
+registry.register(target, "my-key");
+```
+
+---
+
+## Summary
+
+`WeakRef` lets you hold an object reference that doesn't prevent garbage collection, with `.deref()` returning the object or `undefined` if it's been collected. `FinalizationRegistry` complements this by letting you register cleanup callbacks that fire after an object is GC'd. Both APIs are intentionally non-deterministic — the JS engine decides when (and whether) collection happens. They're best suited for supplemental cache invalidation, plugin lifecycle tracking, and memory-sensitive data structures. For any cleanup that must happen reliably, always prefer explicit teardown patterns over relying on the garbage collector.

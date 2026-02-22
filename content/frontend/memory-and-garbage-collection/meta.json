@@ -1,1 +1,11 @@
-{"title":"Memory & Garbage Collection","pages":["index","browser-memory-leak-detection","detached-dom-nodes","garbage-collection-timing"]}
+{
+  "title": "Memory & Garbage Collection",
+  "pages": [
+    "index",
+    "browser-memory-leak-detection",
+    "detached-dom-nodes",
+    "garbage-collection-timing",
+    "weak-ref-finalization-registry",
+    "memory-profiling-chrome-devtools"
+  ]
+}

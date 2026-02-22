@@ -1,0 +1,168 @@
+---
+title: Memory Profiling
+description: How to use Chrome DevTools to detect memory leaks, analyze heap snapshots, and optimize memory usage in web applications.
+---
+
+## Overview
+
+Memory profiling is the process of measuring how your application allocates and retains memory over time. In JavaScript, the garbage collector handles most memory management automatically — but it can only free memory that is no longer referenced. When objects are unintentionally kept alive (a memory leak), your app grows in memory usage, eventually causing slowdowns or crashes.
+
+Chrome DevTools provides three primary tools to diagnose memory problems:
+
+- **Heap Snapshot** — a point-in-time photograph of all objects in the JavaScript heap
+- **Allocation Instrumentation on Timeline** — records allocations as they happen over time
+- **Allocation Sampling** — a low-overhead profiler that shows which functions allocate the most memory
+
+## How It Works
+
+JavaScript engines like V8 allocate objects on the **heap** — a region of memory for dynamically created values. The garbage collector (GC) periodically scans the heap and frees objects with no remaining references.
+
+A memory leak happens when a reference to an object is unintentionally preserved, preventing the GC from freeing it. Common culprits:
+
+- Event listeners not removed when a component unmounts
+- Closures that capture large objects
+- Global variables or caches that grow unbounded
+- Detached DOM nodes still referenced in JavaScript
+
+Chrome DevTools lets you snapshot the heap before and after a user action, then compare the two snapshots to find objects that were created but never freed.
+
+## Code Examples
+
+### Simulating a Memory Leak
+
+```tsx
+// app/components/LeakyComponent.tsx
+"use client";
+
+import { useEffect } from "react";
+
+export default function LeakyComponent() {
+  useEffect(() => {
+    const largeData = new Array(100_000).fill("leak");
+
+    // BAD: attaching a listener without cleaning it up
+    // largeData stays in memory because the closure captures it
+    window.addEventListener("resize", () => {
+      console.log(largeData.length);
+    });
+
+    // No cleanup returned — listener (and largeData) live forever
+  }, []);
+
+  return <div>Leaky component mounted</div>;
+}
+```
+
+### Fixed Version — Proper Cleanup
+
+```tsx
+// app/components/HealthyComponent.tsx
+"use client";
+
+import { useEffect } from "react";
+
+export default function HealthyComponent() {
+  useEffect(() => {
+    const largeData = new Array(100_000).fill("no-leak");
+
+    const handleResize = () => {
+      console.log(largeData.length);
+    };
+
+    window.addEventListener("resize", handleResize);
+
+    // Cleanup removes the reference — GC can collect largeData after unmount
+    return () => {
+      window.removeEventListener("resize", handleResize);
+    };
+  }, []);
+
+  return <div>Healthy component mounted</div>;
+}
+```
+
+### Detecting a Leak with Heap Snapshots (Workflow)
+
+Follow these steps inside Chrome DevTools → **Memory** tab:
+
+```
+1. Open DevTools (F12) → go to the "Memory" tab
+2. Select "Heap snapshot" → click "Take snapshot" (Snapshot 1)
+3. Perform the action you suspect causes a leak
+   (e.g. mount and unmount the leaky component several times)
+4. Click "Take snapshot" again (Snapshot 2)
+5. In the dropdown, switch from "Summary" to "Comparison"
+6. Sort by "# New" or "Size Delta" — objects with a large positive delta
+   that you don't recognize are leak candidates
+```
+
+### Reading Retained Size vs Shallow Size
+
+| Term              | Meaning                                                                       |
+| ----------------- | ----------------------------------------------------------------------------- |
+| **Shallow size**  | Memory the object itself occupies                                             |
+| **Retained size** | Memory freed if this object were deleted (includes everything it keeps alive) |
+
+A small object with a huge retained size is a classic sign of a leak — it's holding a reference chain to something much larger.
+
+### Allocation Timeline (Catching Short-Lived Leaks)
+
+```
+1. DevTools → Memory → "Allocation instrumentation on timeline"
+2. Click "Start"
+3. Interact with your app (navigate, open modals, trigger events)
+4. Click "Stop"
+5. Look for blue bars that do not shrink after GC runs
+   (gray = collected, blue = still retained)
+```
+
+### Allocation Sampling (Production-Safe Profiling)
+
+Allocation sampling has very low overhead and is safe to run on near-production builds:
+
+```
+1. DevTools → Memory → "Allocation sampling"
+2. Click "Start", interact with your app, click "Stop"
+3. The flame chart shows which call stacks allocate the most bytes
+4. Focus on the functions at the top — they are your biggest allocators
+```
+
+## Real-World Use Case
+
+You're building a dashboard that renders and destroys chart components as users switch tabs. After a few tab switches, the browser tab's memory (visible in Chrome Task Manager via `Shift+Esc`) keeps climbing.
+
+You take two heap snapshots — one before tab switching and one after five switches. The Comparison view shows that `ResizeObserver` callback closures are accumulating. You trace it back to a charting library's internal listener not being disconnected when the component unmounts. Adding a cleanup call to `disconnect()` the observer in `useEffect`'s return function resolves the leak.
+
+## Common Mistakes / Gotchas
+
+**1. Taking only one snapshot.**
+One snapshot shows you everything on the heap — most of it is framework internals. You need a _before_ and _after_ snapshot and use Comparison mode to isolate what changed.
+
+**2. Forgetting that React StrictMode double-invokes effects.**
+In development, React intentionally mounts → unmounts → remounts components. If your cleanup function is broken, you'll see double the leaks during profiling in dev mode. Always verify your cleanup works in a production build too.
+
+<Callout type="warn">
+  Profiling in development mode gives misleading results because React
+  StrictMode, source maps, and unminified code all inflate memory usage. Always
+  take a final profile against a production build (`next build && next start`)
+  before concluding whether a leak is real.
+</Callout>
+
+**3. Confusing heap size with actual leak.**
+The heap grows and shrinks as V8 pre-allocates and defers GC. Click **"Collect garbage"** (the trash can icon in the Memory tab) before taking a snapshot to force a GC cycle and get a cleaner baseline.
+
+**4. Ignoring detached DOM nodes.**
+A detached DOM node is an HTML element removed from the document but still referenced in JavaScript. In the Heap Snapshot summary, filter by **"Detached"** in the Class filter input to find them instantly.
+
+<Callout type="info">
+  In the Heap Snapshot view, type `Detached` into the class filter box. Any
+  results there represent DOM nodes that have been removed from the page but are
+  still referenced in JS — a very common source of leaks in SPAs.
+</Callout>
+
+**5. Over-relying on `WeakMap` / `WeakRef` without understanding them.**
+`WeakMap` and `WeakRef` allow the GC to collect their targets, but they are not a general-purpose fix for poor cleanup discipline. Use them deliberately, not as a workaround.
+
+## Summary
+
+Memory profiling with Chrome DevTools gives you direct visibility into the JavaScript heap, letting you find objects that should be freed but aren't. The three main tools — Heap Snapshot, Allocation Timeline, and Allocation Sampling — serve different purposes: snapshots for point-in-time comparison, timeline for catching leaks as they happen, and sampling for identifying high-allocation code paths. Always compare two snapshots using Comparison mode rather than analyzing a single snapshot in isolation. Profile against a production build to avoid noise from development tooling, and always force a GC cycle before snapshotting for accurate results.
