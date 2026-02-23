@@ -1,20 +1,42 @@
 ---
 title: Overview
-description: The JavaScript engine and async execution model that sits beneath all your application code — event loop, task scheduling, and async coordination patterns.
+description: The JavaScript engine, execution model, and async coordination patterns that everything else in frontend engineering builds on.
 ---
 
 ## JavaScript Runtime & Async
 
-JavaScript is single-threaded, but it handles concurrency through an event-driven model that most developers use without fully understanding. This section covers the runtime internals that govern when your code runs, what blocks it, and how async operations coordinate without threads.
+JavaScript is single-threaded — but it handles network requests, timers, user interactions, and streamed data without freezing. Understanding exactly how that works is not optional knowledge. It's the foundation that every rendering decision, performance fix, and async bug you'll ever encounter sits on top of.
 
-Start here before reading anything else — the event loop underlies every rendering decision, scheduling problem, and async bug you will encounter in the sections that follow.
+This section starts at the engine level — how code actually executes, what the call stack is, and how the event loop coordinates work across time — and builds up through scheduling priorities, async patterns, cancellation, and finally the boundary between concurrency and true parallelism.
 
-## What's covered
+Read these articles in order if this is new territory. Each one builds directly on the previous.
 
-**Event Loop, Macrotasks & Microtasks** — The execution model that powers all JavaScript async behavior. Why microtasks (Promises, `queueMicrotask`) always run before the next macrotask (setTimeout, I/O), and what this means for rendering and interaction timing.
+---
 
-**Task Starvation & Scheduler Priorities** — How deeply nested microtasks can starve the render loop, and how the browser's scheduler (and React's own scheduler) assign priority to different types of work.
+## What's Covered
 
-**Promise Combinators & Error Propagation** — `Promise.all`, `Promise.allSettled`, `Promise.race`, and `Promise.any` — when each is appropriate and how unhandled rejections propagate through async chains.
+**Event Loop, Macrotasks & Microtasks**
+How the JavaScript engine executes code and what happens when it runs out of synchronous work. The call stack, execution contexts, the two task queues, and the strict priority order the event loop follows — microtasks always drain completely before any macrotask runs. This is the mental model everything else depends on.
 
-**AbortController & Streaming Fetch** — Cancelling in-flight requests with `AbortController`, and reading streaming responses with `ReadableStream` — the foundation of streaming SSR on the client.
+**Task Starvation & Scheduler Priorities**
+What happens when one priority level monopolizes the thread and lower-priority work never gets CPU time. Covers the full priority stack from synchronous code down to idle callbacks, how React's concurrent scheduler assigns lanes to updates, and the practical patterns for yielding correctly — `startTransition`, `useDeferredValue`, `requestIdleCallback`, and manual chunking.
+
+**Promise Combinators & Error Propagation**
+The four built-in combinators — `Promise.all`, `Promise.allSettled`, `Promise.any`, and `Promise.race` — and what makes each one the right or wrong choice for a given situation. The key dimension is how each combinator handles rejections, and picking the wrong one is one of the most common sources of silent data loss in production async code.
+
+**Async / Await & Error Handling**
+What `async` and `await` actually compile to, and the full range of error handling patterns that follow from that. Covers `try/catch/finally`, error propagation, the result tuple pattern, async loops, the `forEach` trap, top-level `await`, and the `fetch` response status gotcha. The most practically dense article in the section.
+
+**AbortController & Streaming Fetch**
+How to cancel in-flight fetch requests and read HTTP responses incrementally as data arrives. `AbortController` is what makes typeahead search correct, race condition-free. Streaming via `ReadableStream` is what makes AI token-by-token rendering possible. Covers `AbortSignal.timeout()`, combining multiple abort signals, `TextDecoder` chunk handling, and proxy buffering headers.
+
+**Concurrency vs Parallelism**
+The precise distinction between the two terms and why confusing them leads to architectural mistakes. JavaScript is concurrent but not parallel — `async/await` interleaves work on one thread, it does not run work simultaneously. Web Workers introduce true parallelism. Covers when each tool is appropriate, data transfer via `postMessage` and `Transferable` objects, Worker pools, and `SharedArrayBuffer` for shared memory.
+
+---
+
+<Callout type="info">
+  The **WebSockets vs SSE vs Long Polling** topic has moved to the **Networking
+  & Protocols** section, where it fits more naturally alongside HTTP, caching
+  headers, and connection management.
+</Callout>

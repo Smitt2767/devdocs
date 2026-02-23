@@ -5,6 +5,8 @@
     "event-loop-macro-microtasks",
     "task-starvation-scheduler-priorities",
     "promise-combinators-error-propagation",
-    "abort-controller-streaming-fetch"
+    "async-await-error-handling",
+    "abort-controller-streaming-fetch",
+    "concurrency-vs-parallelism"
   ]
 }
