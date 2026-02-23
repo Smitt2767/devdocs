@@ -2,12 +2,12 @@
   "title": "Performance & Core Web Vitals",
   "pages": [
     "index",
-    "interaction-to-next-paint",
-    "cumulative-layout-shift",
     "largest-contentful-paint",
-    "lighthouse-ci-integration",
+    "cumulative-layout-shift",
+    "interaction-to-next-paint",
+    "third-party-script-management",
     "rum-vs-synthetic-monitoring",
     "performance-budgets",
-    "third-party-script-management"
+    "lighthouse-ci-integration"
   ]
 }

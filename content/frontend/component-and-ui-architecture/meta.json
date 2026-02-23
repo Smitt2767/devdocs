@@ -2,14 +2,14 @@
   "title": "Component & UI Architecture",
   "pages": [
     "index",
-    "suspense-boundaries",
     "server-components",
-    "edge-rendering",
-    "micro-frontend-orchestration",
-    "shadow-dom",
+    "suspense-boundaries",
     "error-boundaries",
     "compound-components",
     "headless-ui-pattern",
-    "portal-and-layering-architecture"
+    "portal-and-layering-architecture",
+    "shadow-dom",
+    "edge-rendering",
+    "micro-frontend-orchestration"
   ]
 }

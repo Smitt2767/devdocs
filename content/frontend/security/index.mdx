@@ -1,22 +1,24 @@
 ---
 title: Overview
-description: Attack vectors and mitigations most relevant to frontend engineers — from XSS and CSRF to supply chain risks and secrets management.
+description: The attack vectors and mitigations most relevant to frontend engineers — from active exploits to supply chain risks.
 ---
 
 ## Security
 
-Security in frontend engineering is often misunderstood as "just use HTTPS." In practice, frontend code runs in the most hostile environment in software — the user's browser — where any injected script has full access to the DOM, cookies, and network. This section covers the attack classes that directly target frontend code and the mitigations that actually work.
+Frontend security is not just about libraries and headers — it's about understanding how attacks work at the browser level and building defenses that address the root cause rather than the symptom.
+
+The section moves from the most common active attacks, through browser-enforced defenses, to the code-level and dependency-level risks that are easier to overlook.
 
 ## What's covered
 
-**CSRF vs XSS Mitigation** — The two most common web attack classes. Cross-Site Request Forgery exploits the browser's automatic cookie sending; Cross-Site Scripting exploits injected script execution. Both require different mitigations and are often confused.
+**CSRF vs XSS Mitigation** — The two most common web attacks, how they work mechanically, and the specific mitigations for each — `SameSite` cookies for CSRF, output encoding and CSP for XSS.
 
-**Content Security Policy** — A browser-enforced allowlist that restricts what scripts, styles, and resources a page can load. The primary defense against XSS once an injection vulnerability exists.
+**Content Security Policy** — Browser-enforced allowlists that restrict which scripts, styles, and resources can load on your page. The most effective defense against XSS after it's bypassed your input validation.
 
-**Trusted Types** — A browser API that locks down the DOM sinks (`innerHTML`, `eval`, `document.write`) that XSS attacks target, enforcing that only explicitly trusted values can flow into dangerous APIs.
+**Trusted Types** — A browser API that enforces safe DOM manipulation by preventing raw string injection into dangerous sinks like `innerHTML` and `document.write`.
 
-**Prototype Pollution** — How attackers inject properties onto `Object.prototype` through crafted input, causing unexpected behavior in downstream code that reads inherited properties.
+**Secrets Management** — Keeping API keys, tokens, and credentials out of the client bundle — where they belong in the server environment, how to validate them at startup, and how to audit for accidental exposure.
 
-**Dependency & Supply Chain Risks** — The risk of malicious or compromised npm packages in your dependency tree — typosquatting, maintainer account takeovers, and auditing strategies.
+**Prototype Pollution** — A JavaScript vulnerability where user-controlled input can inject properties into `Object.prototype`, silently affecting all objects in the runtime. Common in data-merging utilities processing untrusted JSON.
 
-**Secrets Management** — What must never be in a frontend bundle, how environment variable prefixes work in Next.js, and how to safely pass server-side configuration to the client.
+**Dependency & Supply Chain Risks** — The attack surface introduced by third-party packages — malicious packages, compromised maintainers, typosquatting, and the tooling that helps you audit and lock your dependency tree.

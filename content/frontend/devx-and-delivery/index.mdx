@@ -1,20 +1,22 @@
 ---
 title: Overview
-description: The engineering systems around shipping software reliably — feature flags, CI/CD, observability, i18n, and design system infrastructure.
+description: The engineering systems around shipping software reliably — CI/CD, feature flags, observability, design systems, and i18n infrastructure.
 ---
 
 ## DevX & Delivery
 
 Writing code is only part of the job. Shipping it safely, monitoring it in production, and maintaining the systems that let a team work effectively at scale are equally important. This section covers the delivery infrastructure that sits around your application code.
 
-## What's covered
+The section follows the lifecycle of a change: automated shipping first, controlled rollout second, observing what breaks third, then the shared systems (design system, i18n) that underpin everything.
 
-**Feature Flags & Progressive Rollouts** — Decoupling deploys from releases. How feature flag systems work, the difference between a kill switch and a percentage rollout, and how to target flags by user segment, region, or cohort without coupling flag logic to your component tree.
+## What's covered
 
 **CI/CD Pipelines for Frontend** — What a modern frontend pipeline looks like: type checking, linting, unit tests, build verification, bundle size checks, Lighthouse CI, preview deployments, and post-deploy smoke tests.
 
+**Feature Flags & Progressive Rollouts** — Decoupling deploys from releases. How feature flag systems work, the difference between a kill switch and a percentage rollout, and how to target flags by user segment, region, or cohort without coupling flag logic to your component tree.
+
 **Error Tracking & Observability** — Capturing and grouping frontend errors with source map symbolication, setting up session replay for reproduction, and the difference between error rate, error volume, and user impact as metrics.
 
-**Internationalization (i18n) Architecture** — Structuring a Next.js app for multiple locales: locale detection and routing, message loading strategies, pluralization and date formatting, and avoiding the common patterns that make i18n expensive to add after the fact.
-
 **Design System Ownership & Versioning** — How to publish and version a shared component library used by multiple teams — semantic versioning, changelog discipline, migration paths for breaking changes, and the organizational models (inner source, platform team) that make it sustainable.
+
+**Internationalization (i18n) Architecture** — Structuring a Next.js app for multiple locales: locale detection and routing, message loading strategies, pluralization and date formatting, and avoiding the common patterns that make i18n expensive to add after the fact.

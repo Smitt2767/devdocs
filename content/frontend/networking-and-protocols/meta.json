@@ -5,8 +5,8 @@
     "http3-and-quic",
     "cors-preflight",
     "samesite-cookie-modes",
-    "api-paradigms",
     "authentication-flows",
+    "api-paradigms",
     "rate-limiting-client"
   ]
 }

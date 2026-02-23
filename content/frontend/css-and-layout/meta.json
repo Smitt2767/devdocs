@@ -2,9 +2,9 @@
   "title": "CSS & Layout",
   "pages": [
     "index",
+    "css-architecture-tradeoffs",
     "css-containment",
     "layout-thrashing",
-    "css-architecture-tradeoffs",
     "animation-performance",
     "theming-and-design-tokens",
     "responsive-design-strategies"

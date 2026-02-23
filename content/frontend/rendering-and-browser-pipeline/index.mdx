@@ -7,21 +7,31 @@ description: How browsers turn HTML, CSS, and JavaScript into pixels — and how
 
 This section covers the full stack from raw bytes to painted pixels. Understanding the rendering pipeline is foundational — performance bugs, layout shifts, and hydration mismatches all trace back to misunderstanding how the browser and React coordinate work.
 
-Topics span two layers: the **browser's internal pipeline** (critical rendering path, compositing, paint vs layout) and **React's rendering model** (fiber architecture, reconciliation, hydration, concurrent features, streaming SSR).
+The section is ordered deliberately: browser internals first, then React's model layered on top. Read the browser pipeline articles before the React-specific ones — the React model only makes sense once you understand what it's building on.
 
 ## What's covered
 
-**Hydration & SSR** — How server-rendered HTML gets "activated" on the client, and how partial and selective hydration reduce the cost of that activation.
+**Critical Rendering Path** — The browser's pipeline from bytes to pixels: parsing, CSSOM construction, render tree, layout, paint, and composite — and how render-blocking resources stall it.
+
+**Render-Blocking Resources** — What makes a resource blocking, how `async` and `defer` change script execution, and the exact steps to eliminate unnecessary render-blocking.
+
+**Paint vs Composite vs Layout** — The three phases of rendering in detail: what triggers each, why layout is the most expensive, and how to push work down to the cheap composite phase.
+
+**Browser Compositing Layers** — How browsers promote elements to GPU-accelerated compositor layers, which CSS properties trigger layout vs paint vs composite, and how to use `will-change` and `transform`/`opacity` correctly for smooth animations.
+
+**Hydration** — How server-rendered HTML gets "activated" on the client, what a hydration mismatch is, and why it happens.
+
+**Partial Hydration** — Reducing the cost of hydration by activating only the interactive parts of a server-rendered page.
+
+**Selective Hydration** — React 18's model for hydrating components in priority order based on user interaction.
 
 **Streaming SSR** — How React 18 streams HTML in chunks so users see content before the full server response completes.
 
 **Concurrent Rendering** — How React schedules and prioritizes rendering work — including time slicing and interruptible renders — to keep UIs responsive under heavy load.
 
-**Fiber Architecture & Reconciliation** — The internal data structure React uses to represent the component tree, how the reconciler diffs trees to determine the minimal set of DOM changes, and why this model enables concurrent features.
+**Fiber Architecture** — The internal data structure React uses to represent the component tree and why this model enables concurrent features.
 
-**Browser Compositing Layers** — How browsers promote elements to GPU-accelerated compositor layers, which CSS properties trigger layout vs paint vs composite, and how to use `will-change` and `transform`/`opacity` correctly for smooth animations.
-
-**Critical Rendering Path** — The browser's pipeline from bytes to pixels: parsing, CSSOM construction, render tree, layout, paint, and composite — and how render-blocking resources stall it.
+**Reconciliation Algorithm** — How React diffs the old and new fiber trees to determine the minimal set of DOM changes needed.
 
 **Render Waterfalls** — How sequential data fetching chains compound latency and how to break them with parallel fetches and Suspense.
 

@@ -7,6 +7,8 @@ description: The network layer between your frontend and the server — HTTP evo
 
 Frontend engineers interact with the network constantly but often treat it as a black box. Understanding the protocols, security boundaries, and authentication models at this layer is essential for building reliable, secure applications — and for diagnosing the class of bugs that only appear in production.
 
+The section moves from the transport layer up through browser security policy, identity, API design, and finally resilience.
+
 ## What's covered
 
 **HTTP/3 & QUIC** — How HTTP/3 eliminates head-of-line blocking by running over QUIC (UDP-based) instead of TCP, and what this means for connection setup latency and multiplexed streams.
@@ -15,8 +17,8 @@ Frontend engineers interact with the network constantly but often treat it as a 
 
 **SameSite Cookie Modes** — `Strict`, `Lax`, and `None` — how each affects when cookies are sent in cross-site requests, and how this interacts with CSRF protection.
 
-**API Paradigms** — REST, GraphQL, tRPC, and their trade-offs for type safety, client flexibility, caching, and team ergonomics.
-
 **Authentication Flows** — Session cookies, JWTs, OAuth 2.0, and OpenID Connect — how each flow works mechanically and where each is the right fit.
+
+**API Paradigms** — REST, GraphQL, tRPC, and their trade-offs for type safety, client flexibility, caching, and team ergonomics.
 
 **Rate Limiting on the Client** — Implementing exponential backoff, jitter, and request queuing to handle rate limit responses gracefully without hammering an API.

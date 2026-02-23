@@ -7,12 +7,14 @@ description: How the browser allocates and reclaims memory, how to detect leaks 
 
 Memory leaks in browser applications are subtle — the page doesn't crash immediately, it just gets slower and slower until the tab is killed. JavaScript's garbage collector handles most memory management automatically, but it can only collect objects that have no live references. Understanding what holds references alive, and how to detect when they shouldn't be, is the core skill in this section.
 
+The section starts with how the GC works, then how to find leaks, then the most common specific cause, then the tooling to investigate all of it.
+
 ## What's covered
+
+**Garbage Collection Timing** — How the browser's GC interacts with the main thread: generational collection, stop-the-world minor collections, incremental major collections, and how GC pauses manifest as jank in performance profiles.
 
 **Browser Memory Leak Detection** — Using Chrome DevTools heap snapshots and the Allocation Profiler to identify retained objects, compare heap states across user interactions, and pinpoint the reference path keeping leaked objects alive.
 
 **Detached DOM Nodes** — DOM nodes that have been removed from the document but are still referenced in JavaScript (event listener closures, cached query results). How to find them in heap snapshots and the patterns that commonly create them.
-
-**Garbage Collection Timing** — How the browser's GC interacts with the main thread: stop-the-world minor collections, incremental major collections, and how GC pauses manifest as jank in performance profiles.
 
 **Memory Profiling with Chrome DevTools** — A practical walkthrough of the Memory panel — when to use heap snapshots vs the Allocation Profiler, how to interpret the retainer tree, and how to confirm a leak is fixed after a code change.

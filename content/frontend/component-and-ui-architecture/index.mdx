@@ -7,6 +7,8 @@ description: Patterns and mechanisms for structuring the UI layer — from compo
 
 This section covers how to structure the UI layer at a system level. Individual components are the unit of composition, but the decisions that matter most are about boundaries — where server work ends, where client interactivity begins, how errors are contained, and how large teams own independent UI surfaces.
 
+The section is ordered from the most foundational model (Server Components, the default in modern React) through progressively more advanced composition patterns, ending with large-scale orchestration concerns.
+
 ## What's covered
 
 **Server Components** — React's model for components that run only on the server, with no JavaScript sent to the client. Covers the server/client boundary, composition patterns, and when to reach for `'use client'`.
@@ -15,14 +17,14 @@ This section covers how to structure the UI layer at a system level. Individual 
 
 **Error Boundaries** — Isolating runtime errors so a single component failure doesn't crash the entire UI tree.
 
-**Edge Rendering** — Running server logic at the CDN edge for lower latency, and what constraints that introduces.
-
-**Micro-frontend Orchestration** — How independently deployed frontend applications compose into a single UI — routing, shared state, and dependency isolation.
-
-**Shadow DOM** — The browser's native encapsulation primitive, how it isolates styles and DOM, and when to use it versus CSS Modules or other scoping approaches.
-
 **Compound Components** — How to build flexible, composable APIs using React Context to share implicit state across a cooperating set of components — the pattern behind tabs, accordions, and every serious UI library.
 
 **Headless UI Pattern** — How to separate component logic, keyboard navigation, and accessibility from markup entirely — building reusable behavior that any consumer can render however they need.
 
 **Portal & Layering Architecture** — How to build a robust layering system for tooltips, modals, toasts, and dropdowns using React portals, stacking contexts, and a coordinated z-index scale.
+
+**Shadow DOM** — The browser's native encapsulation primitive, how it isolates styles and DOM, and when to use it versus CSS Modules or other scoping approaches.
+
+**Edge Rendering** — Running server logic at the CDN edge for lower latency, and what constraints that introduces.
+
+**Micro-frontend Orchestration** — How independently deployed frontend applications compose into a single UI — routing, shared state, and dependency isolation.

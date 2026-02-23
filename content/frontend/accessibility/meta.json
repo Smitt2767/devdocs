@@ -4,9 +4,9 @@
     "index",
     "accessibility-tree",
     "aria-live-regions-internals",
-    "pointer-events",
     "focus-management-in-spas",
     "keyboard-navigation-patterns",
+    "pointer-events",
     "color-contrast-reduced-motion"
   ]
 }

@@ -5,8 +5,8 @@
     "csrf-vs-xss-mitigation",
     "content-security-policy",
     "trusted-types",
+    "secrets-management",
     "prototype-pollution",
-    "dependency-supply-chain-risks",
-    "secrets-management"
+    "dependency-supply-chain-risks"
   ]
 }

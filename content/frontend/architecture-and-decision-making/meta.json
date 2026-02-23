@@ -3,8 +3,8 @@
   "pages": [
     "index",
     "framework-selection-criteria",
-    "technical-debt-identification-prioritization",
+    "api-contract-design",
     "adrs",
-    "api-contract-design"
+    "technical-debt-identification-prioritization"
   ]
 }

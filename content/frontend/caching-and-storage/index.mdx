@@ -7,9 +7,11 @@ description: Caching at every layer of the stack — HTTP headers, CDN edges, se
 
 Caching is one of the highest-leverage performance tools available — and one of the most common sources of hard-to-diagnose bugs. Serving stale data, busting the wrong cache layer, or missing an offline scenario entirely are all caching failures. This section covers the mechanisms at each layer and how they interact.
 
+The section follows the request lifecycle outward: HTTP headers first, then CDN edge, then the client-side network proxy, then structured client storage, and finally what happens when the network disappears entirely.
+
 ## What's covered
 
-**HTTP Caching Strategies** — `Cache-Control` directives (`max-age`, `stale-while-revalidate`, `no-store`), `ETag` and `Last-Modified` for conditional requests, and how browser cache, service worker cache, and CDN cache layer on top of each other. Covers when to use each strategy and which cache layer wins in each scenario.
+**HTTP Caching Strategies** — `Cache-Control` directives (`max-age`, `stale-while-revalidate`, `no-store`), `ETag` and `Last-Modified` for conditional requests, and how browser cache, service worker cache, and CDN cache layer on top of each other.
 
 **Cache Invalidation Strategies** — The hardest problem in caching. Versioned URLs, cache tags, surrogate keys, and the trade-offs of time-based vs event-based invalidation.
 

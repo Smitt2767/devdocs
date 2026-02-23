@@ -7,16 +7,18 @@ description: How code travels from your editor to the browser — build tooling,
 
 The gap between writing code and users running it is larger than it seems. Bundlers, module systems, CDNs, and resource hints all shape what gets downloaded, in what order, and how fast. This section covers the tooling and strategies that sit between your source files and the browser.
 
+The section is ordered to build understanding progressively: first understand what ships and why, then learn to measure it, then learn to optimize delivery, then tackle scale.
+
 ## What's covered
 
 **Tree Shaking Internals** — How bundlers use static analysis of ES module imports to eliminate dead code, what prevents tree shaking (side effects, CommonJS, dynamic imports), and how to verify it's working.
 
 **Code Splitting Strategies** — Route-level, component-level, and vendor splitting. How `next/dynamic` and `React.lazy` work, when to use each, and how to avoid splitting too aggressively.
 
-**Module Federation** — Sharing code between independently deployed applications at runtime — the backbone of micro-frontend architectures. Covers Webpack 5 and Vite plugin approaches.
+**Bundle Analysis & Dependency Auditing** — Using `@next/bundle-analyzer`, `source-map-explorer`, and `depcheck` to find bloat, duplicate dependencies, and unused packages. Measure before you optimize.
 
 **Preload / Prefetch / Preconnect / Priority Hints** — The full set of browser resource hints, what each one does, and how to use them without inadvertently hurting performance by competing with critical resources.
 
-**Bundle Analysis & Dependency Auditing** — Using `@next/bundle-analyzer`, `source-map-explorer`, and `depcheck` to find bloat, duplicate dependencies, and unused packages.
+**Module Federation** — Sharing code between independently deployed applications at runtime — the backbone of micro-frontend architectures. Covers Webpack 5 and Vite plugin approaches.
 
 **Monorepo Tooling** — Structuring a monorepo with pnpm workspaces and Turborepo — task pipelines, remote caching, and the most common configuration mistakes.

@@ -1,22 +1,24 @@
 ---
 title: Overview
-description: Building UIs that work for all users — covering the browser and assistive technology mechanics underneath ARIA, focus, and keyboard interaction.
+description: Building UIs that work for all users — including the underlying browser and assistive technology mechanics.
 ---
 
 ## Accessibility
 
-Accessibility is often treated as a checklist applied at the end of development. This section treats it as a systems problem: understanding how assistive technologies consume the browser's accessibility tree, what ARIA actually does under the hood, and how SPA navigation patterns break screen reader expectations in ways that aren't obvious.
+Accessibility is not a checklist — it's an understanding of how users who rely on assistive technology experience your UI, and how the browser exposes that UI to them. This section covers the browser and AT mechanics underneath the ARIA spec, not just which attributes to add.
+
+The section starts with the browser model that underpins all accessibility, then moves through the dynamic content patterns that break it most often, then interaction design, and finally visual considerations.
 
 ## What's covered
 
-**Accessibility Tree** — The parallel tree structure the browser builds from the DOM for assistive technologies to consume. How roles, names, states, and properties map from HTML elements to accessible objects, and why the accessibility tree often diverges from the visual DOM.
+**Accessibility Tree** — How the browser builds a parallel representation of the DOM for assistive technologies — which elements are included, how roles and properties are computed, and how the tree changes when the DOM changes.
 
-**ARIA Live Regions Internals** — How `aria-live`, `aria-atomic`, and `aria-relevant` tell screen readers to announce dynamic content changes. Why `polite` vs `assertive` matters, and the common patterns that cause live regions to announce nothing, or announce too much.
+**ARIA Live Regions Internals** — How `aria-live`, `aria-atomic`, and `aria-relevant` instruct screen readers to announce dynamic content changes — and the exact timing and queuing behavior that causes announcements to be missed or duplicated.
 
-**Pointer Events** — The unified event model that covers mouse, touch, and stylus input. How `pointer-events: none` interacts with assistive technology hit testing, and how to handle multi-touch without breaking single-touch or keyboard workflows.
+**Focus Management in SPAs** — How client-side navigation breaks the browser's default focus behavior and what you must do to restore it — moving focus to the right element after route changes, modal opens, and dynamic content insertions.
 
-**Focus Management in SPAs** — Route changes in client-side apps don't move focus or announce page changes to screen readers the way full page loads do. Covers the focus management strategies that bridge this gap correctly.
+**Keyboard Navigation Patterns** — The interaction patterns that keyboard users expect: arrow key navigation within composite widgets, roving tabindex, keyboard shortcuts, and the ARIA Authoring Practices Guide patterns for menus, tabs, and dialogs.
 
-**Keyboard Navigation Patterns** — `tabindex` values and their effects, managing focus within composite widgets (menus, dialogs, tabs), the roving tabindex pattern, and the ARIA Authoring Practices Guide patterns that define expected keyboard behavior.
+**Pointer Events** — How `pointer-events`, `touch-action`, and the Pointer Events API unify mouse, touch, and stylus input — and the accessibility implications of touch-only interaction patterns.
 
-**Color Contrast & Reduced Motion** — WCAG contrast requirements (AA vs AAA), computing contrast ratios, and supporting `prefers-reduced-motion` for users with vestibular disorders who experience motion sickness from animations.
+**Color Contrast & Reduced Motion** — WCAG contrast requirements, how to audit contrast programmatically, and how to respect `prefers-reduced-motion` for users who experience motion sickness or vestibular disorders.

@@ -2,10 +2,10 @@
   "title": "DevX & Delivery",
   "pages": [
     "index",
-    "feature-flags-progressive-rollouts",
     "ci-cd-pipelines-frontend",
+    "feature-flags-progressive-rollouts",
     "error-tracking-observability",
-    "internationalization-i18n-architecture",
-    "design-system-ownership-versioning"
+    "design-system-ownership-versioning",
+    "internationalization-i18n-architecture"
   ]
 }
