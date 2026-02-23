@@ -5,7 +5,6 @@
     "event-loop-macro-microtasks",
     "task-starvation-scheduler-priorities",
     "promise-combinators-error-propagation",
-    "abort-controller-streaming-fetch",
-    "websockets-vs-sse-vs-long-polling"
+    "abort-controller-streaming-fetch"
   ]
 }
