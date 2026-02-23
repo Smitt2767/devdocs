@@ -32,11 +32,3 @@ How to cancel in-flight fetch requests and read HTTP responses incrementally as 
 
 **Concurrency vs Parallelism**
 The precise distinction between the two terms and why confusing them leads to architectural mistakes. JavaScript is concurrent but not parallel — `async/await` interleaves work on one thread, it does not run work simultaneously. Web Workers introduce true parallelism. Covers when each tool is appropriate, data transfer via `postMessage` and `Transferable` objects, Worker pools, and `SharedArrayBuffer` for shared memory.
-
----
-
-<Callout type="info">
-  The **WebSockets vs SSE vs Long Polling** topic has moved to the **Networking
-  & Protocols** section, where it fits more naturally alongside HTTP, caching
-  headers, and connection management.
-</Callout>
