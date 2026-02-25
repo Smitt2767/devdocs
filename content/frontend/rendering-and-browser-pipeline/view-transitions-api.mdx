@@ -543,7 +543,7 @@ Implementation: `view-transition-name: product-image-${id}` on the `<img>` in bo
 The API is supported in Chrome 111+, Safari 18+, and Firefox 130+. Older browsers and some environments (jsdom in tests) don't have it. Always check `if (!document.startViewTransition)` and fall back to the plain DOM update.
 
 **2. Using the same `view-transition-name` on multiple simultaneous elements.**
-If two elements share a name at the moment a transition fires, the browser silently skips both. This happens easily in lists when you hardcode the name or copy-paste it. Always generate names from stable IDs: `viewTransitionName: \`card-${item.id}\``.
+If two elements share a name at the moment a transition fires, the browser silently skips both. This happens easily in lists when you hardcode the name or copy-paste it. Always generate names from stable IDs: ``viewTransitionName: `card-${item.id}` ``.
 
 **3. Awaiting data fetches inside the `startViewTransition` callback.**
 The callback should be a fast, synchronous DOM mutation. The browser won't finish capturing the new state until the callback's returned Promise resolves — so `async` callbacks delay the visual transition. Fetch data before calling `startViewTransition`, then apply it synchronously inside the callback.

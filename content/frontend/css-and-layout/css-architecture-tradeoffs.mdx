@@ -468,7 +468,7 @@ h2 {
 ```
 
 **4. Defining components inside Tailwind classes without `twMerge`.**
-Passing additional `className` props to a Tailwind-based component and merging with string concatenation (`${base} ${props.className}`) produces conflicting utilities. When both `px-4` (from base) and `px-6` (from caller) appear, CSS source order — not JSX string order — determines which wins, producing unpredictable results. Use `twMerge` to deduplicate properly.
+Passing additional `className` props to a Tailwind-based component and merging with string concatenation (`` `${base} ${props.className}` ``) produces conflicting utilities. When both `px-4` (from base) and `px-6` (from caller) appear, CSS source order — not JSX string order — determines which wins, producing unpredictable results. Use `twMerge` to deduplicate properly.
 
 **5. Not using `@layer` to manage third-party style conflicts.**
 When a UI library ships its own global CSS, it often conflicts with your own styles at the specificity level. Wrapping third-party styles in a low-priority `@layer` lets your styles override them without `!important`:
@@ -508,7 +508,7 @@ Runtime CSS-in-JS libraries like styled-components and Emotion inject `<style>` 
 
 **Q3. What does Tailwind's `twMerge` solve and why is string concatenation insufficient?**
 
-In Tailwind, a utility class like `px-4` and `px-6` are separate CSS rules in the stylesheet, with the last one in the _stylesheet_ winning when both are applied — not the last one in the JSX `className` string. If you merge Tailwind classes with string concatenation (`\`${base} ${override}\``), conflicting utilities (like two `px-`values) both remain in the class attribute, and the CSS source order — which is determined by how Tailwind generates the stylesheet, not by your string — determines which wins. This is unpredictable and fragile.`twMerge` parses the class list and removes earlier utilities when a conflict is detected, so the "last one in the string wins" mental model works correctly.
+In Tailwind, a utility class like `px-4` and `px-6` are separate CSS rules in the stylesheet, with the last one in the _stylesheet_ winning when both are applied — not the last one in the JSX `className` string. If you merge Tailwind classes with string concatenation (`` `${base} ${override}` ``), conflicting utilities (like two `px-`values) both remain in the class attribute, and the CSS source order — which is determined by how Tailwind generates the stylesheet, not by your string — determines which wins. This is unpredictable and fragile.`twMerge` parses the class list and removes earlier utilities when a conflict is detected, so the "last one in the string wins" mental model works correctly.
 
 **Q4. What is the `composes` keyword in CSS Modules and what problem does it solve?**
 
