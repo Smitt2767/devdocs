@@ -1,19 +1,15 @@
 ---
 title: Fiber Architecture
-description: A deep dive into React's Fiber reconciler — how it enables incremental rendering, priority scheduling, and concurrent features.
+description: React's internal reconciliation engine — fiber nodes, double buffering, the work loop, how hooks are stored, and why the render phase must be pure.
 ---
 
 ## Overview
 
-React Fiber is the internal reconciliation engine that has powered React since version 16. Before Fiber, React's reconciler worked synchronously: once it started rendering a tree, it couldn't stop until it was done. On large trees, this could freeze the main thread and drop frames.
+React Fiber is the internal reconciliation engine that has powered React since version 16. Before Fiber, React used a recursive stack-based reconciler that was entirely synchronous — once it started rendering a component tree, it ran to completion with no way to stop. On large trees this froze the main thread and dropped frames.
 
-Fiber rewrites the reconciler to be **incremental and interruptible**. Work is broken into small units called _fibers_, and React can pause, resume, abort, or reprioritize that work between frames. This is what makes Concurrent Mode features like `useTransition`, `Suspense`, and streaming SSR possible.
+Fiber replaces the synchronous recursion with an iterative **work loop** over a linked list of **fiber nodes**. Each fiber is a unit of work that React can pause, resume, prioritize, or discard. This restructuring is what makes every concurrent React feature — `useTransition`, Suspense, streaming, selective hydration — possible at all.
 
-<Callout type="info">
-  You don't interact with Fiber directly — it's an implementation detail. But
-  understanding it will make concurrent features, render behavior, and
-  performance debugging significantly clearer.
-</Callout>
+You never interact with Fiber directly. But understanding its mechanics answers a cluster of questions that are otherwise hard to reason about: Why must render functions be pure? Why does `StrictMode` double-invoke renders in development? How does React know which hook is which without names? Why does changing element type unmount state? All of these trace directly back to how Fiber works internally.
 
 ---
 
@@ -21,289 +17,514 @@ Fiber rewrites the reconciler to be **incremental and interruptible**. Work is b
 
 ### The Fiber Node
 
-Each React element (component, DOM node, fragment) gets a corresponding **fiber node** — a plain JavaScript object that acts as a unit of work. A fiber stores:
-
-- The component type and its props
-- A reference to its parent, child, and sibling fibers (forming a linked list tree)
-- The output to be committed to the DOM
-- Effect flags (did this fiber update? does it need a layout effect run?)
-- A priority lane
+Every React element (component, DOM node, fragment, context) maps to a **fiber node** — a plain JavaScript object that acts as the unit of work for the reconciler. A fiber stores everything React needs to process and track that element:
 
 ```ts
-// Simplified shape of an internal Fiber node (not public API)
+// Simplified internal fiber shape (not public API — internal implementation detail)
 type Fiber = {
-  tag: number; // FunctionComponent, HostComponent, etc.
-  type: any; // e.g. the actual function or 'div'
-  key: string | null;
-  pendingProps: any;
-  memoizedProps: any;
-  memoizedState: any; // hooks state is stored here as a linked list
-  return: Fiber | null; // parent
-  child: Fiber | null; // first child
-  sibling: Fiber | null; // next sibling
-  flags: Flags; // Update | Placement | Deletion, etc.
-  lanes: Lanes; // priority
-  alternate: Fiber | null; // double-buffer counterpart
+  // Identity
+  tag: WorkTag; // FunctionComponent = 0, HostComponent = 5, etc.
+  type: any; // The actual function, class, or string like 'div'
+  key: string | null; // The key prop — used for list reconciliation
+
+  // Props and state
+  pendingProps: any; // Props for the current render
+  memoizedProps: any; // Props from the last committed render
+  memoizedState: any; // For function components: first hook in the hooks linked list
+  // For class components: the component instance's state
+
+  // Tree structure — a linked list, not a flat array
+  return: Fiber | null; // Parent fiber
+  child: Fiber | null; // First child
+  sibling: Fiber | null; // Next sibling (same level)
+
+  // Scheduling
+  lanes: Lanes; // Priority bitmask for this fiber's pending work
+  childLanes: Lanes; // Union of all descendant fiber priorities
+
+  // Effects
+  flags: Flags; // What needs to happen: Placement | Update | Deletion | PassiveEffect
+  updateQueue: any; // Queued state updates and effects
+
+  // Double buffering
+  alternate: Fiber | null; // Pointer to the counterpart in the other tree
 };
 ```
 
-### Double Buffering
+The tree structure is a **singly-linked list** rather than a traditional array of children. This is critical for interruptibility: React can pause after processing any single fiber node and resume later, because it just needs to remember which fiber it stopped at — the `child`, `sibling`, and `return` pointers provide the traversal path.
 
-React maintains **two fiber trees** at all times:
+### How Hooks Are Stored on the Fiber
 
-- The **current tree** — the one currently rendered on screen.
-- The **work-in-progress (WIP) tree** — the tree being built for the next render.
+This is one of the most illuminating internal details: **hooks are stored as a linked list on the fiber's `memoizedState` field**. Each node in the list corresponds to one hook call, in the order they were called.
 
-Each fiber in the current tree has an `alternate` pointer to its counterpart in the WIP tree and vice versa. When React finishes building the WIP tree, it atomically swaps it to become the new current tree. This means the user never sees a half-rendered state.
+```ts
+// Each hook call becomes a node in this linked list
+type Hook = {
+  memoizedState: any; // The hook's current state
+  // useState: the state value
+  // useEffect: the effect object {create, deps, destroy}
+  // useRef: { current: value }
+  // useMemo: [cachedValue, deps]
+  queue: any; // Update queue (useState, useReducer)
+  next: Hook | null; // Next hook in this component's chain
+};
+```
 
-### The Two Phases
+This is exactly why **the Rules of Hooks exist**:
 
-Fiber work is split into two phases:
+React has no other way to identify which hook is which. There are no names, no keys — only position in the linked list. If you call `useState` conditionally, the list length changes between renders. React tries to read hook #3 and finds hook data that belongs to a different hook — state corruption or a runtime error.
 
-**1. Render phase (interruptible)**
+```tsx
+// React's internal view of this component's hooks:
 
-React walks the fiber tree, calling your component functions, computing diffs, and building the WIP tree. This phase is **pure** — no DOM mutations, no side effects. Because it's pure, React can throw it away and restart if something higher-priority arrives (e.g., a user keypress).
+function UserProfile({ userId }: { userId: string }) {
+  const [name, setName] = useState(""); // Hook 1: { memoizedState: "" }
+  const [loading, setLoading] = useState(true); // Hook 2: { memoizedState: true }
+  const nameRef = useRef<HTMLElement>(null); // Hook 3: { memoizedState: { current: null } }
 
-**2. Commit phase (synchronous, non-interruptible)**
+  useEffect(() => {
+    // Hook 4: { memoizedState: { create, deps, destroy } }
+    fetchUser(userId).then((u) => {
+      setName(u.name);
+      setLoading(false);
+    });
+  }, [userId]);
 
-Once the WIP tree is complete, React commits it to the DOM in one synchronous pass. It then fires layout effects (`useLayoutEffect`), and schedules passive effects (`useEffect`) asynchronously. This phase cannot be interrupted because partial DOM mutations would produce a broken UI.
+  // ...
+}
 
-### Priority Lanes
+// Fiber's memoizedState linked list:
+// Hook1 → Hook2 → Hook3 → Hook4 → null
+// Re-render: React reads them in order, left to right. Order must be identical.
+```
 
-React assigns every update a **lane** — a bitmask representing priority. Lanes include:
+### Double Buffering — Two Trees, One Swap
 
-| Lane                | Example trigger                |
-| ------------------- | ------------------------------ |
-| SyncLane            | `ReactDOM.flushSync()`         |
-| InputContinuousLane | `onChange`, scroll             |
-| DefaultLane         | `setState` in an event handler |
-| TransitionLane      | `startTransition()`            |
-| IdleLane            | Background pre-rendering       |
+React maintains two fiber trees simultaneously:
 
-The scheduler processes higher-priority lanes first. A `startTransition` update can be interrupted mid-render by an `InputContinuousLane` update — React discards the WIP tree and handles the urgent work first.
+- **Current tree** — the fiber tree currently reflected in the DOM (what users see)
+- **Work-in-progress (WIP) tree** — the fiber tree being built for the next render
+
+Every fiber in the current tree has an `alternate` pointer to its counterpart in the WIP tree, and vice versa. When React builds the WIP tree, it clones and mutates — it doesn't build from scratch. When rendering completes, React swaps the two trees atomically by updating a single `root.current` pointer. The old WIP tree becomes the new current; the old current becomes available to be recycled as the next WIP tree.
+
+```
+current tree:           work-in-progress tree:
+  App ←──alternate──→  App (WIP)
+  │                     │
+  Header ←─alternate─→  Header (WIP)
+  │                     │
+  Main ←──alternate──→  Main (WIP)
+
+After commit:
+  root.current = WIP tree  ← atomic pointer swap
+  old current tree becomes the next WIP
+```
+
+The benefit: users never see a partially-rendered state. The DOM only updates after the entire WIP tree is complete and verified. No flashing, no partial layouts.
+
+### The Work Loop
+
+React's work loop is an iterative depth-first traversal of the fiber tree:
+
+```
+1. beginWork(fiber)  — call component function, produce child fibers
+   ↓
+2. If fiber has a child → move to child, beginWork(child)
+   ↓ (recurse down)
+3. If fiber has no child → completeWork(fiber) — build DOM node or collect effects
+   ↓
+4. If fiber has a sibling → move to sibling, beginWork(sibling)
+   ↓
+5. If fiber has no sibling → return to parent, completeWork(parent)
+   ↓ (bubble up)
+6. Repeat until root is reached
+```
+
+Between every fiber, the scheduler checks: "Has a higher-priority update arrived? Has the frame deadline been exceeded?" If yes, the loop pauses and yields to the browser. If no, the next fiber is processed immediately.
+
+This is what "time slicing" means at the implementation level — the work loop naturally yields at fiber boundaries, and those boundaries are frequent enough that the main thread stays available for input events.
+
+### Render Phase vs Commit Phase
+
+**Render phase (interruptible):** React runs `beginWork` and `completeWork` on each fiber, executing component functions, computing diffs, and building the WIP tree. No DOM mutations occur here. Because it's pure, the entire WIP tree can be thrown away and rebuilt if a higher-priority update arrives.
+
+**Commit phase (synchronous, non-interruptible):** Once the WIP tree is complete, React commits it in three sub-phases:
+
+1. **Before mutation** — `getSnapshotBeforeUpdate` for class components
+2. **Mutation** — applies all DOM insertions, updates, and deletions
+3. **Layout** — fires `useLayoutEffect` cleanup and setup synchronously
+
+After commit, `useEffect` cleanup and setup are scheduled asynchronously (passive effects).
+
+The commit phase cannot be interrupted because partial DOM mutations would produce a broken UI — users would see elements in an inconsistent intermediate state.
 
 ---
 
 ## Code Examples
 
-### Observing Interruptible Rendering with `useTransition`
+### The Effect of Changing Element Type — Fiber Unmount
 
-This example demonstrates the Fiber scheduler prioritizing urgent input over a heavy state update.
+The reconciler's first rule: **different types = tear down and rebuild**. This is a direct consequence of how fiber nodes are keyed by type.
 
 ```tsx
-// app/search/page.tsx
+// app/profile/page.tsx
 "use client";
 
-import { useState, useTransition } from "react";
-import { HeavyResultsList } from "@/components/heavy-results-list";
+import { useState } from "react";
 
-export default function SearchPage() {
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<string[]>([]);
-  const [isPending, startTransition] = useTransition();
-
-  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const value = e.target.value;
-
-    // Urgent: update the input immediately (SyncLane / InputContinuousLane)
-    setQuery(value);
-
-    // Non-urgent: defer the expensive results update (TransitionLane)
-    // Fiber can interrupt this render if the user types again
-    startTransition(() => {
-      const filtered = generateResults(value); // expensive operation
-      setResults(filtered);
-    });
-  }
+// Two components with different types — swapping them destroys state
+function RegularUserPanel({ name }: { name: string }) {
+  const [notes, setNotes] = useState(""); // state lives in the RegularUserPanel fiber
 
   return (
     <div>
-      <input
-        value={query}
-        onChange={handleChange}
-        placeholder="Search..."
-        className="border p-2 w-full"
+      <h2>{name}</h2>
+      <textarea
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+        placeholder="Add notes..."
       />
-      {isPending && <p className="text-gray-400 text-sm">Updating results…</p>}
-      <HeavyResultsList items={results} />
     </div>
   );
 }
 
-function generateResults(query: string): string[] {
-  // Simulate a large computation
-  return Array.from(
-    { length: 10_000 },
-    (_, i) => `${query} result ${i}`,
-  ).filter((item) => item.includes(query));
+function AdminUserPanel({ name }: { name: string }) {
+  const [notes, setNotes] = useState(""); // completely separate fiber, separate state
+
+  return (
+    <div className="border-2 border-red-500">
+      <h2>ADMIN: {name}</h2>
+      <textarea
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+        placeholder="Admin notes..."
+      />
+    </div>
+  );
+}
+
+export default function ProfilePage() {
+  const [isAdmin, setIsAdmin] = useState(false);
+  const name = "Alice";
+
+  return (
+    <div>
+      <button onClick={() => setIsAdmin((a) => !a)}>Toggle admin view</button>
+
+      {/*
+        When isAdmin flips, React sees two different component types
+        at the same position in the tree.
+
+        Fiber rule: different type = unmount current fiber, mount new fiber.
+        The textarea's `notes` state is DESTROYED when toggling.
+        A new fiber node is created with a fresh useState("") for the new type.
+      */}
+      {isAdmin ? (
+        <AdminUserPanel name={name} />
+      ) : (
+        <RegularUserPanel name={name} />
+      )}
+    </div>
+  );
 }
 ```
 
+---
+
+### The `key` Prop — Fiber Identity in Lists
+
 ```tsx
-// components/heavy-results-list.tsx
-// No 'use client' needed — this is a Client Component only because
-// it's imported by one. It receives serializable props.
+// components/TodoList.tsx
+"use client";
 
-type Props = { items: string[] };
+import { useState } from "react";
 
-export function HeavyResultsList({ items }: Props) {
+interface Todo {
+  id: string;
+  text: string;
+  priority: "high" | "low";
+}
+
+interface TodoItemProps {
+  todo: Todo;
+}
+
+function TodoItem({ todo }: TodoItemProps) {
+  // Each TodoItem has its own fiber with its own expanded state
+  const [expanded, setExpanded] = useState(false);
+
   return (
-    <ul className="mt-4 space-y-1">
-      {items.slice(0, 50).map((item) => (
-        <li key={item} className="text-sm">
-          {item}
-        </li>
+    <li>
+      <button onClick={() => setExpanded((e) => !e)}>
+        {todo.priority === "high" ? "🔴" : "🟢"} {todo.text}
+        {expanded && <span> (details...)</span>}
+      </button>
+    </li>
+  );
+}
+
+export function TodoList({ todos }: { todos: Todo[] }) {
+  return (
+    <ul>
+      {todos.map((todo) => (
+        /*
+          key={todo.id} — React uses this to match fiber nodes across re-renders.
+
+          If a todo moves position in the list (sort, filter, reorder),
+          React matches by key, not by index. The same fiber (and its state)
+          follows the item as it moves.
+
+          Without key (or with key={index}): React matches by position.
+          Sorting the list would apply item A's expanded state to item B's
+          new position — incorrect behavior.
+        */
+        <TodoItem key={todo.id} todo={todo} />
       ))}
     </ul>
   );
 }
 ```
 
-### Suspense Boundaries and Fiber
+---
 
-Fiber's work-in-progress mechanism powers Suspense. When a component throws a Promise, React catches it in the render phase, marks the fiber subtree as suspended, and renders the nearest `<Suspense>` fallback from the current (committed) tree — all without touching the DOM prematurely.
+### Suspense and the Fiber Work Loop
+
+When a component throws a Promise during the render phase, the Fiber work loop catches it and handles it without touching the DOM:
 
 ```tsx
 // app/dashboard/page.tsx
 import { Suspense } from "react";
-import { UserProfile } from "@/components/user-profile";
-import { ActivityFeed } from "@/components/activity-feed";
 
-// Both children are Server Components that async-fetch their own data.
-// Fiber handles the suspended states independently per subtree.
-export default function DashboardPage() {
+// Async Server Components — both suspend independently
+async function UserStats({ userId }: { userId: string }) {
+  // This fetch causes the fiber to suspend during the render phase.
+  // React catches the thrown Promise, marks this fiber subtree as suspended,
+  // skips it, and continues rendering the rest of the tree.
+  const stats = await fetch(`/api/users/${userId}/stats`).then((r) => r.json());
+
   return (
-    <div className="grid grid-cols-2 gap-6">
-      <Suspense fallback={<ProfileSkeleton />}>
-        <UserProfile />
-      </Suspense>
-      <Suspense fallback={<FeedSkeleton />}>
-        <ActivityFeed />
-      </Suspense>
+    <div className="stats-grid">
+      <span>Posts: {stats.postCount}</span>
+      <span>Followers: {stats.followerCount}</span>
     </div>
   );
 }
 
-function ProfileSkeleton() {
-  return <div className="animate-pulse h-32 bg-gray-200 rounded" />;
+async function RecentPosts({ userId }: { userId: string }) {
+  const posts = await fetch(`/api/users/${userId}/posts`).then((r) => r.json());
+
+  return (
+    <ul>
+      {posts.map((p: { id: string; title: string }) => (
+        <li key={p.id}>{p.title}</li>
+      ))}
+    </ul>
+  );
 }
 
-function FeedSkeleton() {
-  return <div className="animate-pulse h-64 bg-gray-200 rounded" />;
+export default function DashboardPage({
+  params,
+}: {
+  params: { userId: string };
+}) {
+  return (
+    <div>
+      {/*
+        Each Suspense boundary is an independent unit in the fiber tree.
+        When UserStats suspends, React:
+        1. Marks the UserStats fiber subtree as suspended (render phase)
+        2. Renders the fallback from the committed (current) tree
+        3. Continues rendering RecentPosts — unblocked
+        4. When UserStats resolves, schedules it as a low-priority update
+      */}
+      <Suspense fallback={<div className="skeleton h-16 animate-pulse" />}>
+        <UserStats userId={params.userId} />
+      </Suspense>
+
+      <Suspense fallback={<div className="skeleton h-48 animate-pulse" />}>
+        <RecentPosts userId={params.userId} />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+---
+
+### StrictMode — Deliberate Double Invocation
+
+React's `StrictMode` deliberately invokes the render phase twice in development. This is a direct consequence of Fiber's interruptible design — if React can restart a render, component functions must be idempotent. `StrictMode` enforces this by catching impure renders early.
+
+```tsx
+// components/ImpureExample.tsx
+"use client";
+
+import { useState } from "react";
+
+// This is a contrived demonstration of what StrictMode catches
+
+let renderCount = 0; // module-level mutable state — a side effect in render
+
+export function ImpureComponent() {
+  renderCount++; // ❌ Side effect in render body
+
+  // In development with StrictMode, this component renders twice.
+  // renderCount becomes 2 instead of 1 after the first mount.
+  // In production (or without StrictMode), renderCount is 1.
+  // This inconsistency would be a bug in production once concurrent
+  // features interrupt and restart renders.
+
+  const [count, setCount] = useState(0);
+
+  return (
+    <div>
+      <p>Render count: {renderCount}</p>
+      <button onClick={() => setCount((c) => c + 1)}>Click: {count}</button>
+    </div>
+  );
 }
 ```
 
 ```tsx
-// components/user-profile.tsx
-// Server Component — no 'use client'
-async function fetchUser() {
-  const res = await fetch("https://api.example.com/user/me", {
-    next: { revalidate: 60 },
-  });
-  if (!res.ok) throw new Error("Failed to fetch user");
-  return res.json() as Promise<{ name: string; avatar: string }>;
-}
+// components/PureExample.tsx — the correct pattern
+"use client";
 
-export async function UserProfile() {
-  const user = await fetchUser();
+import { useState, useEffect, useRef } from "react";
+
+export function PureComponent() {
+  const [count, setCount] = useState(0);
+  const renderCountRef = useRef(0);
+
+  // ✅ useEffect runs after commit — not during render phase.
+  // Safe to have side effects here. StrictMode runs effects twice
+  // in development too, but that's handled by the cleanup function.
+  useEffect(() => {
+    renderCountRef.current++;
+
+    return () => {
+      // StrictMode runs cleanup + setup twice — this correctly resets state
+      renderCountRef.current--;
+    };
+  });
+
   return (
-    <div className="flex items-center gap-3">
-      <img
-        src={user.avatar}
-        alt={user.name}
-        className="w-10 h-10 rounded-full"
-      />
-      <span className="font-medium">{user.name}</span>
+    <div>
+      <p>Committed renders: {renderCountRef.current}</p>
+      <button onClick={() => setCount((c) => c + 1)}>Click: {count}</button>
     </div>
   );
 }
+```
+
+<Callout type="warn">
+  If you see effects firing twice in development, `StrictMode` is working
+  correctly — it's surfacing impure code that would cause subtle bugs when
+  concurrent features interrupt and restart renders. Never disable `StrictMode`
+  to silence the double-invocation. Fix the impurity.
+</Callout>
+
+---
+
+### Inspecting Fiber in the DevTools
+
+```ts
+// You can access the fiber node for any DOM element from the browser console.
+// This is useful for debugging state and hook values during development.
+
+// Get the fiber for any DOM element:
+const element = document.querySelector(".your-component");
+
+// React stores the fiber on the DOM node under an internal key
+const fiberKey = Object.keys(element).find(
+  (k) =>
+    k.startsWith("__reactFiber") || k.startsWith("__reactInternalInstance"),
+);
+
+if (fiberKey) {
+  const fiber = (element as any)[fiberKey];
+  console.log("Fiber type:", fiber.type?.name ?? fiber.type);
+  console.log("Memoized state (hooks chain):", fiber.memoizedState);
+  console.log("Memoized props:", fiber.memoizedProps);
+  console.log("Alternate (WIP counterpart):", fiber.alternate);
+  console.log("Lanes:", fiber.lanes);
+}
+
+// Note: this is an internal API and key format changes between React versions.
+// Use only for debugging in development — never rely on this in production code.
 ```
 
 ---
 
 ## Real-World Use Case
 
-**E-commerce product filter page**
+**Filter sidebar with instant response.** A product catalog has 20 filter checkboxes. Each toggle triggers a large list re-render across potentially thousands of items. Without Fiber-aware code, rapid checkbox toggling feels laggy because each render blocks the main thread.
 
-A product listing page has a sidebar with 20+ filter checkboxes (price, brand, rating, size). Each checkbox triggers a re-render that filters thousands of items and re-renders a large grid.
+With `startTransition`: the checkbox updates (its `checked` state) runs as `InputContinuousLane` — synchronous, instant. The list re-render runs as `TransitionLane` — the work loop processes it in chunks, yielding between fibers. If the user clicks another checkbox before the list re-renders, the work loop's pending transition is discarded (the WIP tree is thrown away), and a new transition starts with the latest filter state. The user only waits for the render they care about — the final state.
 
-Without Fiber-aware code, rapid checkbox toggling causes the input to feel laggy because each update blocks the main thread while the grid re-renders.
-
-Using `startTransition`, you mark the grid re-render as non-urgent. The Fiber scheduler allows React to interrupt that render if the user clicks another checkbox, discarding the stale WIP tree and starting fresh with the latest filter state. The checkboxes respond instantly; the grid catches up after.
-
-This is only possible because Fiber's render phase is interruptible — the commit phase only fires once the correct final state is ready.
+The fiber-per-item structure makes this efficient: React can identify exactly which product card fibers need updating (those whose `pendingProps` changed) and skip the rest, rather than re-running every component.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-### 1. Assuming renders are synchronous by default in Concurrent Mode
+**1. Putting side effects in the render body.**
+The render phase is interruptible — React may start, abandon, and restart it. Any side effect in the component function body (API calls, mutations, analytics, `console.log` for counting renders) fires once per render _attempt_, not once per commit. In concurrent mode with `startTransition`, a component may render 2–3 times before a single commit. Use `useEffect` for side effects that should run once per committed render.
 
-Once you opt into concurrent features (via `startTransition`, `useDeferredValue`, or the React 18 `createRoot` API — which Next.js App Router uses by default), renders are no longer guaranteed to be synchronous or uninterrupted. **Side effects in the render body can fire multiple times** if React restarts the render phase.
+**2. Calling hooks conditionally or in loops.**
+Hooks are stored as a positional linked list on the fiber node. React identifies each hook by its position in the chain, not by any name or identifier. Calling a hook inside an `if` or a `for` loop changes the list length or order between renders — React reads the wrong hook data and either throws an error or corrupts state silently.
+
+**3. Using element type toggling to reset state when a `key` would be cleaner.**
+Swapping component types resets all state — but it's implicit and surprising. The idiomatic way to intentionally reset a component's state is to change its `key` prop. This explicitly unmounts the old fiber and mounts a fresh one, with the same or different type.
 
 ```tsx
-// ❌ Side effect during render — dangerous in concurrent mode
-export function BadComponent({ id }: { id: string }) {
-  analytics.track("render", { id }); // may fire multiple times per commit!
-  return <div>{id}</div>;
+// ❌ Resetting state by swapping types — implicit, breaks if types are unified
+{
+  isEditing ? <EditForm /> : <ViewForm />;
 }
 
-// ✅ Side effect in useEffect — fires once after commit
-export function GoodComponent({ id }: { id: string }) {
-  useEffect(() => {
-    analytics.track("render", { id });
-  }, [id]);
-  return <div>{id}</div>;
-}
+// ✅ Resetting state explicitly with key — clear intent
+<UserForm
+  key={isEditing ? "edit" : "view"}
+  mode={isEditing ? "edit" : "view"}
+/>;
 ```
 
-### 2. Wrapping urgent updates in `startTransition`
+**4. Ignoring StrictMode double-invocations instead of fixing them.**
+StrictMode double-invokes the render phase in development to catch impure renders — exactly the class of bug that concurrent rendering exposes in production. The correct response to seeing double renders is to audit the render body for side effects and move them to `useEffect`, not to remove `StrictMode`.
 
-`startTransition` marks updates as **interruptible and low priority**. If you accidentally wrap a user-facing state update (like controlled input value) in a transition, the input will feel broken — the UI won't update until React decides to commit the transition.
-
-```tsx
-// ❌ Input value update wrapped in transition — input lags noticeably
-startTransition(() => {
-  setInputValue(e.target.value);
-});
-
-// ✅ Input value is urgent; only defer the derived/expensive state
-setInputValue(e.target.value); // urgent, outside transition
-startTransition(() => {
-  setFilteredItems(computeFilter(e.target.value)); // expensive, deferrable
-});
-```
-
-### 3. Conflating the render phase with the commit phase
-
-`useLayoutEffect` fires synchronously **during the commit phase**, which can't be interrupted. Expensive work here will block the browser. `useEffect` fires asynchronously after the commit and is safer for most side effects.
-
-```tsx
-// ❌ Expensive DOM measurement in useLayoutEffect blocks the commit phase
-useLayoutEffect(() => {
-  const result = expensiveLayoutCalculation(ref.current);
-  setHeight(result);
-}, []);
-
-// ✅ Only use useLayoutEffect for synchronous DOM reads that must happen
-// before the browser paints — e.g., reading scroll position to avoid flicker.
-useLayoutEffect(() => {
-  ref.current.scrollTop = savedScrollPosition; // fine: fast, layout-critical
-}, []);
-```
-
-### 4. Misunderstanding `StrictMode` double-invocation
-
-In development, React 18 with `StrictMode` intentionally **invokes the render phase twice** to surface impure renders (a direct consequence of Fiber's interruptible design — if a render can be restarted, it must be idempotent). This is dev-only and doesn't affect production.
-
-<Callout type="warn">
-  If you see state or effects running twice in development, this is `StrictMode`
-  doing its job. Don't disable `StrictMode` to fix it — fix the impurity
-  instead.
-</Callout>
+**5. Assuming fiber = virtual DOM.**
+The virtual DOM (React elements returned by JSX) is a description of what to render — lightweight objects created on every render pass. Fiber nodes are the persistent data structures that survive across renders, storing committed state, hooks, effects, and scheduling metadata. React elements are ephemeral; fibers are persistent.
 
 ---
 
 ## Summary
 
-React Fiber is the reconciliation engine that replaces the old synchronous stack reconciler with an interruptible, priority-aware system. Every React element maps to a fiber node in a linked-list tree, and React maintains two trees — current and work-in-progress — swapping them atomically on commit. Work is split into a pure, interruptible render phase and a synchronous commit phase, enabling Concurrent features like `startTransition` and `Suspense` to work correctly. Understanding Fiber explains why renders must be side-effect free, why `StrictMode` double-invokes renders in development, and how priority scheduling lets urgent updates preempt expensive background work.
+React Fiber replaces the old synchronous stack reconciler with an iterative work loop over a linked list of fiber nodes. Each fiber stores identity (type, key), props and state, tree pointers (parent, child, sibling), priority lanes, and effect flags. Hooks are stored as a positional linked list on `memoizedState` — which is why hook call order must be consistent. React maintains two fiber trees via double buffering — current and work-in-progress — swapping them atomically on commit so the DOM never shows a partial state. The work loop naturally yields at fiber boundaries, enabling time slicing. The render phase is interruptible and must be pure; the commit phase is synchronous and non-interruptible. StrictMode's double-invocation of the render phase directly tests the purity guarantee that Fiber's interruptibility requires.
+
+---
+
+## Interview Questions
+
+**Q1. What is a fiber node and what does it store?**
+
+A fiber node is a plain JavaScript object that acts as the unit of work in React's reconciler. It stores: the component's type and key (for reconciliation identity), the current and pending props, a pointer to the first node in the hooks linked list (`memoizedState`), tree structure pointers (parent via `return`, first child via `child`, next sibling via `sibling`), priority lane bitmasks, effect flags indicating what work needs to happen at commit, and an `alternate` pointer to the counterpart fiber in the other tree. The linked-list tree structure — rather than an array of children — is what allows React to pause traversal after any fiber and resume later.
+
+**Q2. Why do the Rules of Hooks exist at the implementation level?**
+
+Hooks are stored as a singly-linked list on the fiber node's `memoizedState` field — one node per hook call, in call order. React has no other identifier for hooks: no names, no keys, only position. On every re-render, React reads hooks in order from the list. If a hook is called conditionally, the list can have a different length or different hooks at the same positions on different renders — React reads the wrong hook's state and either throws an error or silently returns incorrect data. The Rules of Hooks (don't call hooks in conditions or loops, only call at the top level of a function component) exist to guarantee that the positional list is identical on every render.
+
+**Q3. What is double buffering in Fiber and why does React use it?**
+
+React maintains two fiber trees: the current tree (what's currently in the DOM) and the work-in-progress (WIP) tree (what's being built for the next render). Each fiber has an `alternate` pointer to its counterpart in the other tree. When the WIP tree is complete, React swaps the trees by updating a single `root.current` pointer — an atomic operation. The DOM is only mutated once, after the entire WIP tree is built and verified. This prevents users from ever seeing a partially-rendered state. After the swap, the old current tree becomes available to be recycled as the next WIP tree, reducing allocation overhead.
+
+**Q4. What is the difference between the render phase and the commit phase?**
+
+The render phase is where React calls component functions, runs `beginWork` and `completeWork` on each fiber, and builds the work-in-progress tree. It produces no DOM mutations — it's a pure computation. Because it's pure, React can interrupt it at any fiber boundary and restart from scratch if a higher-priority update arrives. The commit phase is where React applies the computed changes to the DOM. It's synchronous and non-interruptible because partial DOM mutations would leave the UI in a broken state. After mutation, `useLayoutEffect` fires synchronously (still in the commit phase), and `useEffect` is scheduled to run asynchronously after the browser has painted.
+
+**Q5. How does Fiber implement Suspense when a component throws a Promise?**
+
+During the render phase, when a component throws a Promise, the work loop catches it. React marks the fiber subtree rooted at that component as "suspended" and skips it — without touching the DOM. React then looks up the fiber tree for the nearest `<Suspense>` boundary and renders its `fallback` from the committed (current) tree. The work loop continues rendering the rest of the page normally. When the thrown Promise resolves, React schedules the suspended subtree as a low-priority update. The subtree re-renders with the resolved data, and if successful, it replaces the fallback in the DOM via the commit phase.
+
+**Q6. Why does StrictMode invoke render functions twice in development, and what is it testing?**
+
+`StrictMode` deliberately invokes the render phase twice in development (mount, unmount, remount) to enforce a guarantee that Fiber's interruptible architecture depends on: render functions must be pure and idempotent. In concurrent mode, React may render a component multiple times before committing — abandoned renders from interrupted transitions produce render-phase executions that never hit the DOM. If a component has side effects in its render body (mutations, API calls, incrementing counters), those side effects fire for every render attempt, not just committed ones. `StrictMode` surfaces these bugs in development by making the double execution visible. The fix is always to move side effects to `useEffect`, where they only run after commit, not to remove `StrictMode`.

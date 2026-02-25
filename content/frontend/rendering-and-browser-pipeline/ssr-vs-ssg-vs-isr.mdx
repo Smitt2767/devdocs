@@ -1,0 +1,463 @@
+---
+title: SSR vs SSG vs ISR
+description: The three core rendering strategies in Next.js — Server-Side Rendering, Static Site Generation, and Incremental Static Regeneration — what each one does, when to use it, and how to configure them in the App Router.
+---
+
+## Overview
+
+Every page in a Next.js application has to answer one question: **when does the HTML get generated?** The answer determines your page's performance characteristics, data freshness, infrastructure cost, and scalability ceiling.
+
+There are three fundamental strategies:
+
+- **SSG (Static Site Generation)** — HTML is generated at build time, before any user requests it. The same HTML is served to every user from a CDN.
+- **SSR (Server-Side Rendering)** — HTML is generated on the server for each individual request, with fresh data every time.
+- **ISR (Incremental Static Regeneration)** — HTML is generated at build time like SSG, but can be regenerated in the background after a configurable time interval or on-demand trigger — without a full redeploy.
+
+In Next.js App Router, you don't choose these strategies by picking a lifecycle function (`getStaticProps` vs `getServerSideProps` — those are Pages Router patterns). Instead, you control them through **`fetch` cache settings** and **route segment configuration options**. The strategy emerges from how you configure caching, not which function you call.
+
+Understanding which strategy fits which use case is one of the most consequential architectural decisions in a Next.js project.
+
+---
+
+## How It Works
+
+### SSG — Static Site Generation
+
+With SSG, Next.js renders the page to HTML during the build step (`next build`). The output is a static `.html` file deployed to a CDN. Every user who requests that URL receives the same pre-built HTML — no server computation at request time.
+
+**When the HTML is generated:** `next build`
+**Data freshness:** As of the last build
+**Who serves the response:** CDN edge node — no server work at all
+
+In App Router, SSG is the default for routes that don't use dynamic functions (`cookies()`, `headers()`, dynamic params without `generateStaticParams`) and whose `fetch` calls use the default cache setting.
+
+```
+Build time:    fetch data → render → save .html
+Request time:  CDN serves the .html directly — zero server compute
+```
+
+### SSR — Server-Side Rendering
+
+With SSR, the server renders the page for every incoming request — fetching fresh data, rendering the React tree, and returning HTML each time.
+
+**When the HTML is generated:** Every request
+**Data freshness:** As of the request
+**Who serves the response:** Your server (or serverless function) on every hit
+
+In App Router, a route becomes SSR when it calls `cookies()`, `headers()`, or `searchParams`, or when any `fetch` in the route uses `cache: 'no-store'`.
+
+```
+Build time:    nothing (just the JS bundle)
+Request time:  fetch data → render → send HTML — runs every time
+```
+
+### ISR — Incremental Static Regeneration
+
+ISR is a hybrid: pages are statically generated at build time but can be regenerated in the background after a time interval you control. The current cached version is served during regeneration — users never wait for it. Subsequent requests get the newly generated version.
+
+**When the HTML is generated:** `next build`, then periodically in the background
+**Data freshness:** As of the last regeneration — bounded staleness
+**Who serves the response:** CDN for most requests; server runs background regeneration
+
+```
+Build time:    fetch data → render → save .html
+Request time:  CDN serves cached .html (fast, no server work)
+After N secs:  first request triggers background regeneration
+               → old version still served to that request
+               → new version ready for the next request
+```
+
+### The Decision Matrix
+
+| Factor                | SSG             | ISR             | SSR                        |
+| --------------------- | --------------- | --------------- | -------------------------- |
+| Data changes          | Never / rarely  | Periodically    | Every request              |
+| Same for all users    | ✅              | ✅              | ❌                         |
+| Personalized per user | ❌              | ❌              | ✅                         |
+| TTFB                  | ~10ms (CDN)     | ~10ms (CDN)     | 100–800ms+                 |
+| Infrastructure cost   | Lowest          | Low             | Higher                     |
+| Scale ceiling         | Unlimited (CDN) | Unlimited (CDN) | Bounded by server capacity |
+| Real-time data        | ❌              | ❌              | ✅                         |
+| Auth / session data   | ❌              | ❌              | ✅                         |
+
+The rule of thumb: **default to SSG, use ISR when data changes periodically, switch to SSR only when you genuinely need per-request or per-user data.**
+
+---
+
+## Code Examples
+
+### SSG — Default App Router Behavior
+
+```tsx
+// app/blog/[slug]/page.tsx
+// No dynamic functions, no 'no-store' → SSG by default
+
+interface Post {
+  slug: string;
+  title: string;
+  content: string;
+  publishedAt: string;
+}
+
+async function getPost(slug: string): Promise<Post> {
+  const res = await fetch(`https://api.example.com/posts/${slug}`);
+  // Default cache: 'force-cache' — fetched once at build time, cached permanently
+  if (!res.ok) throw new Error(`Post not found: ${slug}`);
+  return res.json();
+}
+
+// Tells Next.js which slugs to pre-render at build time.
+// Without this, dynamic routes fall back to on-demand generation on first request.
+export async function generateStaticParams() {
+  const posts: Post[] = await fetch("https://api.example.com/posts").then((r) =>
+    r.json(),
+  );
+  return posts.map((post) => ({ slug: post.slug }));
+}
+
+export default async function BlogPost({
+  params,
+}: {
+  params: { slug: string };
+}) {
+  const post = await getPost(params.slug);
+
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      <time dateTime={post.publishedAt}>{post.publishedAt}</time>
+      <div dangerouslySetInnerHTML={{ __html: post.content }} />
+    </article>
+  );
+}
+```
+
+---
+
+### ISR — Time-Based Revalidation
+
+```tsx
+// app/products/[id]/page.tsx
+// Product prices and stock change — regenerate every 5 minutes
+
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+  stockCount: number;
+}
+
+async function getProduct(id: string): Promise<Product> {
+  const res = await fetch(`https://api.example.com/products/${id}`, {
+    // Revalidate this fetch result every 300 seconds (5 minutes)
+    next: { revalidate: 300 },
+  });
+  if (!res.ok) throw new Error("Product not found");
+  return res.json();
+}
+
+// Route-level config: applies to all fetches in this segment
+// Individual fetch-level revalidate values override this
+export const revalidate = 300;
+
+export async function generateStaticParams() {
+  const ids: string[] = await fetch(
+    "https://api.example.com/products/ids",
+  ).then((r) => r.json());
+  return ids.map((id) => ({ id }));
+}
+
+export default async function ProductPage({
+  params,
+}: {
+  params: { id: string };
+}) {
+  const product = await getProduct(params.id);
+
+  return (
+    <div>
+      <h1>{product.name}</h1>
+      <p className="price">${product.price}</p>
+      {/* Stock count may be up to 5 min stale — acceptable tradeoff */}
+      <p className={product.stockCount > 0 ? "text-green-600" : "text-red-600"}>
+        {product.stockCount > 0
+          ? `${product.stockCount} in stock`
+          : "Out of stock"}
+      </p>
+    </div>
+  );
+}
+```
+
+---
+
+### ISR — On-Demand Revalidation via Webhook
+
+Time-based ISR means pages can be stale for up to `revalidate` seconds. On-demand revalidation fires immediately when you know content has changed — ideal when your CMS publishes new content.
+
+```ts
+// app/api/revalidate/route.ts
+// Called by a CMS webhook when content is published or updated
+
+import { revalidatePath, revalidateTag } from "next/cache";
+import { NextRequest, NextResponse } from "next/server";
+
+export async function POST(req: NextRequest) {
+  // Protect the endpoint with a shared secret
+  const secret = req.headers.get("x-revalidation-secret");
+  if (secret !== process.env.REVALIDATION_SECRET) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { type, slug, tag } = await req.json();
+
+  if (type === "path" && slug) {
+    // Invalidate a specific page immediately
+    revalidatePath(`/blog/${slug}`);
+    return NextResponse.json({ revalidated: true, path: `/blog/${slug}` });
+  }
+
+  if (type === "tag" && tag) {
+    // Invalidate all fetch calls that used this cache tag
+    revalidateTag(tag);
+    return NextResponse.json({ revalidated: true, tag });
+  }
+
+  return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
+}
+```
+
+```tsx
+// app/blog/[slug]/page.tsx — tagging fetches for targeted invalidation
+
+async function getPost(slug: string) {
+  const res = await fetch(`https://cms.example.com/posts/${slug}`, {
+    next: {
+      revalidate: 3600, // safety net: regenerate hourly at minimum
+      tags: ["blog-post", `blog-post-${slug}`], // targeted invalidation key
+    },
+  });
+  return res.json();
+}
+```
+
+---
+
+### SSR — Per-Request Session Data
+
+```tsx
+// app/dashboard/page.tsx
+// User-specific — must be SSR, cannot be cached at any level
+
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+
+interface DashboardData {
+  user: { name: string; plan: string };
+  metrics: { visits: number; revenue: number };
+}
+
+async function getDashboardData(token: string): Promise<DashboardData> {
+  const res = await fetch("https://api.example.com/dashboard", {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store", // never cache — user-specific data
+  });
+  if (res.status === 401) redirect("/login");
+  if (!res.ok) throw new Error("Dashboard unavailable");
+  return res.json();
+}
+
+export default async function DashboardPage() {
+  // Reading cookies() makes the entire route SSR automatically
+  const cookieStore = cookies();
+  const sessionToken = cookieStore.get("session")?.value;
+
+  if (!sessionToken) redirect("/login");
+
+  const data = await getDashboardData(sessionToken);
+
+  return (
+    <div>
+      <h1>Welcome back, {data.user.name}</h1>
+      <p>Current plan: {data.user.plan}</p>
+      <div className="grid grid-cols-2 gap-4 mt-4">
+        <div className="metric-card">
+          <span className="label">Visits</span>
+          <span className="value">{data.metrics.visits.toLocaleString()}</span>
+        </div>
+        <div className="metric-card">
+          <span className="label">Revenue</span>
+          <span className="value">
+            ${data.metrics.revenue.toLocaleString()}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+### Mixed Strategy — Static Shell + Client-Side Personalization
+
+The pattern for getting CDN speed on pages that have a small personalized section:
+
+```tsx
+// app/product/[id]/page.tsx
+// Product content is ISR (fast CDN); wishlist state is client-side
+
+import { Suspense } from "react";
+import { WishlistButton } from "@/components/WishlistButton";
+
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+  description: string;
+}
+
+async function getProduct(id: string): Promise<Product> {
+  const res = await fetch(`https://api.example.com/products/${id}`, {
+    next: { revalidate: 3600 },
+  });
+  return res.json();
+}
+
+export async function generateStaticParams() {
+  const ids: string[] = await fetch(
+    "https://api.example.com/products/ids",
+  ).then((r) => r.json());
+  return ids.map((id) => ({ id }));
+}
+
+export default async function ProductPage({
+  params,
+}: {
+  params: { id: string };
+}) {
+  const product = await getProduct(params.id);
+
+  return (
+    <div>
+      {/* ISR content — served from CDN in ~10ms */}
+      <h1>{product.name}</h1>
+      <p className="price">${product.price}</p>
+      <p>{product.description}</p>
+
+      {/*
+        WishlistButton is a Client Component.
+        It fetches the user's wishlist status client-side after hydration.
+        This keeps the product page itself ISR/CDN-served while still
+        showing personalized wishlist state to logged-in users.
+      */}
+      <Suspense fallback={<button disabled>♡ Wishlist</button>}>
+        <WishlistButton productId={product.id} />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+```tsx
+// components/WishlistButton.tsx
+"use client";
+
+import { useEffect, useState } from "react";
+
+export function WishlistButton({ productId }: { productId: string }) {
+  const [wishlisted, setWishlisted] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(`/api/wishlist/${productId}`)
+      .then((r) => r.json())
+      .then((data) => {
+        setWishlisted(data.wishlisted);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, [productId]);
+
+  async function toggle() {
+    setWishlisted((prev) => !prev);
+    await fetch(`/api/wishlist/${productId}`, {
+      method: wishlisted ? "DELETE" : "POST",
+    });
+  }
+
+  return (
+    <button onClick={toggle} disabled={loading}>
+      {wishlisted ? "♥ Wishlisted" : "♡ Add to Wishlist"}
+    </button>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+**Marketing site** — pure SSG. Blog posts, feature pages, pricing, landing pages. Content is the same for every visitor and changes only when the team publishes. CDN serves responses in ~10ms globally. Zero server cost at request time.
+
+**E-commerce catalog** — ISR with `revalidate: 300` as a baseline, plus on-demand `revalidateTag` hooks from the inventory system. Pages are fast and CDN-served; stock and pricing are kept within 5 minutes of accurate during normal operations, and updated instantly when the warehouse system fires a change event.
+
+**User dashboard** — SSR with `cache: 'no-store'`. Each user's metrics, notifications, and billing data are unique to them. The page renders on the server with their session token, returns personalized HTML, and is never cached at any CDN level.
+
+**Product detail page with wishlist** — ISR product content + client-side wishlist state. The CDN-served ISR page loads in ~10ms. The wishlist status fetches client-side after hydration in ~150ms. Users get fast page loads and personalized state without making the entire page SSR.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Using `cache: 'no-store'` everywhere "to be safe."**
+`no-store` forces SSR on every request. For content that doesn't change per-user, this eliminates the CDN benefit, increases server load, and raises infrastructure costs with no benefit. Default to SSG or ISR; switch to `no-store` only when you genuinely need per-request fresh data.
+
+**2. Calling `cookies()` or `headers()` in a component that's deep in a shared layout.**
+Any call to `cookies()` or `headers()` makes the entire route segment SSR — not just the component that called it. A small auth check deep in a header component can accidentally make a product listing page SSR. Move session-dependent logic to leaf Client Components that fetch client-side, or to API routes.
+
+**3. Not providing `generateStaticParams` for dynamic SSG routes.**
+Without it, a dynamic route like `app/blog/[slug]/page.tsx` doesn't know which slugs to pre-render. The first visitor to each path pays the full render cost on-demand. Add `generateStaticParams` to pre-render all known paths at build time.
+
+**4. Confusing `revalidate: 0` with `cache: 'no-store'`.**
+Both produce per-request fresh data in practice, but they're semantically different. `revalidate: 0` means the cache expires immediately and the next request triggers regeneration. `cache: 'no-store'` means the response is never stored at all. Prefer `no-store` for truly dynamic, user-specific data and `revalidate: N` for content that can tolerate brief staleness.
+
+**5. Expecting `revalidatePath` to instantly propagate everywhere.**
+`revalidatePath` invalidates Next.js's server cache. The next request to that path triggers background regeneration — but the user who triggered the revalidation still gets the stale version. CDN edge caches (Vercel Edge Network, Cloudflare, etc.) may also need to be purged separately. There's always at least one request that gets the old version after triggering revalidation.
+
+**6. Mixing SSR data into an otherwise ISR page without realizing the cost.**
+A single `cache: 'no-store'` fetch anywhere in a route's component tree makes the entire route SSR. If you have an ISR product page and add a `no-store` call to check a flash sale — congratulations, your entire product catalog is now SSR. Use the mixed-strategy pattern instead: keep the page ISR and load the dynamic data client-side in a Client Component.
+
+---
+
+## Summary
+
+SSG generates HTML at build time and serves it from a CDN — fastest TTFB, zero per-request server cost, but data is only as fresh as the last build. ISR adds time-based or on-demand regeneration to SSG — CDN speed with bounded data staleness, the right default for most content pages. SSR generates HTML on every request — required for user-specific or real-time data, at the cost of per-request server compute and higher TTFB. In Next.js App Router, the strategy is controlled by `fetch` cache options and route segment config rather than lifecycle functions — the default is SSG, `next: { revalidate: N }` opts into ISR, and `cache: 'no-store'` or dynamic function calls opt into SSR. Most production apps use all three across different routes. The mixed-strategy pattern — ISR page shell with client-side personalized sections — gives CDN speed alongside personalization without forcing the entire page into SSR.
+
+---
+
+## Interview Questions
+
+**Q1. What are SSG, ISR, and SSR in Next.js and when would you use each?**
+
+SSG pre-renders HTML at build time and serves it from a CDN — best for content that rarely changes and is identical for all users: blog posts, marketing pages, documentation. ISR pre-renders at build time but regenerates pages in the background after a configurable interval or on an explicit trigger — best for content that changes periodically like product listings, prices, or news articles, where slight staleness is acceptable. SSR generates HTML on every request — required for user-specific data, session-dependent pages, or real-time content that must always be current. The decision axis is how often data changes and whether it differs per user.
+
+**Q2. How do you configure these strategies in the App Router?**
+
+App Router controls rendering strategy through `fetch` cache options and route segment config — not lifecycle functions. SSG is the default; `fetch` calls use `cache: 'force-cache'` implicitly. ISR is configured with `next: { revalidate: N }` on individual fetch calls or `export const revalidate = N` at the route segment level. SSR is triggered by `cache: 'no-store'` on any fetch, or by calling dynamic functions — `cookies()`, `headers()`, or accessing `searchParams`. If any component in a route segment uses a dynamic function, the entire segment becomes SSR for that request.
+
+**Q3. What is the difference between time-based ISR and on-demand ISR?**
+
+Time-based ISR regenerates a page after a fixed interval — the first request after `revalidate` seconds have elapsed triggers a background regeneration while serving the stale version. On-demand ISR uses `revalidatePath()` or `revalidateTag()` from a server action or API route to invalidate specific pages immediately — triggered by an external event like a CMS webhook. On-demand ISR is strictly better when you know exactly when content changes, since the page updates immediately after the event rather than waiting for the time window to expire.
+
+**Q4. Why does calling `cookies()` in any component make the entire page SSR?**
+
+`cookies()` is a dynamic function — it reads request-time data (the user's cookie header) that isn't available at build time. Next.js must generate the page's HTML at request time to include cookie-dependent output. Because the page component tree is rendered as a single unit, if any component in the tree requires request-time data, the entire tree must be rendered at request time — the output of one component might affect the structure available to others. To avoid accidentally SSR-ing an entire page because of one session check, move cookie-dependent logic to Client Components that fetch their data client-side after the static HTML has loaded.
+
+**Q5. A product page is currently SSR to check if the user has the item in their wishlist. How would you make it faster?**
+
+Convert the page to ISR for the static product content and move the wishlist check to a Client Component that fetches client-side after hydration. The product page (title, price, images, description) is ISR-generated and served from the CDN in ~10ms. The `WishlistButton` Client Component mounts, fires a fetch to `/api/wishlist/:id`, and updates its state with the result — adding ~150ms for the personalized state while the main content loads nearly instantly. This pattern is the standard approach for "mostly static with one personalized element" pages and avoids SSR entirely for the majority of the page.
+
+**Q6. What happens to an ISR page that has very low traffic?**
+
+Low-traffic ISR pages behave correctly but may stay stale longer than the `revalidate` interval implies. ISR uses a stale-while-revalidate model: the revalidation is only triggered by a request arriving after the interval has expired. If a page receives no traffic for hours, no regeneration occurs — the next visitor finally triggers it. For content where staleness genuinely matters (event schedules, prices), supplement time-based ISR with on-demand `revalidatePath`/`revalidateTag` calls from your content system so updates propagate regardless of traffic levels.
