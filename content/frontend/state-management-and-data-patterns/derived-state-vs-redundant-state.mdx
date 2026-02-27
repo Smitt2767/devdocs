@@ -1,75 +1,175 @@
 ---
-title: Derived vs. Redundant State
-description: How to distinguish state that should be computed on the fly from state that genuinely needs to be stored, and why conflating the two causes bugs.
+title: Derived vs Redundant State
+description: How to identify and eliminate redundant state — values that can be computed from existing state — and the tools React, Zustand, and Jotai provide to express derivation correctly.
 ---
 
 ## Overview
 
-Every piece of state you add to a component has a cost: it must be initialized, kept in sync, and can diverge from reality. **Redundant state** is state that can be fully calculated from existing state, props, or server data — storing it separately creates a second source of truth that can go stale.
+Derived state is any value you can compute from existing state, props, or fetched data. Redundant state is when you store that computed value separately instead of deriving it — creating two sources of truth that must stay in sync.
 
-**Derived state** is the alternative: compute the value directly from its source instead of storing a copy.
+Sync bugs are almost always caused by redundant state. You update the primary source but forget to update the copy. Or you update both but in the wrong order. The `useEffect` that watches one value to update another is the signature of this problem.
 
-The rule of thumb:
+The rule is simple: if a value can be computed from something else, don't store it — compute it.
 
-> If you can calculate it, don't store it.
+---
 
 ## How It Works
 
-React re-renders a component whenever its state or props change. Because the component function re-runs on every render, any value you compute inline is automatically recalculated with the latest data — no `useEffect` required.
+### The Core Problem
 
-Redundant state breaks this flow. You store a value, then have to watch for changes to the source and manually sync the copy. That sync almost always lives in a `useEffect`, which runs _after_ the render — meaning there's at least one render where the stored value is stale.
+```tsx
+// ❌ Redundant state — two sources of truth
+const [items, setItems] = useState<CartItem[]>([]);
+const [totalPrice, setTotalPrice] = useState(0); // derived from items
 
+function addItem(item: CartItem) {
+  setItems((prev) => [...prev, item]);
+  setTotalPrice((prev) => prev + item.price); // easy to forget or get wrong
+}
+
+// ✅ Single source of truth — derive on every render
+const [items, setItems] = useState<CartItem[]>([]);
+const totalPrice = items.reduce((sum, item) => sum + item.price, 0); // always correct
 ```
-Source of truth ──► render ──► derived value (always fresh)
-                         ↑
-                    computed inline
 
-Source of truth ──► render ──► stale stored value ──► useEffect ──► re-render
-                                      ↑
-                           (one render with wrong data)
+The derived version is always consistent by construction. There is no `setTotalPrice` to forget.
+
+### When Derivation Is Expensive
+
+For cheap computations (summing an array, filtering a list under 1000 items, string concatenation), derive inline. For genuinely expensive computations — filtering 50,000 records, running a graph algorithm, complex aggregation — use `useMemo` with the source data as a dependency:
+
+```tsx
+// Derive inline for cheap work
+const isEmpty = items.length === 0;
+const fullName = `${firstName} ${lastName}`;
+
+// useMemo only when the derivation has a measurable cost
+const expensiveResult = useMemo(
+  () => runGraphAlgorithm(largeDataset),
+  [largeDataset],
+);
 ```
 
-The second flow is harder to reason about, slower, and a common source of subtle bugs.
+`useMemo` is a performance optimization, not a solution to redundant state. It still derives — it just caches the result.
+
+---
 
 ## Code Examples
 
-### ❌ Redundant State — the problematic pattern
+### Anti-Pattern: `useEffect` to Sync State from Props
+
+The most common form of redundant state. If you need a "processed" version of a prop, derive it inline or with `useMemo`. A `useEffect` that syncs prop → state always produces at least one render with the stale value.
 
 ```tsx
-"use client";
+// ❌ useEffect sync — always renders once with stale data
+function UserCard({ user }: { user: User }) {
+  const [displayName, setDisplayName] = useState("");
 
-import { useState, useEffect } from "react";
-
-interface CartItem {
-  id: string;
-  name: string;
-  price: number;
-  quantity: number;
-}
-
-export function CartSummary({ items }: { items: CartItem[] }) {
-  // ❌ Redundant: totalPrice can be computed from `items`
-  const [totalPrice, setTotalPrice] = useState(0);
-
-  // ❌ Must now manually keep totalPrice in sync
   useEffect(() => {
-    setTotalPrice(
-      items.reduce((sum, item) => sum + item.price * item.quantity, 0),
-    );
-  }, [items]);
+    // Runs AFTER the first render — component briefly shows "" instead of the name
+    setDisplayName(`${user.firstName} ${user.lastName}`);
+  }, [user.firstName, user.lastName]);
 
-  return <p>Total: ${totalPrice.toFixed(2)}</p>;
+  return <h2>{displayName}</h2>; // shows "" on first render
+}
+
+// ✅ Derived — always correct on every render
+function UserCard({ user }: { user: User }) {
+  const displayName = `${user.firstName} ${user.lastName}`; // always current
+  return <h2>{displayName}</h2>;
 }
 ```
 
-The problem: on the first render, `totalPrice` is `0` even if `items` is non-empty. There's a flash of wrong data, and the `useEffect` adds complexity with no benefit.
+---
+
+### Correct Pattern: `useReducer` for State That Must Change Together
+
+When multiple state values always change together based on the same event, co-locate them in a reducer. The reducer derives the full next state from the action — you can't update one slice and forget another.
+
+```tsx
+// ❌ Multiple useState calls that must stay in sync
+const [items, setItems] = useState<CartItem[]>([]);
+const [discount, setDiscount] = useState(0);
+const [promoApplied, setPromoApplied] = useState(false);
+
+// Easy to forget to set promoApplied when applying a promo
+function applyPromo(code: string) {
+  const d = calculateDiscount(code, items);
+  setDiscount(d);
+  // setPromoApplied(true); ← easy to forget
+}
+```
+
+```tsx
+// ✅ useReducer — all related state transitions are atomic
+type CartState = {
+  items: CartItem[];
+  discount: number;
+  promoCode: string | null;
+};
+
+type CartAction =
+  | { type: "ADD_ITEM"; item: CartItem }
+  | { type: "REMOVE_ITEM"; id: string }
+  | { type: "APPLY_PROMO"; code: string };
+
+function cartReducer(state: CartState, action: CartAction): CartState {
+  switch (action.type) {
+    case "ADD_ITEM":
+      return { ...state, items: [...state.items, action.item] };
+
+    case "REMOVE_ITEM":
+      return {
+        ...state,
+        items: state.items.filter((i) => i.id !== action.id),
+      };
+
+    case "APPLY_PROMO":
+      // All three change together — impossible to forget one
+      return {
+        ...state,
+        discount: calculateDiscount(action.code, state.items),
+        promoCode: action.code,
+      };
+  }
+}
+
+function Cart() {
+  const [state, dispatch] = useReducer(cartReducer, {
+    items: [],
+    discount: 0,
+    promoCode: null,
+  });
+
+  // Derive from state — never stored separately
+  const subtotal = state.items.reduce((s, i) => s + i.price * i.quantity, 0);
+  const total = subtotal - state.discount;
+  const itemCount = state.items.reduce((s, i) => s + i.quantity, 0);
+
+  return (
+    <div>
+      <p>
+        {itemCount} items — Subtotal: ${subtotal.toFixed(2)}
+      </p>
+      {state.discount > 0 && <p>Discount: -${state.discount.toFixed(2)}</p>}
+      <p>Total: ${total.toFixed(2)}</p>
+      <button onClick={() => dispatch({ type: "APPLY_PROMO", code: "SAVE10" })}>
+        Apply promo
+      </button>
+    </div>
+  );
+}
+```
 
 ---
 
-### ✅ Derived State — the correct pattern
+### Zustand: Computed Selectors (Not Computed State)
 
-```tsx
-"use client";
+In Zustand, derived values belong in _selectors_, not in the store itself. The store holds only the minimal state; components derive what they need:
+
+```ts
+// lib/stores/cart-store.ts
+import { create } from "zustand";
 
 interface CartItem {
   id: string;
@@ -78,146 +178,219 @@ interface CartItem {
   quantity: number;
 }
 
-export function CartSummary({ items }: { items: CartItem[] }) {
-  // ✅ Computed inline — always in sync, no extra state, no useEffect
-  const totalPrice = items.reduce(
-    (sum, item) => sum + item.price * item.quantity,
-    0,
-  );
-
-  return <p>Total: ${totalPrice.toFixed(2)}</p>;
+interface CartStore {
+  items: CartItem[];
+  addItem: (item: Omit<CartItem, "quantity">) => void;
+  removeItem: (id: string) => void;
+  updateQty: (id: string, quantity: number) => void;
+  // ❌ Don't put totalPrice or itemCount in the store — they're derivable
 }
+
+export const useCartStore = create<CartStore>((set) => ({
+  items: [],
+
+  addItem: (incoming) =>
+    set((state) => {
+      const exists = state.items.find((i) => i.id === incoming.id);
+      if (exists) {
+        return {
+          items: state.items.map((i) =>
+            i.id === incoming.id ? { ...i, quantity: i.quantity + 1 } : i,
+          ),
+        };
+      }
+      return { items: [...state.items, { ...incoming, quantity: 1 }] };
+    }),
+
+  removeItem: (id) =>
+    set((state) => ({ items: state.items.filter((i) => i.id !== id) })),
+
+  updateQty: (id, quantity) =>
+    set((state) => ({
+      items: state.items.map((i) => (i.id === id ? { ...i, quantity } : i)),
+    })),
+}));
 ```
 
----
-
-### ✅ Memoizing expensive derived values
-
-If the derivation is computationally expensive, use `useMemo` — but only then.
-
 ```tsx
+// components/CartSummary.tsx — derive in the selector, not in the store
 "use client";
 
-import { useMemo } from "react";
+import { useCartStore } from "@/lib/stores/cart-store";
 
-interface Product {
-  id: string;
-  name: string;
-  tags: string[];
-  price: number;
-}
-
-interface Props {
-  products: Product[];
-  activeTag: string;
-}
-
-export function ProductList({ products, activeTag }: Props) {
-  // ✅ useMemo avoids re-filtering a large array on every render
-  // Only recomputes when `products` or `activeTag` changes
-  const filtered = useMemo(
-    () => products.filter((p) => p.tags.includes(activeTag)),
-    [products, activeTag],
+export function CartSummary() {
+  // Selectors derive — components only re-render when the derived value changes
+  const itemCount = useCartStore((s) =>
+    s.items.reduce((n, i) => n + i.quantity, 0),
+  );
+  const totalPrice = useCartStore((s) =>
+    s.items.reduce((sum, i) => sum + i.price * i.quantity, 0),
   );
 
   return (
-    <ul>
-      {filtered.map((p) => (
-        <li key={p.id}>
-          {p.name} — ${p.price}
-        </li>
-      ))}
-    </ul>
+    <footer>
+      <p>{itemCount} items</p>
+      <p>Total: ${totalPrice.toFixed(2)}</p>
+    </footer>
   );
 }
-```
 
-<Callout type="info">
-  `useMemo` is an optimization, not a correctness tool. Plain inline derivation
-  is correct by default. Add `useMemo` only when profiling shows a real
-  performance issue.
-</Callout>
+// components/CartIcon.tsx — subscribes only to itemCount, not total
+export function CartIcon() {
+  // Only re-renders when itemCount changes — not on price changes
+  const itemCount = useCartStore((s) =>
+    s.items.reduce((n, i) => n + i.quantity, 0),
+  );
+  return <span aria-label={`${itemCount} items in cart`}>🛒 {itemCount}</span>;
+}
+```
 
 ---
 
-### ✅ Derived state in a Server Component
+### Jotai: Derived Atoms
 
-Server Components never hold state, so derivation is the only option — and it's clean.
+Jotai's `atom()` function accepts a read function — making derivation a first-class primitive:
+
+```ts
+// lib/atoms/cart.ts
+import { atom } from "jotai";
+
+interface CartItem {
+  id: string;
+  name: string;
+  price: number;
+  quantity: number;
+}
+
+// Base atom — the single source of truth
+export const cartItemsAtom = atom<CartItem[]>([]);
+
+// Derived atoms — computed from cartItemsAtom, always in sync
+export const itemCountAtom = atom((get) =>
+  get(cartItemsAtom).reduce((n, i) => n + i.quantity, 0),
+);
+
+export const totalPriceAtom = atom((get) =>
+  get(cartItemsAtom).reduce((sum, i) => sum + i.price * i.quantity, 0),
+);
+
+export const emptyCartAtom = atom((get) => get(cartItemsAtom).length === 0);
+
+// Derived + filtered — items above a price threshold
+export const expensiveItemsAtom = atom((get) =>
+  get(cartItemsAtom).filter((i) => i.price > 100),
+);
+```
 
 ```tsx
-// app/orders/page.tsx — Server Component (no 'use client')
-import { getOrders } from "@/lib/data";
+// components/CartStatus.tsx
+"use client";
 
-export default async function OrdersPage() {
-  const orders = await getOrders();
+import { useAtomValue } from "jotai";
+import { itemCountAtom, totalPriceAtom, emptyCartAtom } from "@/lib/atoms/cart";
 
-  // Derived directly — no useState, no useEffect, no stale data
-  const completedCount = orders.filter((o) => o.status === "completed").length;
-  const totalRevenue = orders
-    .filter((o) => o.status === "completed")
-    .reduce((sum, o) => sum + o.total, 0);
+export function CartStatus() {
+  const count = useAtomValue(itemCountAtom); // re-renders only when count changes
+  const total = useAtomValue(totalPriceAtom); // re-renders only when total changes
+  const isEmpty = useAtomValue(emptyCartAtom); // re-renders only when empty/not-empty flips
+
+  if (isEmpty) return <p>Your cart is empty.</p>;
 
   return (
-    <section>
-      <h1>Orders</h1>
-      <p>{completedCount} completed orders</p>
-      <p>Total revenue: ${totalRevenue.toFixed(2)}</p>
-    </section>
+    <p>
+      {count} item{count !== 1 ? "s" : ""} — ${total.toFixed(2)}
+    </p>
   );
 }
 ```
+
+Jotai's derived atoms are lazy and memoized — they only recompute when their source atoms change, and they only notify subscribers when their own output changes.
+
+---
+
+### Normalizing Complex Derived Filters
+
+```tsx
+// ❌ Storing a filtered list — must sync whenever items or filter changes
+const [products, setProducts] = useState<Product[]>([]);
+const [filteredProducts, setFiltered] = useState<Product[]>([]);
+const [filter, setFilter] = useState("all");
+
+useEffect(() => {
+  setFiltered(
+    filter === "all" ? products : products.filter((p) => p.category === filter),
+  );
+}, [products, filter]);
+
+// ✅ Derive the filtered list — zero sync bugs possible
+const [products, setProducts] = useState<Product[]>([]);
+const [filter, setFilter] = useState("all");
+
+const filteredProducts = useMemo(
+  () =>
+    filter === "all" ? products : products.filter((p) => p.category === filter),
+  [products, filter],
+);
+```
+
+---
 
 ## Real-World Use Case
 
-In an e-commerce checkout flow, you might track `cartItems` (an array of items with quantities) as genuine state. Everything else — item count, subtotal, whether the cart is empty, which items qualify for a discount — is derivable from that array.
+**E-commerce cart.** A cart has `items: CartItem[]` as its single source of truth. Every other cart value — subtotal, total with discount, item count, whether the cart is empty, whether free shipping applies (subtotal ≥ $50), eligible discount tier — is derived. Storing any of these as separate state means every cart mutation (add, remove, change quantity, apply promo) must update every derived field. Miss one update and the UI lies to the user. Derive them all and the UI is always consistent by construction, with zero sync logic.
 
-Storing those as separate state values means every time a user updates a quantity you must update `cartItems` _and_ remember to recalculate all the derived values. Miss one update and your UI shows a wrong total while the cart data is correct. Derive them instead and the UI is always consistent by construction.
+---
 
 ## Common Mistakes / Gotchas
 
-**1. Using `useEffect` to sync state from props**
+**1. Using `useEffect` to sync state from props.** This always produces at least one render with a stale value and adds re-render overhead. Derive inline or with `useMemo`.
 
-This is the most common form of redundant state. If a prop changes and you need a "processed" version of it, derive it inline or with `useMemo`. A `useEffect` that watches a prop to update local state will always produce at least one render with the stale value.
+**2. Storing filtered or sorted lists as state.** Sorting and filtering are cheap. Derive them every render or memoize if the source list is large.
 
-```tsx
-// ❌ Don't do this
-useEffect(() => {
-  setFullName(`${firstName} ${lastName}`);
-}, [firstName, lastName]);
-
-// ✅ Do this
-const fullName = `${firstName} ${lastName}`;
-```
-
-**2. Storing filtered or sorted lists as state**
-
-Filtering or sorting an array is cheap. There's no reason to store the result — just derive it on every render (or memoize if the list is very large).
-
-**3. Storing a boolean that's derivable from another value**
+**3. Storing booleans derivable from other values.**
 
 ```tsx
-// ❌ Redundant — isEmpty can be derived from items.length
+// ❌ isEmpty must be kept in sync with items
 const [isEmpty, setIsEmpty] = useState(true);
 
-// ✅ Derived
+// ✅ Always correct
 const isEmpty = items.length === 0;
 ```
 
-**4. Overusing `useMemo` to avoid "redundant" work**
+**4. Over-using `useMemo` to avoid "redundant" work.** Memoization has its own overhead. For cheap inline computations, `useMemo` is slower than just computing. Measure before optimizing.
 
-Memoization has its own overhead. Deriving a value inline is faster than a memoized result for cheap calculations. Profile before optimizing.
+**5. Putting derived values in a Zustand store.** Derived values don't belong in the store definition. They belong in selectors that components read. Putting them in the store means writing additional actions to keep them up to date.
 
-<Callout type="warn">
-  `useMemo` does not prevent a value from being recalculated — it only skips
-  recalculation when dependencies haven't changed. It is not a substitute for
-  removing redundant state; it is a performance optimization for expensive
-  derivations.
-</Callout>
-
-**5. Treating server-fetched data as a "source" that needs a local copy**
-
-Don't fetch data, store it in state with `useState`, then derive from that state. With the App Router, fetch in a Server Component and pass the result as props. The props _are_ the source of truth.
+---
 
 ## Summary
 
-Derived state is any value you can compute from existing state, props, or fetched data — and computing it inline is always preferable to storing a copy. Redundant state creates multiple sources of truth that must be kept in sync, which almost always involves `useEffect` and produces at least one render with stale data. Use plain inline derivation by default, `useMemo` only when a derivation is provably expensive, and reach for `useState` only when a value cannot be computed from anything else. In Next.js App Router apps, Server Components reinforce this pattern naturally since they hold no state at all.
+Derived state is any value computable from existing state or props — and computing it inline is always preferable to storing a copy. Redundant state creates multiple sources of truth requiring `useEffect` sync logic, which produces stale-value renders and sync bugs. `useReducer` co-locates state that must change together, preventing partial updates. Zustand selectors and Jotai derived atoms bring the same principle to global state — derive in the read path, not in the store definition. Use `useMemo` only when derivation has a measurable performance cost.
+
+---
+
+## Interview Questions
+
+**Q1. What is redundant state and how do you identify it?**
+
+Redundant state is any value stored in state that can be computed from other state, props, or fetched data. You can identify it by asking: "If I only had the other values, could I always reconstruct this one?" If yes, it's redundant. The signature pattern is a `useEffect` that watches some value and calls a setter to update a "derived" value — that setter and that state are redundant. The fix is to remove the state and compute the value inline (or with `useMemo` if expensive). Redundant state almost always causes sync bugs because it creates two sources of truth that must be kept in sync by imperative code.
+
+**Q2. When should you use `useMemo` for derived state versus computing inline?**
+
+Compute inline for cheap derivations — string concatenation, boolean checks, summing a small array, filtering a list of under ~1000 items. The overhead of `useMemo` (dependency comparison, cached value storage) exceeds the cost of the derivation itself for cheap operations. Use `useMemo` when: the computation has a measurable performance cost (large dataset filtering, graph algorithms, complex aggregations), when the derived value is an object or array that will be used as a prop for a memoized child component (referential stability matters), or when profiling identifies the derivation as a bottleneck. Never use `useMemo` as a default — it adds complexity without benefit for most derivations.
+
+**Q3. How does `useReducer` help prevent redundant state?**
+
+`useReducer` co-locates all related state transitions in one function. When multiple state values must always change together (a cart's items + discount + promo code), the reducer enforces that they change atomically. There's no `setDiscount` to forget — the reducer updates all fields in one return. This is the right tool when you have multiple pieces of state that participate in the same events. It replaces a set of coordinated `useState` calls (where you can forget a setter) with a single transition function (where the full next state is derived from the action).
+
+**Q4. What's the difference between derived state in a Zustand selector vs a Jotai derived atom?**
+
+Zustand selectors are functions passed to `useStore` — they run on every store update and the component re-renders only when the selector's return value changes (by reference or value equality). Selectors are not cached between components — two components using the same selector each run their own computation. Jotai derived atoms are cached globally — they recompute only when their source atoms change, and the result is shared across all subscribers. Both approaches keep derived values out of the store definition (the right approach), but Jotai's atom model provides global memoization across components while Zustand's selector model is per-component.
+
+**Q5. Why is `useEffect` for prop-to-state synchronization an anti-pattern?**
+
+`useEffect` runs after rendering — after the browser has painted. If you use it to sync prop changes to state, the component renders once with the stale state value, then re-renders with the updated value. This causes a visible flash or incorrect intermediate state. Additionally, it creates a dependency chain that's easy to get wrong: if the effect has missing dependencies, it silently uses stale props. The correct pattern is to derive the value inline during render — it's always computed from the current props with no delay and no extra re-render. `getDerivedStateFromProps` was the class component anti-pattern equivalent; React's own docs discourage it for the same reasons.
+
+**Q6. How should you model derived state in Jotai and what makes derived atoms efficient?**
+
+In Jotai, create a base atom with `atom(initialValue)` for the source of truth, then create derived atoms with `atom((get) => get(baseAtom) /* computation */)`. Derived atoms are lazy — they only compute when a component subscribed to them renders. They are also memoized — Jotai caches the result and only recomputes when the source atoms change. A derived atom notifies its subscribers only when its own output changes (not whenever the source atom changes — if the output is the same, no re-render). This means `emptyCartAtom` (a boolean) only triggers re-renders twice in the lifetime of a session: once when the cart goes from empty to non-empty, and once when it returns to empty — regardless of how many items are added.

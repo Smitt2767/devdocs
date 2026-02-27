@@ -1,257 +1,399 @@
 ---
-title: Immutable Data & Referential Equality
-description: How immutable data patterns and referential equality work in JavaScript and React, and why they matter for performance and predictability.
+title: Immutable Data Patterns
+description: How structural sharing makes immutable updates efficient, why referential equality drives React's rendering model, Immer for deep updates, and Immer middleware for Zustand.
 ---
 
 ## Overview
 
-Immutability means never modifying data in place — instead, you produce a new value whenever something changes. Referential equality means two variables are "equal" if they point to the exact same object in memory (not just an object with the same contents).
+Immutability means never modifying data in place — instead producing a new value whenever something changes. In JavaScript and React this matters because React's rendering model, memoization hooks, and every serious state library use referential equality (`===`) to detect changes. If you mutate data in place, the reference stays the same and React sees no change — re-renders you needed don't happen. If you produce new objects, React can do a fast reference check instead of a deep scan.
 
-These two concepts are deeply connected. React's rendering model, memoization hooks, and state management all depend on referential equality checks to decide whether something changed. If you mutate data in place, the reference stays the same — React sees no change and skips re-renders you actually needed. If you always produce new objects, React can do a fast reference check (`===`) instead of a deep comparison.
+This is not about correctness in the abstract. It is about giving React and memoization tools a reliable signal.
+
+---
 
 ## How It Works
+
+### Referential Equality in JavaScript
 
 JavaScript compares primitives by value and objects by reference:
 
 ```ts
-// Primitives — compared by value
-42 === 42; // true
-"hello" === "hello"; // true
+42 === 42; // true  — same value
+"hi" === "hi"; // true  — same value
 
-// Objects — compared by reference
 const a = { name: "Alice" };
 const b = { name: "Alice" };
 a === b; // false — different objects in memory
 
 const c = a;
-c === a; // true — same reference
+c === a; // true  — same reference
 ```
 
-This matters because React's `useMemo`, `useCallback`, `React.memo`, and state diffing all use `===` under the hood. When you mutate an object, the reference doesn't change:
+React's `useState` setter, `React.memo`, `useMemo`, and `useCallback` all use `===` under the hood. Mutating an object in place leaves its reference unchanged — React cannot detect the change:
 
 ```ts
-const user = { name: "Alice" };
-user.name = "Bob"; // mutated in place
-// user still points to the same object — reference unchanged
+const [user, setUser] = useState({ name: "Alice" });
+
+// ❌ Mutation — same reference, React skips re-render
+user.name = "Bob";
+setUser(user); // React: "same object, nothing changed"
+
+// ✅ New reference — React schedules re-render
+setUser({ ...user, name: "Bob" });
 ```
 
-React and state managers can't detect that mutation. Producing a new object makes the change visible:
+### Structural Sharing
+
+Naive immutability (deep-cloning the entire state on every update) would be prohibitively expensive. **Structural sharing** solves this: only the parts of the data structure that actually changed get new references. Unchanged parts are shared between the old and new state.
 
 ```ts
-const updatedUser = { ...user, name: "Bob" }; // new reference
+const prev = {
+  user: { name: "Alice", role: "admin" },
+  settings: { theme: "dark", lang: "en" },
+};
+
+// Only user.name changes — settings is shared (same reference)
+const next = {
+  ...prev, // next.settings === prev.settings ✓ (shared)
+  user: { ...prev.user, name: "Bob" }, // new user object (changed)
+};
+
+next.settings === prev.settings; // true  — shared, unchanged
+next.user === prev.user; // false — new object, changed
 ```
+
+This means `React.memo` on a component that receives `settings` as a prop will bail out of re-rendering — `settings` reference didn't change. Only components receiving `user` need to re-render.
+
+---
 
 ## Code Examples
 
-### Immutable State Updates in React
+### Immutable Array Updates
 
 ```tsx
 "use client";
 
 import { useState } from "react";
 
-type CartItem = {
-  id: number;
-  name: string;
-  quantity: number;
-};
+type CartItem = { id: string; name: string; price: number; quantity: number };
 
-export default function Cart() {
-  const [items, setItems] = useState<CartItem[]>([
-    { id: 1, name: "Keyboard", quantity: 1 },
-    { id: 2, name: "Monitor", quantity: 2 },
-  ]);
+export function Cart({ initialItems }: { initialItems: CartItem[] }) {
+  const [items, setItems] = useState<CartItem[]>(initialItems);
 
-  function incrementQuantity(id: number) {
+  // ADD — new array, new item object
+  function addItem(item: Omit<CartItem, "quantity">) {
+    setItems((prev) => [...prev, { ...item, quantity: 1 }]);
+  }
+
+  // UPDATE — new array, new object only for changed item, same refs for unchanged
+  function incrementQty(id: string) {
     setItems((prev) =>
-      // map always returns a new array — prev is never mutated
       prev.map(
         (item) =>
           item.id === id
-            ? { ...item, quantity: item.quantity + 1 } // new object for changed item
-            : item, // same reference for unchanged items (good for memoization)
+            ? { ...item, quantity: item.quantity + 1 } // new object
+            : item, // same reference — memo-friendly
       ),
     );
+  }
+
+  // REMOVE — new array, unchanged items keep their references
+  function removeItem(id: string) {
+    setItems((prev) => prev.filter((item) => item.id !== id));
   }
 
   return (
     <ul>
       {items.map((item) => (
-        <li key={item.id}>
-          {item.name} × {item.quantity}
-          <button onClick={() => incrementQuantity(item.id)}>+</button>
-        </li>
+        <CartRow
+          key={item.id}
+          item={item}
+          onIncrement={incrementQty}
+          onRemove={removeItem}
+        />
       ))}
     </ul>
   );
 }
 ```
 
-### Using `React.memo` with Referential Equality
+<Callout type="warn">
+  Never use `push`, `pop`, `splice`, `sort`, or `reverse` on arrays in React
+  state — these mutate in place. Use `map`, `filter`, `slice`, or spread to
+  produce new arrays.
+</Callout>
 
-```tsx
-"use client";
+---
 
-import { memo, useState, useCallback } from "react";
+### Deep Object Updates with Spread
 
-type ProductCardProps = {
-  name: string;
-  onAddToCart: () => void;
-};
-
-// memo does a shallow (referential) comparison of props
-// If onAddToCart is recreated every render, memo is bypassed
-const ProductCard = memo(function ProductCard({
-  name,
-  onAddToCart,
-}: ProductCardProps) {
-  console.log(`Rendering: ${name}`);
-  return (
-    <div>
-      <p>{name}</p>
-      <button onClick={onAddToCart}>Add to Cart</button>
-    </div>
-  );
-});
-
-export default function ProductList() {
-  const [cartCount, setCartCount] = useState(0);
-
-  // useCallback preserves the same function reference between renders
-  // Without it, a new function is created each render → memo sees a new prop → re-renders anyway
-  const handleAdd = useCallback(() => {
-    setCartCount((c) => c + 1);
-  }, []); // empty deps: reference never changes
-
-  return (
-    <div>
-      <p>Cart: {cartCount}</p>
-      <ProductCard name="Mechanical Keyboard" onAddToCart={handleAdd} />
-    </div>
-  );
-}
-```
-
-### Deeply Nested Immutable Updates
+Each layer of nesting you touch needs its own spread. Untouched branches keep their references:
 
 ```ts
 type AppState = {
   user: {
-    profile: {
-      address: {
-        city: string;
-      };
-    };
+    profile: { name: string; address: { city: string; country: string } };
+    preferences: { theme: "light" | "dark" };
   };
 };
 
 const state: AppState = {
   user: {
-    profile: {
-      address: { city: "New York" },
-    },
+    profile: { name: "Alice", address: { city: "London", country: "GB" } },
+    preferences: { theme: "dark" },
   },
 };
 
-// Spread each layer you touch — untouched branches keep their references
-const nextState: AppState = {
-  ...state,
+// Update only city — spread every layer from root to the changed value
+const next: AppState = {
+  ...state, // shares user.preferences reference
   user: {
-    ...state.user,
+    ...state.user, // shares user.preferences reference
     profile: {
-      ...state.user.profile,
+      ...state.user.profile, // shares profile.name reference
       address: {
-        ...state.user.profile.address,
-        city: "San Francisco", // only this value changes
+        ...state.user.profile.address, // shares country reference
+        city: "Edinburgh", // only this value is new
       },
     },
   },
 };
 
-// state.user.profile.address !== nextState.user.profile.address ✓ (changed)
-// state.user === nextState.user // false (correctly updated)
+// Structural sharing in action:
+next.user.preferences === state.user.preferences; // true — unchanged, shared
+next.user.profile.address === state.user.profile.address; // false — changed
 ```
 
-<Callout type="info">
-  For deeply nested updates, consider [Immer](https://immerjs.github.io/immer/).
-  It lets you write mutative-looking code that produces immutable updates under
-  the hood.
-</Callout>
+---
 
-### Immer for Complex Updates
+### Immer for Deep Updates
+
+Spreading multiple levels is verbose and error-prone. Immer produces structurally-shared immutable updates from mutative-looking code:
 
 ```ts
 import { produce } from "immer";
 
-const nextState = produce(state, (draft) => {
-  // draft looks mutable — Immer intercepts and builds a new immutable object
-  draft.user.profile.address.city = "San Francisco";
+// Immer intercepts assignments and builds a new immutable structure
+// with structural sharing — same efficiency as manual spreading
+const next = produce(state, (draft) => {
+  draft.user.profile.address.city = "Edinburgh"; // looks like mutation, isn't
+});
+
+// Structural sharing is preserved
+next.user.preferences === state.user.preferences; // true — Immer shares unchanged branches
+```
+
+Immer works with arrays too:
+
+```ts
+const nextItems = produce(items, (draft) => {
+  const item = draft.find((i) => i.id === targetId);
+  if (item) item.quantity += 1; // Immer intercepts — produces new array and new item object
 });
 ```
 
-## Real-World Use Case
+---
 
-In a dashboard app with dozens of chart components, each chart receives a slice of a large data object as a prop. Without immutable updates, every state change mutates the root object — all charts re-render even when their data didn't change. With immutable updates and `React.memo`, unchanged chart components bail out of re-rendering because their prop references are stable. The dashboard stays fast at scale.
+### Immer Middleware for Zustand
 
-The same principle applies in Zustand, Redux, and Jotai stores — they all rely on reference changes to trigger subscriber updates.
-
-## Common Mistakes / Gotchas
-
-**1. Mutating state directly**
+Zustand's `immer` middleware wraps every setter with Immer, so you can write mutative state updates in the store:
 
 ```ts
-// ❌ Wrong — same reference, React won't re-render
-const [user, setUser] = useState({ name: "Alice" });
-user.name = "Bob";
-setUser(user); // React sees the same object reference → no update
+// lib/stores/project-store.ts
+import { create } from "zustand";
+import { immer } from "zustand/middleware/immer";
 
-// ✅ Correct
-setUser({ ...user, name: "Bob" });
-```
+interface Task {
+  id: string;
+  title: string;
+  status: "todo" | "in-progress" | "done";
+  assigneeId: string | null;
+}
 
-**2. Forgetting that `useCallback`/`useMemo` dependencies control reference stability**
+interface ProjectStore {
+  tasks: Task[];
+  moveTask: (id: string, status: Task["status"]) => void;
+  assignTask: (id: string, assigneeId: string) => void;
+  addTask: (title: string) => void;
+}
 
-```tsx
-// ❌ This filter function is recreated every render
-// Any component receiving it as a prop will re-render regardless of memo
-const filterActive = (items) => items.filter((i) => i.active);
+export const useProjectStore = create<ProjectStore>()(
+  immer((set) => ({
+    tasks: [],
 
-// ✅ Stable reference — only recreated when dependencies change
-const filterActive = useCallback(
-  (items) => items.filter((i) => i.active),
-  [], // no external deps — stable forever
+    // With immer middleware: write as if mutating — Immer produces immutable update
+    moveTask: (id, status) =>
+      set((state) => {
+        const task = state.tasks.find((t) => t.id === id);
+        if (task) task.status = status; // looks like mutation — Immer intercepts
+      }),
+
+    assignTask: (id, assigneeId) =>
+      set((state) => {
+        const task = state.tasks.find((t) => t.id === id);
+        if (task) task.assigneeId = assigneeId;
+      }),
+
+    addTask: (title) =>
+      set((state) => {
+        state.tasks.push({
+          // push is safe inside Immer draft
+          id: crypto.randomUUID(),
+          title,
+          status: "todo",
+          assigneeId: null,
+        });
+      }),
+  })),
 );
 ```
 
-**3. Confusing shallow and deep equality**
+---
 
-`React.memo` and `useMemo` do **shallow** comparison — they check if each prop reference changed, not if the nested values inside changed. A deeply nested mutation will fool them.
+### `structuredClone` vs Spread for Full Copies
+
+`structuredClone` deep-clones an object — useful for creating a fully independent copy with no shared references. The tradeoff: no structural sharing (every nested object gets a new reference), so `React.memo` sees all props as changed even if values are identical.
 
 ```ts
-const config = { theme: { color: "blue" } };
-config.theme.color = "red"; // mutation — config reference is unchanged
-// useMemo watching config will NOT recompute — it only sees config hasn't changed
+// structuredClone: no structural sharing — use for isolated copies, not for state updates
+const snapshot = structuredClone(currentState); // safe deep clone for rollback storage
+
+// Spread: structural sharing — use for state updates where unchanged branches should be stable
+const next = { ...state, user: { ...state.user, name: "Bob" } };
 ```
 
-**4. Spreading arrays incorrectly**
+The right tool: spread (or Immer) for state updates, `structuredClone` for creating a rollback snapshot or passing a copy to a third-party library that might mutate it.
+
+---
+
+### `React.memo` with Structural Sharing
+
+Structural sharing is what makes `React.memo` effective at scale:
+
+```tsx
+import { memo, useState, useCallback } from "react";
+
+type Task = { id: string; title: string; done: boolean };
+
+// memo does shallow prop comparison — relies on referential stability
+const TaskRow = memo(function TaskRow({
+  task,
+  onToggle,
+}: {
+  task: Task;
+  onToggle: (id: string) => void;
+}) {
+  return (
+    <li>
+      <input
+        type="checkbox"
+        checked={task.done}
+        onChange={() => onToggle(task.id)}
+      />
+      {task.title}
+    </li>
+  );
+});
+
+export function TaskList({ initialTasks }: { initialTasks: Task[] }) {
+  const [tasks, setTasks] = useState<Task[]>(initialTasks);
+
+  const toggleTask = useCallback((id: string) => {
+    setTasks((prev) =>
+      prev.map(
+        (task) =>
+          task.id === id
+            ? { ...task, done: !task.done } // new object for changed task
+            : task, // same reference for unchanged tasks
+      ),
+    );
+  }, []);
+
+  return (
+    <ul>
+      {tasks.map((task) => (
+        // TaskRow only re-renders if task reference or onToggle changes
+        // Unchanged tasks have stable references → TaskRow bails out
+        <TaskRow key={task.id} task={task} onToggle={toggleTask} />
+      ))}
+    </ul>
+  );
+}
+```
+
+Without structural sharing (e.g., `setTasks([...tasks])` where all item references are shared but the array is new), every `TaskRow` still re-renders because `memo` checks the task prop — which is the same reference. The optimization works precisely because only the mutated item gets a new reference.
+
+---
+
+## Real-World Use Case
+
+**Kanban board with 200+ task cards.** Each card is a `TaskCard` component wrapped in `React.memo`. When a user moves one card from "Todo" to "In Progress", the state update using Immer middleware produces: a new `tasks` array, a new task object only for the moved card, same references for all other 199 cards. `React.memo` bails out for all 199 unchanged cards — only the moved card re-renders. Without structural sharing (e.g., using `JSON.parse(JSON.stringify(state))`), all 200 cards would re-render on every drag operation.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Mutating state directly.**
 
 ```ts
-// ❌ This adds an item but the spread is on the wrong level
-const next = [...items];
-next[0].quantity = 5; // still mutating the original object inside the array
+// ❌ Same reference — React skips the update
+const [user, setUser] = useState({ name: "Alice" });
+user.name = "Bob";
+setUser(user);
 
-// ✅ Spread the object you're changing too
+// ✅ New reference — React updates
+setUser({ ...user, name: "Bob" });
+```
+
+**2. Spreading the array but mutating the items inside it.**
+
+```ts
+// ❌ New array, but item objects are mutated in place
+const next = [...items];
+next[0].quantity = 5; // mutates the original item object
+
+// ✅ New array AND new object for the changed item
 const next = items.map((item) =>
   item.id === targetId ? { ...item, quantity: 5 } : item,
 );
 ```
 
-<Callout type="warn">
-  Never push, pop, splice, or sort an array that lives in React state. These
-  methods mutate in place. Always use `map`, `filter`, `slice`, or spread to
-  create a new array.
-</Callout>
+**3. Using `structuredClone` for state updates.** It deep-clones everything — no structural sharing. All memo'd children re-render because their prop references are all new even if values are unchanged.
+
+**4. Confusing shallow and deep equality.** `React.memo` does shallow prop comparison. A deeply nested mutation with the same top-level reference fools it into skipping re-renders you needed.
+
+**5. `Object.freeze` as a substitute for immutable patterns.** `Object.freeze` is shallow — it prevents direct mutation of top-level properties but doesn't affect nested objects. It also throws in strict mode, making it a debugging tool, not a production immutability strategy.
+
+---
 
 ## Summary
 
-Immutable data patterns and referential equality are two sides of the same coin in React development. JavaScript compares objects by reference, so React uses `===` checks to efficiently detect changes without deep-scanning your entire state tree. By always returning new objects and arrays when state changes — and keeping references stable when data hasn't changed — you give React and memoization tools exactly the signal they need. Mutating in place silently breaks renders and memoization in ways that are hard to debug. For complex nested updates, Immer is a production-ready solution that removes the verbosity of deep spreading while preserving immutability semantics.
+Immutable data patterns give React and memoization tools reliable change signals via referential equality. Structural sharing — only changed branches get new references — makes immutable updates efficient and enables `React.memo` to bail out correctly. The spread operator produces structural sharing for shallow updates; Immer produces it for deep updates via the draft proxy pattern. Immer's Zustand middleware applies this to global store updates with ergonomic mutation syntax. `structuredClone` is for full independent copies (rollback snapshots), not for state updates. The golden rule: never mutate arrays or objects in state directly — always return a new reference when something changes, and return the original reference when it hasn't.
+
+---
+
+## Interview Questions
+
+**Q1. Why does React use referential equality instead of deep equality to detect state changes?**
+
+Deep equality means recursively comparing every nested value — for a large state tree this is O(n) work on every render. Referential equality (`===`) is O(1). React's bet is that if you follow immutability conventions (new references for changed data, same references for unchanged data), `===` provides all the signal needed without the cost of deep scanning. The entire React rendering model, `useMemo`, `useCallback`, `React.memo`, and Zustand/Jotai subscriptions are all built on this assumption. This is why violating immutability (mutating in place) silently breaks things — the change is real but React has no way to see it.
+
+**Q2. What is structural sharing and why does it matter for performance?**
+
+Structural sharing means new state shares unchanged branches with old state — only the parts that changed get new references. Without it, an immutable update to one field in a large state object would require allocating new objects for every node in the entire tree. With structural sharing (spread syntax or Immer), only the path from the root to the changed value gets new objects — everything else is shared. This matters for `React.memo`: components whose props didn't change still receive stable references, so they bail out of re-rendering correctly. A board with 200 cards can update one card and only re-render that one card — because the other 199 still have the same object references.
+
+**Q3. How does Immer produce immutable updates from mutative-looking code?**
+
+Immer uses a JavaScript `Proxy` to wrap the state in a "draft." All reads on the draft return normal values. All writes (mutations) are intercepted and recorded — the original state is never touched. When the producer function returns, Immer replays the recorded mutations to build a new immutable object tree with structural sharing: branches you touched get new references, branches you didn't touch are shared with the original. The result is the same efficiency as manual spreading with none of the verbosity. Immer also handles arrays correctly — `draft.push()` inside a producer produces a new array, not a mutation.
+
+**Q4. What is the difference between using `structuredClone` and spread for state updates?**
+
+`structuredClone` creates a fully independent deep copy — every nested object gets a new reference, regardless of whether it changed. This breaks structural sharing: `React.memo` sees every prop reference as new and re-renders all children, even those whose data didn't change. Spread creates structural sharing: only the branches you explicitly spread get new references; untouched branches are shared from the original. Use spread (or Immer) for state updates where you want unchanged branches to remain stable. Use `structuredClone` when you need a truly independent copy that will survive further mutations without affecting the original — like storing a rollback snapshot before an optimistic update.
+
+**Q5. How does Immer middleware for Zustand work and when should you use it?**
+
+Zustand's `immer` middleware wraps the store's `set` function so that every state update is passed through `immer`'s `produce`. You write `set((state) => { state.x = value })` and Immer intercepts the draft mutations to produce a new immutable state with structural sharing. Use it when your store has deeply nested state that requires multi-level spread operations — the middleware reduces that to direct property assignment. Don't use it for flat stores with simple updates — the overhead isn't worth it. The middleware doesn't change subscription or selector behavior; it only affects how `set` produces the next state.
+
+**Q6. When should you use `React.memo` and what does structural sharing enable that makes it effective?**
+
+Use `React.memo` on components that receive the same props most of the time and are expensive to render (large lists, complex layouts, computation-heavy components). `React.memo` does shallow prop comparison: it bails out if all prop references are identical to the previous render. Structural sharing makes this effective because unchanged items in a list keep their exact object references — `React.memo` sees the same reference and correctly bails out. Without structural sharing, even "unchanged" items would have new references (from a full deep clone or a spread of the whole array), and `React.memo` would re-render everything. The combination — structural sharing in state updates + `React.memo` on list items — is what makes large lists performant in React.

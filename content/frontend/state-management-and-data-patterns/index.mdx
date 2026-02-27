@@ -5,28 +5,30 @@ description: How state flows through an application — including the edge cases
 
 ## State Management & Data Patterns
 
-Most state management articles focus on which library to use. This section focuses on the underlying problems that all state management approaches have to solve: consistency, derivation, race conditions, and the boundary between server and client truth.
+Most state management articles focus on which library to use. This section focuses on the underlying problems all state management approaches must solve: consistency, derivation, race conditions, and the boundary between server and client truth.
 
-The section builds from first principles — what state is and where it should live — before covering remote data, then the edge cases that only appear in production.
+The section builds from first principles — what state is and where it should live — through remote data patterns, and into the edge cases that only appear under load or poor connectivity.
 
-## What's covered
+---
 
-**Derived State vs Redundant State** — The single source of truth principle: when to compute state on the fly versus store it, and how redundant state causes sync bugs. Start here — it's the most commonly violated rule in React codebases.
+## What's Covered
 
-**Immutable Data Patterns** — Why mutating state directly causes missed updates and unpredictable re-renders, and how structural sharing makes immutable updates efficient.
+**Derived vs Redundant State** — The single source of truth principle and how to enforce it. Redundant state (values stored separately that could be computed) is the root cause of sync bugs. Covers inline derivation, `useMemo`, `useReducer` for atomic transitions, Zustand computed selectors, and Jotai derived atoms.
 
-**Memoization Pitfalls** — When `useMemo`, `useCallback`, and `React.memo` help, when they silently break due to unstable dependencies, and when they're not worth the complexity.
+**Immutable Data Patterns** — How structural sharing makes immutable updates efficient and how referential equality drives React's rendering model. Covers spread patterns, Immer for deep updates, Immer middleware for Zustand, `structuredClone` vs spread, and how `React.memo` depends on structural sharing to work correctly.
 
-**State Boundaries** — How to decide what lives globally, what lives in a subtree, and what lives in the URL.
+**Memoization Pitfalls** — The stale closure problem, when `useMemo`/`useCallback` help vs hurt, `useEffectEvent` (React 19) for stable callbacks that read fresh values, `React.memo` with custom comparators, the React Compiler's automatic memoization, and how to profile before optimizing.
 
-**URL as State** — Encoding UI state in the URL for shareability, bookmarkability, and server-side rendering compatibility.
+**State Boundaries** — How to decide what lives in local state, server state, or global client state. Decision tree for routing state to the right tool. Context splitting by update frequency. `useSyncExternalStore` for external subscriptions. Zustand with `devtools`/`persist`/`immer` middleware. Jotai's atomic model.
 
-**Data Fetching Patterns** — The mental model behind SWR and React Query: cache keys, deduplication, background revalidation, optimistic mutations, and when to use a client cache versus a Server Component fetch.
+**URL as State** — Encoding UI state in the URL for shareability, bookmarkability, and server rendering. The `mergeSearchParams` utility, `nuqs` for type-safe typed params, Zod validation of URL params before use, `push` vs `replace` routing semantics, and the Next.js App Router `searchParams` prop in Server Components.
 
-**Race Conditions in UI State** — How async operations that resolve out of order corrupt displayed state, and the patterns (abort signals, sequence IDs, reducers) that prevent it.
+**Data Fetching Patterns** — TanStack Query and SWR as client-side cache managers. Cache keys, deduplication, `staleTime` vs `gcTime`. `prefetchQuery` + `dehydrate`/`HydrationBoundary` for SSR-rendered pages with a pre-populated cache. Parallel `useQueries`, dependent queries with `enabled`, and mutations with `onSuccess` cache invalidation.
 
-**Optimistic UI & Rollback Strategy** — Showing immediate feedback before a server response, and reverting cleanly when the server rejects the mutation.
+**Race Conditions in UI State** — How async operations resolving out of order corrupt displayed state. `AbortController` for fetch cancellation, ignore flags for non-cancellable async work, `useReducer` sequence counters for complex state machines, debounce + abort combined, and how TanStack Query eliminates the entire class automatically.
 
-**Idempotent UI Actions** — Designing mutations that are safe to retry, and why this matters for network reliability and optimistic updates.
+**Optimistic UI & Rollback** — `useOptimistic` (React 19) for Server Actions, TanStack Query `onMutate`/`onError`/`onSettled` for client mutations, handling concurrent mutations on the same resource, drag-and-drop snapshot-at-drag-start rollback, and `cancelQueries` before applying optimistic updates.
 
-**Offline Conflict Resolution** — Handling writes that occur while the user is offline and syncing them back to the server without data loss.
+**Idempotent UI Actions** — Client-side guards (disabled state, `useTransition`, `useRef` key) for UX. Server-side idempotency keys for correctness. `useRef` for stable key generation across retries. React Strict Mode as an idempotency test. Idempotency key TTL considerations.
+
+**Offline Conflict Resolution** — The three-version model (base, local, remote) for conflict detection. Version number and vector clock approaches. IndexedDB write queue for durable offline storage. Background Sync API for flush-on-reconnect even when the page is closed. CRDTs (Automerge, Yjs) for conflict-free collaborative data. Sequential vs parallel queue flushing.

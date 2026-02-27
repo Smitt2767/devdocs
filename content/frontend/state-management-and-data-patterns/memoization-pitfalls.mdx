@@ -1,55 +1,53 @@
 ---
 title: Memoization Pitfalls
-description: A practical guide to common memoization mistakes in React, with a deep focus on the stale closure problem and how to avoid it.
+description: When useMemo, useCallback, and React.memo help versus when they silently break due to stale closures or unstable dependencies — and how React 19's useEffectEvent and the React Compiler change the picture.
 ---
 
 ## Overview
 
-Memoization in React — via `useMemo`, `useCallback`, and `React.memo` — is a performance optimization tool. It caches computed values or function references so React skips expensive recalculations on re-renders.
+Memoization in React caches computed values or function references so React skips expensive recalculations on re-renders. Used correctly, it reduces unnecessary work. Used incorrectly, it introduces stale closure bugs that silently operate on outdated data, wastes memory on cache entries that never help, and sometimes makes rendering _slower_ due to dependency comparison overhead.
 
-Used correctly, memoization reduces unnecessary work. Used incorrectly, it introduces subtle bugs that are hard to trace, wastes memory, and sometimes makes performance _worse_.
-
-The most dangerous pitfall is the **stale closure problem**: a memoized function or value captures a snapshot of variables from a previous render, leading to logic that silently operates on outdated data.
+The most dangerous pitfall is the **stale closure**: a memoized function or value captures a snapshot of variables from a previous render and silently uses outdated state. The most common waste is memoizing cheap computations where the memoization overhead exceeds the computation itself.
 
 ---
 
 ## How It Works
 
-### Closures in JavaScript
+### Closures and Memoization
 
-Every function in JavaScript forms a closure — it captures references to variables from the scope where it was defined. In a React component, each render creates a new scope with fresh values for `props`, `state`, and local variables.
+Every function in JavaScript forms a closure over the scope where it was defined. Each render creates a new scope with fresh state and props. `useCallback` and `useMemo` prevent recreation across renders — useful for referential stability, dangerous when the dependency array is incomplete.
 
 ```tsx
 function Counter() {
   const [count, setCount] = useState(0);
 
-  // This function closes over the `count` from *this specific render*
+  // Without memo: new function every render — always captures current count
   function logCount() {
-    console.log(count);
+    console.log(count); // always current
   }
+
+  // With useCallback and empty deps: same function forever — always captures count = 0
+  const logCountMemo = useCallback(() => {
+    console.log(count); // stale after first render
+  }, []); // ← missing count
 }
 ```
 
-On each render, `logCount` is recreated with the current `count`. That's the expected behavior.
+When a dependency is missing from the array, the memoized value silently uses the value from the render when it was last created — not the current render. This is the stale closure problem.
 
-### What Memoization Does to Closures
+### When Memoization Actually Helps
 
-`useCallback` and `useMemo` deliberately **prevent** recreation across renders. That's the point. But if you memoize a function and its dependency array doesn't include every value it reads, the function retains the closed-over values from the render when it was _last created_ — not the current render.
+Three cases where memoization provides real value:
 
-```tsx
-const handleSubmit = useCallback(() => {
-  // `formData` here is from the render when this callback was last created
-  submitForm(formData);
-}, []); // ❌ formData is missing from deps — stale closure
-```
-
-Every time `handleSubmit` is called, it submits whatever `formData` was when the component first mounted.
+1. **Expensive derivation** — `useMemo` for a computation that takes measurable time (filtering thousands of records, graph traversal, complex aggregation)
+2. **Referential stability for memo'd children** — `useCallback` when a function is passed to a `React.memo`-wrapped child; without it, the child re-renders anyway because it sees a new function reference
+3. **Stable references in dependency arrays** — `useMemo`/`useCallback` to prevent cascading re-renders or infinite effect loops when objects/functions are used as effect dependencies
 
 ---
 
 ## Code Examples
 
-### Example 1: The Classic Stale Closure Bug
+### The Classic Stale Closure
 
 ```tsx
 "use client";
@@ -60,20 +58,22 @@ export default function SearchForm() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<string[]>([]);
 
-  // ❌ BUG: `query` is stale after the first render
+  // ❌ Stale closure — query is always "" (value at mount)
   const handleSearch = useCallback(async () => {
     const data = await fetch(`/api/search?q=${query}`).then((r) => r.json());
     setResults(data);
-  }, []); // empty deps — query never updates inside this callback
+  }, []); // query not in deps — always uses the initial value
+
+  // ✅ Fix: add query to dependency array
+  const handleSearchFixed = useCallback(async () => {
+    const data = await fetch(`/api/search?q=${query}`).then((r) => r.json());
+    setResults(data);
+  }, [query]); // recreates when query changes — always current
 
   return (
     <div>
-      <input
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder="Search..."
-      />
-      <button onClick={handleSearch}>Search</button>
+      <input value={query} onChange={(e) => setQuery(e.target.value)} />
+      <button onClick={handleSearchFixed}>Search</button>
       <ul>
         {results.map((r) => (
           <li key={r}>{r}</li>
@@ -84,236 +84,301 @@ export default function SearchForm() {
 }
 ```
 
-**What happens:** The user types "react hooks", but `handleSearch` always searches for `""` because `query` is stale.
-
-**Fix — add `query` to the dependency array:**
-
-```tsx
-const handleSearch = useCallback(async () => {
-  const data = await fetch(`/api/search?q=${query}`).then((r) => r.json());
-  setResults(data);
-}, [query]); // ✅ recreates the callback whenever query changes
-```
+<Callout type="warn">
+  Enable the `react-hooks/exhaustive-deps` ESLint rule and treat it as an error,
+  not a warning. It catches the majority of stale closure bugs at write time.
+</Callout>
 
 ---
 
-### Example 2: Stale Closure Inside `setInterval`
+### Stale Closure in `setInterval`
 
 ```tsx
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 
-export default function LiveTimer() {
+export function LiveTimer() {
   const [seconds, setSeconds] = useState(0);
 
   useEffect(() => {
     const id = setInterval(() => {
-      // ❌ `seconds` is always 0 here — stale closure
+      // ❌ seconds is always 0 — stale closure from mount
       setSeconds(seconds + 1);
     }, 1000);
-
     return () => clearInterval(id);
-  }, []); // interval callback captured `seconds = 0` at mount
+  }, []); // interval callback captured seconds = 0 at mount
+
+  // ✅ Functional updater — React provides current value, no closure needed
+  useEffect(() => {
+    const id = setInterval(() => {
+      setSeconds((prev) => prev + 1); // prev is always current
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
 
   return <p>Elapsed: {seconds}s</p>;
 }
 ```
 
-The timer shows `1` forever because `seconds + 1` is always `0 + 1`.
-
-**Fix — use the functional updater form:**
-
-```tsx
-useEffect(() => {
-  const id = setInterval(() => {
-    // ✅ React passes the *current* state value into the updater
-    setSeconds((prev) => prev + 1);
-  }, 1000);
-
-  return () => clearInterval(id);
-}, []);
-```
-
-The functional updater `prev => prev + 1` doesn't close over `seconds` at all — React injects the real current value.
-
 ---
 
-### Example 3: `useRef` as an Escape Hatch for Callbacks
+### `useEffectEvent` — Stable Callbacks That Read Fresh Values (React 19)
 
-When you need a stable function reference (e.g., passed to a third-party library) but it must always see fresh state:
+React 19 stabilizes `useEffectEvent` (previously an experimental hook). It creates a callback that is always stable (never recreated) but always reads the _current_ values of its closed-over variables — solving the memoization dilemma between stability and freshness:
 
 ```tsx
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useEffect, useEffectEvent } from "react";
 
-export default function Analytics() {
+export function Analytics({ pageId }: { pageId: string }) {
   const [userId, setUserId] = useState<string | null>(null);
+  const [sessionId] = useState(() => crypto.randomUUID());
 
-  // Keep a ref that always points to the latest userId
-  const userIdRef = useRef(userId);
-  useEffect(() => {
-    userIdRef.current = userId;
-  }, [userId]);
-
-  // Stable reference — never changes, but reads fresh userId via the ref
-  const trackEvent = useCallback((event: string) => {
-    if (!userIdRef.current) return;
-    fetch("/api/track", {
+  // useEffectEvent: stable reference, always reads current userId and sessionId
+  // The function is NOT a dependency of any effect — it's an "event handler" for effects
+  const trackView = useEffectEvent((event: string) => {
+    if (!userId) return;
+    // Reads the CURRENT userId and sessionId on every call — never stale
+    fetch("/api/analytics", {
       method: "POST",
-      body: JSON.stringify({ userId: userIdRef.current, event }),
+      body: JSON.stringify({ event, userId, sessionId, pageId }),
     });
-  }, []); // ✅ stable reference, no stale closure
+  });
 
-  return <button onClick={() => trackEvent("button_click")}>Track</button>;
+  useEffect(() => {
+    // trackView is stable — no need to list userId or sessionId as deps
+    // This effect only re-runs when pageId changes
+    trackView("page_view");
+
+    const handleClick = (e: MouseEvent) => {
+      trackView("click");
+    };
+    document.addEventListener("click", handleClick);
+    return () => document.removeEventListener("click", handleClick);
+  }, [pageId]); // ✅ trackView is NOT a dep — it's an event, not reactive data
+
+  return null;
 }
 ```
 
 <Callout type="info">
-  This `useRef` + `useEffect` pattern is sometimes called a "ref callback" or
-  "event handler ref". React's upcoming compiler may handle this automatically,
-  but for now it's the correct manual approach.
+  `useEffectEvent` is for functions that are *called by* effects but shouldn't
+  *trigger* effects to re-run. Don't use it for callbacks passed to child
+  components — use `useCallback` with proper deps for those.
+</Callout>
+
+The pre-React-19 equivalent uses a manually maintained ref:
+
+```tsx
+// Pre-React 19 pattern (still valid, more verbose)
+const userIdRef = useRef(userId);
+useEffect(() => {
+  userIdRef.current = userId;
+}, [userId]);
+
+const trackEvent = useCallback((event: string) => {
+  fetch("/api/analytics", {
+    body: JSON.stringify({ event, userId: userIdRef.current }),
+  });
+}, []); // stable — reads fresh value via ref
+```
+
+---
+
+### `React.memo` with Custom Comparator
+
+By default, `React.memo` does a shallow (reference) comparison of all props. You can provide a custom comparator when you need deeper equality or want to ignore some props:
+
+```tsx
+import { memo } from "react";
+
+type ChartProps = {
+  data: number[];
+  label: string;
+  onHover?: (index: number) => void; // callback that changes on every parent render
+  // We don't care about onHover for re-render decisions
+};
+
+// ✅ Custom comparator: re-render only when data or label changes
+// Ignore onHover — its reference changes but the behavior is equivalent
+const Chart = memo(
+  function Chart({ data, label, onHover }: ChartProps) {
+    return (
+      <div>
+        <h3>{label}</h3>
+        {/* expensive chart rendering */}
+      </div>
+    );
+  },
+  (prevProps, nextProps) => {
+    // Return true to SKIP re-render (props are "equal" for our purposes)
+    // Return false to RE-RENDER
+    return (
+      prevProps.label === nextProps.label &&
+      prevProps.data.length === nextProps.data.length &&
+      prevProps.data.every((v, i) => v === nextProps.data[i])
+    );
+  },
+);
+```
+
+<Callout type="warn">
+  Custom comparators are a sharp tool. A comparator that returns `true` too
+  aggressively (over-skipping re-renders) causes stale UI. When in doubt, rely
+  on structural sharing to provide stable references rather than writing custom
+  comparison logic.
 </Callout>
 
 ---
 
-### Example 4: Over-Memoization Anti-Pattern
-
-Not every value needs `useMemo`. Over-use creates maintenance burden and can actually slow things down.
+### Over-Memoization — When It Makes Things Worse
 
 ```tsx
-// ❌ Pointless — this computation is trivially cheap
+// ❌ Pointless — string concatenation is trivially cheap
+// useMemo adds: closure creation, dependency array allocation, cached value storage
+// All more expensive than just doing the concatenation
 const fullName = useMemo(
   () => `${firstName} ${lastName}`,
   [firstName, lastName],
 );
 
-// ✅ Just compute it inline
+// ✅ Just compute it
 const fullName = `${firstName} ${lastName}`;
+
+// ❌ useCallback without React.memo on the child — the callback is stable
+// but the child re-renders anyway because memo isn't applied
+function Parent() {
+  const handleClick = useCallback(() => doSomething(), []);
+  return <ChildComponent onClick={handleClick} />; // re-renders on every Parent render
+}
+
+// ✅ Only meaningful when the child is wrapped in React.memo
+const MemoizedChild = memo(ChildComponent);
+function Parent() {
+  const handleClick = useCallback(() => doSomething(), []);
+  return <MemoizedChild onClick={handleClick} />; // bails out correctly
+}
 ```
 
-Reserve `useMemo` for genuinely expensive calculations — filtering/sorting large arrays, complex data transformations, or when referential equality matters for child component optimization.
+---
+
+### The React Compiler — Automatic Memoization (React 19+)
+
+The React Compiler (previously "React Forget") automatically inserts `useMemo` and `useCallback` at compile time based on static analysis of your component. It eliminates the need to manually reason about memoization for most cases:
+
+```tsx
+// You write:
+function ProductList({ products, category }: { products: Product[]; category: string }) {
+  const filtered = products.filter((p) => p.category === category);
+  const sorted   = [...filtered].sort((a, b) => a.name.localeCompare(b.name));
+
+  return <ul>{sorted.map((p) => <li key={p.id}>{p.name}</li>)}</ul>;
+}
+
+// Compiler outputs (approximately):
+function ProductList({ products, category }) {
+  const filtered = useMemo(() => products.filter((p) => p.category === category), [products, category]);
+  const sorted   = useMemo(() => [...filtered].sort(...), [filtered]);
+  return <ul>{sorted.map((p) => <li key={p.id}>{p.name}</li>)}</ul>;
+}
+```
+
+The compiler handles dependency tracking automatically — no manual dep arrays, no stale closure risk for the cases it covers. It requires components to follow the Rules of React (no mutation, no side effects in render). As of React 19, the compiler is in beta — verify its stability for your project before adopting.
+
+---
+
+### Profiling Before Memoizing
+
+Memoization without measurement is premature optimization. Use React DevTools Profiler to identify actual render bottlenecks:
+
+```tsx
+// Wrap expensive components in Profiler to measure render time
+import { Profiler, type ProfilerOnRenderCallback } from "react";
+
+const onRender: ProfilerOnRenderCallback = (id, phase, actualDuration) => {
+  if (actualDuration > 16) {
+    // slower than 60fps frame budget
+    console.warn(`${id} took ${actualDuration.toFixed(1)}ms to ${phase}`);
+  }
+};
+
+export function AnalyticsDashboard() {
+  return (
+    <Profiler id="AnalyticsDashboard" onRender={onRender}>
+      <ExpensiveChart />
+      <DataTable />
+    </Profiler>
+  );
+}
+```
+
+The rule: memoize only after profiling shows an actual bottleneck. For most components in most apps, React's rendering is fast enough without manual memoization.
 
 ---
 
 ## Real-World Use Case
 
-**E-commerce product filtering:** A product listing page has 2,000 items and lets users filter by category, price range, and rating. The filtered result is expensive to compute.
+**Analytics dashboard with 50 chart components.** Each chart receives a `data` prop (an array of numbers) and an `onDrillDown` callback. Without memoization: the parent state updates on a 5-second polling interval, causing all 50 charts to re-render even when most data hasn't changed.
 
-```tsx
-// app/products/page.tsx (Server Component fetches data)
-// app/products/ProductList.tsx ('use client' for interactive filtering)
+With proper memoization: `useCallback` stabilizes `onDrillDown` (same reference across polls). `React.memo` on each chart bails out when `data` reference is unchanged. Structural sharing in the data fetch update ensures only changed chart data gets a new array reference. Result: only 3–5 charts re-render per poll instead of 50.
 
-"use client";
-
-import { useState, useMemo } from "react";
-import type { Product } from "@/types";
-
-interface Props {
-  products: Product[];
-}
-
-export function ProductList({ products }: Props) {
-  const [category, setCategory] = useState("all");
-  const [maxPrice, setMaxPrice] = useState(1000);
-
-  // ✅ Expensive filter only re-runs when inputs actually change
-  const filtered = useMemo(() => {
-    return products.filter(
-      (p) =>
-        (category === "all" || p.category === category) && p.price <= maxPrice,
-    );
-  }, [products, category, maxPrice]);
-
-  return (
-    <>
-      {/* filter controls */}
-      <ul>
-        {filtered.map((p) => (
-          <li key={p.id}>
-            {p.name} — ${p.price}
-          </li>
-        ))}
-      </ul>
-    </>
-  );
-}
-```
-
-The filter won't re-run on unrelated state changes (e.g., a modal opening elsewhere in the tree).
+The compiler, when available, handles this automatically — but understanding the underlying mechanics is essential for diagnosing cases the compiler misses.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-### 1. Incomplete Dependency Arrays
+**1. Incomplete dependency arrays causing stale closures.** The `exhaustive-deps` ESLint rule catches this. Enable it as an error.
 
-The most common cause of stale closures. If your `useCallback` or `useMemo` reads a value, that value **must** be in the dependency array.
+**2. Using `useCallback` without `React.memo` on the child.** Without `React.memo`, the child re-renders regardless — `useCallback` is wasted overhead.
 
-```tsx
-// ❌ discount is read but not declared as a dependency
-const totalPrice = useMemo(() => basePrice - discount, [basePrice]);
+**3. Memoizing cheap computations.** String concatenation, boolean checks, array length comparisons. The memoization overhead (closure creation, comparison work) exceeds the computation cost.
 
-// ✅
-const totalPrice = useMemo(() => basePrice - discount, [basePrice, discount]);
-```
-
-<Callout type="warn">
-  Use the `eslint-plugin-react-hooks` rule `exhaustive-deps`. It catches missing
-  dependencies automatically and should be treated as an error, not a warning.
-</Callout>
-
----
-
-### 2. Using `useCallback` Without `React.memo` on the Child
-
-`useCallback` stabilizes a function reference. But unless the child component is wrapped in `React.memo`, it re-renders anyway — making your `useCallback` pointless.
+**4. Inline object/array literals bypassing `React.memo`.**
 
 ```tsx
-// ❌ Stable callback, but ChildComponent re-renders regardless
-<ChildComponent onClick={useCallback(() => doThing(), [])} />;
+// ❌ New object on every render — memo is bypassed
+<Chart config={{ color: "blue", width: 400 }} />;
 
-// ✅ Only meaningful when the child opts out of re-renders
-const MemoizedChild = React.memo(ChildComponent);
-<MemoizedChild onClick={useCallback(() => doThing(), [])} />;
-```
-
----
-
-### 3. Memoizing Inside Loops or Conditionals
-
-Hooks must be called unconditionally at the top level of a component. Trying to memoize inside a loop is a rules violation and won't work as expected.
-
-```tsx
-// ❌ Illegal — breaks the Rules of Hooks
-items.map((item) => {
-  const value = useMemo(() => transform(item), [item]); // NEVER do this
-  return value;
-});
-
-// ✅ Extract into a child component that memoizes internally
-function TransformedItem({ item }: { item: Item }) {
-  const value = useMemo(() => transform(item), [item]);
-  return <li>{value}</li>;
-}
-```
-
----
-
-### 4. Forgetting That Object/Array Literals Always Break Referential Equality
-
-```tsx
-// ❌ A new object is created on every render — memo on the child is bypassed
-<Chart config={{ color: "blue", size: 12 }} />;
-
-// ✅ Stabilize the reference
-const chartConfig = useMemo(() => ({ color: "blue", size: 12 }), []);
+// ✅ Stable reference
+const chartConfig = useMemo(() => ({ color: "blue", width: 400 }), []);
 <Chart config={chartConfig} />;
 ```
+
+**5. Over-aggressive custom comparators.** A comparator that skips re-renders when data has actually changed causes stale UI. Custom comparators are hard to maintain. Prefer stable references via structural sharing over custom comparison logic.
 
 ---
 
 ## Summary
 
-Memoization in React is a targeted tool, not a default. The stale closure problem occurs when a memoized function or value closes over outdated state or props because the dependency array was incomplete — the fix is always to audit your deps or use the functional updater form of state setters. Reach for `useRef` when you need a permanently stable function reference that still reads fresh values. Avoid memoizing cheap computations or using `useCallback` without pairing it with `React.memo` on the receiving component. When in doubt, let the `exhaustive-deps` ESLint rule guide you — it catches the majority of stale closure bugs before they reach production.
+Memoization is a targeted performance tool, not a default. Stale closures — the primary pitfall — occur when a memoized function reads state or props that aren't in its dependency array. The fix is always to complete the dependency array or use the functional updater form for state setters. `useEffectEvent` (React 19) creates stable callbacks that always read fresh values — solving the stability-vs-freshness dilemma for effect callbacks. `React.memo` only helps when paired with stable prop references; `useCallback` only helps when the child uses `React.memo`. The React Compiler automates memoization for components following the Rules of React, but understanding the underlying mechanics remains essential for debugging. Always profile before memoizing — most components don't need it.
+
+---
+
+## Interview Questions
+
+**Q1. What is the stale closure problem in React memoization and why does it occur?**
+
+When you memoize a function with `useCallback` (or a value with `useMemo`), it captures the closed-over variables from the scope of the render where it was created. If those variables change in later renders but the memoized value isn't recreated (because the dependency array didn't include them), the function still operates on the old captured values — a stale closure. It occurs because memoization intentionally prevents recreation across renders; the dependency array is supposed to list every value the memoized code reads. An incomplete dependency array means the memoized code sees a stale snapshot. The `exhaustive-deps` ESLint rule catches missing dependencies at write time.
+
+**Q2. What is `useEffectEvent` and what problem does it solve that `useRef` used to solve?**
+
+`useEffectEvent` (React 19) creates a callback that is stable (never recreated, so it doesn't need to be in effect dependency arrays) but always reads the current values of its closed-over variables at call time. This solves the case where you want to call a function from an effect that reads current state, but you don't want that state to be a dependency (which would re-run the effect). Before `useEffectEvent`, the pattern was: store the latest value in a `useRef`, update the ref in a separate `useEffect`, then read from the ref inside the stable callback. `useEffectEvent` makes this a first-class React primitive — it's explicitly for functions that are "called by" effects but shouldn't "trigger" effects to re-run.
+
+**Q3. When does `useCallback` provide no benefit?**
+
+`useCallback` stabilizes a function reference. It provides no benefit when: the child component doesn't use `React.memo` (it re-renders anyway), the function is used as an effect dependency but the effect body doesn't actually care about the function's identity (the effect would re-run either way), or the function is called inline in JSX event handlers without being passed to a child component. The most common waste: `const handleClick = useCallback(() => doThing(), [])` passed to a plain (non-memo'd) child component. The stable reference has no consumer — the child re-renders regardless.
+
+**Q4. How does the React Compiler eliminate manual memoization?**
+
+The React Compiler performs static analysis on component code and automatically inserts `useMemo` and `useCallback` at compile time — wherever React's rendering semantics would allow skipping work. It tracks which variables are "reactive" (derived from props or state) and which are "stable" (won't change between renders), building the correct dependency arrays automatically. This eliminates both the manual burden of adding deps and the risk of missing them (stale closures). The requirement: components must follow the Rules of React — no mutations, no side effects in render, no conditional hook calls. For code that meets these rules, the compiler effectively makes manual memoization unnecessary for most use cases.
+
+**Q5. What's the right way to use `React.memo` with a custom comparator and what are the risks?**
+
+The custom comparator in `React.memo(Component, areEqual)` receives previous and next props and returns `true` to skip re-rendering, `false` to re-render. Use it when: a prop's reference changes on every parent render but its semantic content doesn't change (e.g., an event handler that always does the same thing regardless of reference), or when a prop contains an array and you want element-level comparison rather than reference comparison. The risks: a comparator that returns `true` too aggressively causes stale UI (the component doesn't update when it should); the comparator adds logic that must be maintained when prop types change. Prefer stable references via structural sharing over custom comparators — they're simpler and safer.
+
+**Q6. How do you diagnose whether a component needs memoization?**
+
+Use React DevTools Profiler. Record a typical user interaction, look at the flame chart for components that render frequently and take measurable time (`actualDuration` in the profiler callback). A component spending >2ms per render and rendering on every keystroke or state change is a candidate. Before adding `React.memo`: verify the component receives stable props already (if props change legitimately, memoization won't help). After adding `React.memo`: re-profile to confirm it's actually bailing out. Common false positives: a component that looks expensive but renders in <0.5ms (memoization overhead is comparable), or a component that's memoized but receives unstable prop references so it re-renders anyway. The profiler's "why did this render?" panel shows exactly which props changed.

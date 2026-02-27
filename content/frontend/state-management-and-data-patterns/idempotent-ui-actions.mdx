@@ -1,181 +1,367 @@
 ---
 title: Idempotent UI Actions
-description: How to design UI actions that produce the same result no matter how many times they are triggered.
+description: How to design UI actions that produce the same result regardless of how many times they fire — client-side guards, server-side idempotency keys, React Strict Mode as an idempotency test, and why both layers are required.
 ---
 
 ## Overview
 
-An **idempotent** action is one where triggering it multiple times produces the same outcome as triggering it once. In UI development, this matters because users double-click buttons, networks retry requests, React strict mode mounts components twice, and optimistic updates can race with server responses.
+An idempotent action produces the same outcome when triggered multiple times as when triggered once. In UI development this matters because users double-click buttons, networks retry requests, React Strict Mode invokes effects twice in development, and optimistic updates can race with server responses.
 
 If your "Place Order" button submits twice on a slow connection, idempotency is the difference between one charge and two.
 
+Idempotency must be enforced at two levels. Client-side guards (disabled states, in-flight checks) are UX — they reduce duplicate triggers under normal conditions. Server-side idempotency keys are correctness — they handle retries, network replays, and the cases client guards miss.
+
+---
+
 ## How It Works
 
-Idempotency is enforced at two levels:
+### Why Both Layers Are Required
 
-1. **Server-level** — The server recognizes a duplicate request and returns the same success response without repeating the side effect (e.g., a database write). This is typically done with an idempotency key — a unique token sent with each request. If the server has already processed that token, it short-circuits and returns the cached result.
+Client-side guards fail in several scenarios: the user disables JavaScript before a request completes, the network retries the request automatically (some proxies and service workers do this), a React Server Action is re-invoked due to a network timeout, or a mobile device resumes a suspended tab and replays a pending action. In all these cases, the request reaches the server a second time — the client guard isn't consulted.
 
-2. **Client-level** — The UI prevents or absorbs redundant triggers through disabled states, deduplication logic, or optimistic state management.
+**Server-side idempotency key:** A unique token, generated per user intent and sent with every request. The server checks whether it has already processed this token. If it has, it returns the same success response without repeating the side effect. If it hasn't, it processes normally and stores the token with the result.
 
-Both layers are needed. Client-side guards are UX polish; server-side idempotency is correctness.
+### Generating the Key
+
+The key must be:
+
+- **Stable across retries of the same intent** — generated once per user intent (e.g., one `useRef` per checkout session), reused for all retries
+- **Unique across different intents** — a new key when the user starts a fresh action after a confirmed success
+- **Unpredictable** — `crypto.randomUUID()` provides cryptographic randomness
+
+---
 
 ## Code Examples
 
-### 1. Disabling a button during submission (client guard)
+### Pattern 1: Client-Side Guard — Disabled State
 
 ```tsx
-// app/checkout/page.tsx
+// app/checkout/PlaceOrderButton.tsx
 "use client";
 
 import { useState } from "react";
 
-export default function CheckoutButton() {
-  const [status, setStatus] = useState<"idle" | "pending" | "done">("idle");
+export function PlaceOrderButton({ cartId }: { cartId: string }) {
+  const [status, setStatus] = useState<"idle" | "pending" | "done" | "error">(
+    "idle",
+  );
 
-  async function handlePlaceOrder() {
+  async function handleClick() {
     if (status !== "idle") return; // absorb duplicate triggers
     setStatus("pending");
 
     try {
-      await fetch("/api/orders", { method: "POST" });
+      const res = await fetch("/api/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cartId }),
+      });
+      if (!res.ok) throw new Error("Order failed");
       setStatus("done");
     } catch {
-      setStatus("idle"); // allow retry on failure
+      setStatus("error");
     }
   }
 
   return (
     <button
-      onClick={handlePlaceOrder}
+      onClick={handleClick}
       disabled={status === "pending"}
       aria-busy={status === "pending"}
+      aria-label={
+        status === "pending"
+          ? "Placing order, please wait"
+          : status === "done"
+            ? "Order placed"
+            : "Place order"
+      }
     >
-      {status === "pending" ? "Placing order…" : "Place Order"}
+      {status === "idle" && "Place Order"}
+      {status === "pending" && "Placing order…"}
+      {status === "done" && "Order placed ✓"}
+      {status === "error" && "Try again"}
     </button>
   );
 }
 ```
 
-### 2. Idempotency key on the client
+---
 
-Send a stable, per-attempt key so the server can deduplicate.
+### Pattern 2: Server-Side Idempotency Key
 
-```tsx
-// app/checkout/actions.ts
-"use server";
-
-import { db } from "@/lib/db";
-
-export async function placeOrder(idempotencyKey: string, cartId: string) {
-  // Check if this key was already processed
-  const existing = await db.order.findUnique({ where: { idempotencyKey } });
-  if (existing) return existing; // return same result, no side effect
-
-  // First time seeing this key — create the order
-  const order = await db.order.create({
-    data: {
-      idempotencyKey,
-      cartId,
-      status: "confirmed",
-    },
-  });
-
-  return order;
-}
-```
+The key is generated on the client and checked on the server. Retries reuse the same key — the server deduplicates:
 
 ```tsx
-// app/checkout/page.tsx
+// app/checkout/PlaceOrderButton.tsx
 "use client";
 
 import { useRef, useState } from "react";
 import { placeOrder } from "./actions";
-import { randomUUID } from "crypto"; // available in modern browsers via crypto.randomUUID()
 
-export default function CheckoutButton({ cartId }: { cartId: string }) {
-  // Generate one key per mount — reused across retries, not across new attempts
+export function PlaceOrderButton({ cartId }: { cartId: string }) {
+  // useRef: key is generated once per mount, stable across retries
+  // Changing it would make each retry look like a new order to the server
   const idempotencyKey = useRef(crypto.randomUUID());
-  const [status, setStatus] = useState<"idle" | "pending" | "done">("idle");
+  const [status, setStatus] = useState<"idle" | "pending" | "done" | "error">(
+    "idle",
+  );
 
   async function handleClick() {
     if (status !== "idle") return;
     setStatus("pending");
 
-    await placeOrder(idempotencyKey.current, cartId);
-    setStatus("done");
+    try {
+      await placeOrder(idempotencyKey.current, cartId);
+      setStatus("done");
+    } catch {
+      // On error, allow retry — same key ensures no duplicate order
+      setStatus("error");
+    }
+  }
+
+  function handleRetry() {
+    // IMPORTANT: reuse the same key for retry — server will deduplicate
+    // Only generate a new key when starting a genuinely new order
+    setStatus("idle");
   }
 
   return (
-    <button onClick={handleClick} disabled={status !== "idle"}>
-      {status === "done" ? "Order placed!" : "Place Order"}
-    </button>
+    <div>
+      <button onClick={handleClick} disabled={status === "pending"}>
+        {status === "pending" ? "Placing order…" : "Place Order"}
+      </button>
+      {status === "error" && (
+        <button onClick={handleRetry}>Something went wrong — try again</button>
+      )}
+    </div>
   );
 }
 ```
 
-<Callout type="info">
-  Regenerate the idempotency key only when the user intentionally starts a new
-  action (e.g., after a confirmed success or explicit "try again"). Reusing the
-  same key across retries of the *same* attempt is exactly the point.
-</Callout>
+```ts
+// app/checkout/actions.ts
+"use server";
 
-### 3. Deduplicating concurrent calls with `useTransition`
+import { db } from "@/lib/db";
+import { revalidatePath } from "next/cache";
 
-React's `useTransition` doesn't deduplicate by itself, but it signals pending state natively, which lets you gate entry cleanly.
+export async function placeOrder(idempotencyKey: string, cartId: string) {
+  // Check for existing processed request with this key
+  const existing = await db.order.findUnique({
+    where: { idempotencyKey },
+  });
+
+  // Already processed — return the same result, no side effect repeated
+  if (existing) return existing;
+
+  // First time seeing this key — create the order atomically
+  const order = await db.order.create({
+    data: {
+      idempotencyKey, // store the key with the order
+      cartId,
+      status: "confirmed",
+    },
+  });
+
+  revalidatePath("/orders");
+  return order;
+}
+```
+
+---
+
+### Pattern 3: `useTransition` — Native React Concurrency Guard
+
+`useTransition` exposes a `isPending` flag that React manages during the transition. It prevents re-entrance into the action while one is in-flight:
 
 ```tsx
 "use client";
 
-import { useTransition } from "react";
+import { useTransition, useRef } from "react";
 import { placeOrder } from "./actions";
-import { useRef } from "react";
 
-export default function CheckoutButton({ cartId }: { cartId: string }) {
+export function OrderButton({ cartId }: { cartId: string }) {
   const [isPending, startTransition] = useTransition();
   const idempotencyKey = useRef(crypto.randomUUID());
 
   function handleClick() {
-    if (isPending) return; // React concurrent mode may call this multiple times
+    // startTransition is non-reentrant for the same transition
     startTransition(async () => {
       await placeOrder(idempotencyKey.current, cartId);
     });
   }
 
   return (
-    <button onClick={handleClick} disabled={isPending}>
+    <button onClick={handleClick} disabled={isPending} aria-busy={isPending}>
       {isPending ? "Processing…" : "Place Order"}
     </button>
   );
 }
 ```
 
+---
+
+### React Strict Mode as an Idempotency Test
+
+React Strict Mode in development deliberately invokes `useEffect` cleanup and re-run twice, and calls `useState` initializers twice. This intentionally exposes non-idempotent side effects:
+
+```tsx
+"use client";
+
+import { useEffect } from "react";
+
+// ❌ Non-idempotent — Strict Mode exposes this bug in development
+export function OrderConfirmation({ orderId }: { orderId: string }) {
+  useEffect(() => {
+    // Strict Mode runs this twice in development
+    // This would create two analytics events, or two server calls
+    fetch("/api/analytics", {
+      method: "POST",
+      body: JSON.stringify({ event: "order_confirmed", orderId }),
+    });
+  }, [orderId]);
+
+  return <p>Order confirmed!</p>;
+}
+
+// ✅ Idempotent — safe under Strict Mode and real retries
+export function OrderConfirmationSafe({ orderId }: { orderId: string }) {
+  useEffect(() => {
+    let active = true;
+
+    async function trackConfirmation() {
+      if (!active) return;
+      await fetch("/api/analytics/track", {
+        method: "POST",
+        body: JSON.stringify({
+          event: "order_confirmed",
+          orderId,
+          idempotencyKey: `order_confirmed_${orderId}`, // deterministic key per event
+        }),
+      });
+    }
+
+    trackConfirmation();
+    return () => {
+      active = false;
+    };
+  }, [orderId]);
+
+  return <p>Order confirmed!</p>;
+}
+```
+
+<Callout type="info">
+  Treat Strict Mode double-invocation as a feature. If your `useEffect` breaks
+  when run twice, it exposes a real bug. Fix the effect to be idempotent rather
+  than suppressing Strict Mode.
+</Callout>
+
+---
+
+### Idempotency Key Expiry — Choosing the Right TTL
+
+The idempotency key must remain in the database long enough to cover all reasonable retry windows:
+
+```ts
+// app/api/orders/route.ts
+export async function POST(request: Request) {
+  const { cartId, idempotencyKey } = await request.json();
+
+  if (!idempotencyKey) {
+    return Response.json(
+      { error: "idempotencyKey is required" },
+      { status: 400 },
+    );
+  }
+
+  // Check if key was processed within its TTL
+  const existing = await db.idempotencyKey.findUnique({
+    where: { key: idempotencyKey },
+  });
+
+  if (existing) {
+    if (existing.expiresAt < new Date()) {
+      // Expired — allow reprocessing (new intent)
+      await db.idempotencyKey.delete({ where: { key: idempotencyKey } });
+    } else {
+      // Still valid — return the stored result
+      return Response.json(existing.result);
+    }
+  }
+
+  // Process the order
+  const order = await db.order.create({
+    data: { cartId, status: "confirmed" },
+  });
+
+  // Store the result with a 24-hour TTL
+  // TTL must exceed maximum expected processing time (payment gateway: up to 30s)
+  // plus a safe margin for slow clients (24h handles any realistic retry window)
+  await db.idempotencyKey.create({
+    data: {
+      key: idempotencyKey,
+      result: order,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+    },
+  });
+
+  return Response.json(order, { status: 201 });
+}
+```
+
+---
+
 ## Real-World Use Case
 
-In an e-commerce checkout, a user on a flaky mobile connection taps "Place Order." The request times out on the client, so the app retries. Without server-side idempotency, the user is charged twice. With an idempotency key stored in the database, the server recognizes the retry, finds the existing confirmed order, and returns it — no second charge, no duplicate fulfillment email.
+**E-commerce checkout on a flaky mobile connection.** A user taps "Place Order." The request is sent but the response times out — the app doesn't know if the server processed it. The app automatically retries with the same idempotency key. The server processes the retry, finds the key already in the database, and returns the original order — no second charge, no duplicate fulfillment email. The user sees "Order confirmed" on the retry. Without server-side idempotency, they'd receive two orders and two charges — a critical failure for a payment flow.
 
-The same pattern applies to: sending emails, creating invoices, provisioning infrastructure resources, and submitting forms in offline-capable PWAs.
+The same pattern applies to: email dispatch (prevent duplicate confirmation emails), invoice creation (prevent duplicate billing), resource provisioning (prevent double-provisioning infrastructure), and webhook handlers (prevent duplicate processing when a webhook is retried by the sender).
+
+---
 
 ## Common Mistakes / Gotchas
 
-**1. Generating a new idempotency key on every retry.**
-If you call `crypto.randomUUID()` inside the click handler, each retry looks like a brand-new request to the server. The key must be stable for the duration of a single user intent. Use `useRef` or store the key in component state, initialized once.
+**1. Generating a new idempotency key on every retry.** If `crypto.randomUUID()` is called inside the click handler, each retry creates a new UUID — each looks like a completely new order to the server. The key must be stable for the duration of a single user intent. Use `useRef` initialized once per component mount.
 
-**2. Only guarding on the client.**
-Disabling a button stops double-clicks, but it doesn't prevent duplicate network requests from retries, service workers, or server action re-invocations. Always enforce idempotency at the data layer too.
+**2. Only enforcing idempotency on the client.** Client guards (disabled state, `isPending`) prevent double-clicks under normal conditions but fail for: network retries, service worker request replays, React Server Action re-invocations on timeout, and tab suspends/resumes on mobile. Server-side key checking is the only reliable defense.
 
-**3. Treating `useTransition` as a deduplication mechanism.**
-`useTransition` marks work as non-urgent and exposes a pending flag — it does not cancel or deduplicate in-flight requests. You still need explicit guards (`if (isPending) return`) or the idempotency key pattern.
+**3. Expiring idempotency keys too aggressively.** If the key expires in 60 seconds but your payment gateway can take up to 30 seconds to respond and the client retries after 90 seconds, the expired key allows a second charge. Key TTL must comfortably exceed: max processing time + max retry interval.
 
-<Callout type="warn">
-  React Strict Mode deliberately invokes effects and Server Action handlers
-  twice in development to surface side-effect bugs. If your action is not
-  idempotent, Strict Mode will expose it immediately during development — treat
-  this as a feature, not a bug.
-</Callout>
+**4. Not returning the same response on duplicate keys.** Some implementations detect the duplicate but return `409 Conflict` instead of the original success response. Client code retrying on non-2xx responses will retry again — defeating the purpose. Always return the original success response for a recognized idempotency key.
 
-**4. Expiring idempotency keys too aggressively.**
-If you expire a key in 60 seconds but your async job (e.g., payment processing) takes longer, a legitimate retry after the key expires will trigger a duplicate. Key TTL should exceed the maximum expected processing time with a comfortable margin.
+**5. Using Strict Mode suppression instead of fixing effects.** When Strict Mode's double-invocation exposes a bug, the correct fix is to make the effect idempotent — not to add `if (process.env.NODE_ENV !== 'development')` guards or disable Strict Mode. The double-invocation is exposing a real production bug.
+
+---
 
 ## Summary
 
-Idempotent UI actions guarantee that performing the same action multiple times has no additional effect beyond the first execution. Client-side guards (disabled state, `useTransition`, `useRef` keys) handle UX, while server-side idempotency keys stored in a database handle correctness. Generate the key once per user intent and reuse it across retries. Both layers are necessary — client guards are best-effort, and only the server can enforce true idempotency. Apply this pattern to any action with a side effect: payments, order creation, email dispatch, and resource provisioning.
+Idempotent UI actions guarantee that performing the same action multiple times has no additional effect beyond the first execution. Client-side guards (disabled state, `useTransition`, `useRef` key) handle UX — reducing accidental double-triggers in the happy path. Server-side idempotency keys stored in the database handle correctness — covering network retries, service worker replays, and all cases client guards miss. Generate the key once per user intent (via `useRef`) and reuse it across retries. React Strict Mode's deliberate double-invocation of effects is an idempotency test — treat it as a feature, not a nuisance. Key TTL must exceed the maximum expected processing time.
+
+---
+
+## Interview Questions
+
+**Q1. What is an idempotency key and why is it stored on the server?**
+
+An idempotency key is a unique token generated per user intent on the client, sent with every mutation request. On the server, it's stored alongside the result after the first processing. On subsequent requests with the same key, the server finds the stored result and returns it immediately without re-executing the side effect. The key is stored on the server because only the server can authoritatively determine whether it has seen a request before — client-side deduplication is best-effort and bypassed by any path that doesn't go through the React component tree (service worker retries, proxy retries, direct API calls).
+
+**Q2. Why should you use `useRef` for the idempotency key instead of `useState` or `useMemo`?**
+
+`useRef` provides a stable container that persists across re-renders without triggering re-renders when its value changes. The idempotency key must not change across re-renders of the same component instance — it must be the same for the initial request and all retries within the same user intent. `useState` would work too, but it triggers a re-render when set (unnecessary here). `useMemo` is wrong because it might recompute the UUID on re-renders (if its deps change) or it might return a cached value — `crypto.randomUUID()` should be called exactly once per component mount. `useRef(() => crypto.randomUUID())` is clean and semantically correct: initialize once, persist forever.
+
+**Q3. How does React Strict Mode function as an idempotency test?**
+
+In React 18+ development mode, Strict Mode deliberately mounts components twice (mount → unmount → remount) and runs `useEffect` twice (effect → cleanup → effect). This exposes any side effects in `useEffect` that are not idempotent — analytics events that fire twice, network requests that create duplicate records, subscriptions that register multiple times. The double-invocation is intentional: it simulates what would happen if React unmounts and remounts a component due to off-screen rendering, Hot Module Replacement, or future concurrent features. If your effect breaks when run twice, it will break in production too. The fix is always to make the effect idempotent, not to suppress Strict Mode.
+
+**Q4. What is the correct TTL for an idempotency key and what happens if it expires?**
+
+The TTL should exceed the maximum expected processing time for the operation plus the maximum retry window. For payment processing: if the payment gateway can take up to 30 seconds and the client retries up to 3 times with exponential backoff over 10 minutes, the minimum TTL is 10 minutes + margin. In practice, 24 hours is a safe default for most payment flows. When a key expires: treat it as a new intent — delete the stored key and allow reprocessing. This handles the case where a user genuinely starts a new checkout session the next day with a stale key. The risk of too-short TTL is duplicate charges; the risk of too-long TTL is wasted storage, which is the lesser concern.
+
+**Q5. Why is returning `409 Conflict` for a duplicate idempotency key wrong?**
+
+When a client receives a non-2xx response, most retry logic treats it as a failure and retries. If the server returns `409 Conflict` for a recognized duplicate key, the client retries — receives another `409` — retries again — creating an infinite retry loop, a thundering herd, or eventually exhausting retry budget and showing the user an error. The correct behavior: return the exact same success response (same status code, same body) that was returned for the original successful request. The client doesn't know whether this was the first execution or a duplicate — and it shouldn't need to. The idempotency guarantee is: "calling me twice is the same as calling me once."
+
+**Q6. When is a client-side guard sufficient and when is a server-side idempotency key required?**
+
+A client-side guard (disabled state, `isPending` flag) is sufficient when: the action has no permanent side effects (a read-only query), the duplicate trigger is purely a UI/UX concern (a toggle that's annoying to double-trigger but not harmful), or the action is explicitly designed to be additive and re-triggering is expected (pagination load-more). A server-side idempotency key is required when: the action creates a permanent record (orders, invoices, emails), the request might be retried automatically by the network layer or service worker, the action involves payment or billing, or the consequence of a duplicate is user-visible harm (double charge, duplicate email). For any action with real-world consequences, use both layers — client guards for UX, server key for correctness.
