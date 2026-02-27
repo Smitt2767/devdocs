@@ -1,261 +1,459 @@
 ---
 title: Module Federation
-description: A guide to Module Federation in modern JavaScript build tools — sharing code and dependencies across independently deployed applications at runtime.
+description: How Webpack 5 and Vite Module Federation share code between independently deployed applications at runtime — remoteEntry.js resolution, shared singleton configuration, TypeScript type contracts, and the Vite plugin approach.
 ---
 
 ## Overview
 
-Module Federation lets multiple JavaScript applications share code with each other **at runtime** — without bundling that shared code into each app separately.
+Module Federation lets multiple independently deployed JavaScript applications share code at runtime — without publishing packages to npm or coordinating build-time dependencies. A "host" application loads a "remote" application's modules directly from a CDN URL at runtime, as if they were local imports.
 
-Instead of publishing a shared component to npm and rebuilding every consumer app when it changes, Module Federation lets one app (`remote`) expose a module, and another app (`host`) load it directly over the network while the user is already on the page.
+This is the technical backbone of micro-frontend architectures: teams deploy their modules independently, the host discovers them via CDN URLs, and the browser assembles the complete application at load time.
 
-This is the architectural backbone of **Micro-Frontends**: independent teams owning independent deployments that compose into a single UI.
-
-<Callout type="info">
-  Module Federation was introduced in Webpack 5 and is now also supported in
-  Vite via `@originjs/vite-plugin-federation` and natively in Rspack/Rsbuild.
-</Callout>
+Understanding the bundler mechanics — how `remoteEntry.js` works, why shared dependencies need careful configuration, and what can go wrong — is essential before adopting this pattern.
 
 ---
 
 ## How It Works
 
-At a high level:
+### The Two Sides
 
-1. A **remote** app is configured to _expose_ specific modules (components, utilities, stores).
-2. A **host** app is configured to _consume_ those modules from the remote's deployed URL.
-3. At runtime, when the host needs the module, it fetches a small **manifest** (`remoteEntry.js`) from the remote, then loads only the chunks it needs.
-4. **Shared dependencies** (e.g. React) are negotiated between host and remote — if both include React 18, only one copy is loaded.
+**Remote** — an application that exposes modules for others to consume. During its build, Webpack generates a `remoteEntry.js` manifest at a predictable URL. This file contains: a list of exposed modules, their chunk URLs, and dependency metadata.
 
-Think of it like lazy-loading a dependency from someone else's CDN, except the build tools handle the versioning, chunking, and fallback logic automatically.
+**Host** — an application that declares remotes and consumes their exposed modules. At runtime, the host fetches `remoteEntry.js` from each remote's CDN URL, reads the module manifest, and fetches only the chunks it actually uses.
 
 ```
-Host App                          Remote App
-┌─────────────────┐               ┌─────────────────┐
-│  imports        │  HTTP fetch   │  exposes        │
-│  "remoteApp/    │ ────────────► │  ./ProductCard  │
-│   ProductCard"  │               │                 │
-└─────────────────┘               └─────────────────┘
-         ▲
-   remoteEntry.js
-   (module manifest)
+Remote A builds → remoteEntry.js at https://catalog.acme.com/remoteEntry.js
+Remote B builds → remoteEntry.js at https://checkout.acme.com/remoteEntry.js
+
+Host boots → fetches both remoteEntry.js files
+          → discovers exposed modules
+          → imports "catalog/ProductPage" → fetches catalog chunk
+          → imports "checkout/CartDrawer" → fetches checkout chunk
 ```
+
+### Shared Dependencies
+
+Without coordination, the host and each remote would each bundle their own copy of React — multiple instances in the same browser, causing the "Invalid hook call" error. The `shared` configuration tells Webpack to negotiate a single shared instance:
+
+```
+Host:    React 18.3.1 (singleton: true)
+Remote:  React 18.3.1 (singleton: true)
+→ Browser uses the host's React instance — remote does not include its own
+```
+
+If versions don't satisfy each other's requirements, Webpack falls back to loading multiple versions — which may or may not work depending on the library.
 
 ---
 
 ## Code Examples
 
-### Webpack 5 — Remote App (`product-app`)
+### Remote Application — Exposing Modules
 
-```js
-// webpack.config.js (product-app — the remote)
-const { ModuleFederationPlugin } = require("webpack").container;
+```ts
+// catalog-app/webpack.config.ts
+import { ModuleFederationPlugin } from "@module-federation/enhanced";
 
 module.exports = {
   mode: "production",
   output: {
-    publicPath: "https://product-app.example.com/", // must be absolute in production
+    // publicPath MUST be the absolute CDN URL where this app is deployed
+    // The host uses this to construct chunk URLs from remoteEntry.js
+    publicPath: "https://catalog.acme.com/",
+    uniqueName: "catalog", // unique identifier across all federated apps
   },
   plugins: [
     new ModuleFederationPlugin({
-      name: "productApp", // unique name for this remote
-      filename: "remoteEntry.js", // manifest file hosts will fetch
+      name: "catalog",
+      filename: "remoteEntry.js", // the manifest file the host will fetch
+
+      // Modules this remote exposes — other apps can import these
       exposes: {
-        // key: the public import path consumers will use
-        // value: the actual file to expose
+        // Key: the import path consumers use ("catalog/ProductPage")
+        // Value: the local file to expose
+        "./ProductPage": "./src/pages/ProductPage",
         "./ProductCard": "./src/components/ProductCard",
-        "./useCart": "./src/hooks/useCart",
+        "./useProductData": "./src/hooks/useProductData",
       },
+
       shared: {
-        react: { singleton: true, requiredVersion: "^18.0.0" },
-        "react-dom": { singleton: true, requiredVersion: "^18.0.0" },
+        react: {
+          singleton: true, // only ONE React instance in the browser — prevents hook errors
+          requiredVersion: "^18.0.0",
+          eager: false, // don't include in remoteEntry.js initial payload
+        },
+        "react-dom": {
+          singleton: true,
+          requiredVersion: "^18.0.0",
+          eager: false,
+        },
+        // Shared UI library — version must match across all remotes
+        "@acme/design-system": {
+          singleton: true,
+          requiredVersion: "^3.0.0",
+        },
       },
     }),
   ],
 };
 ```
 
-### Webpack 5 — Host App (`shell-app`)
+---
 
-```js
-// webpack.config.js (shell-app — the host)
-const { ModuleFederationPlugin } = require("webpack").container;
+### Host Application — Consuming Remote Modules
+
+```ts
+// shell-app/webpack.config.ts
+import { ModuleFederationPlugin } from "@module-federation/enhanced";
 
 module.exports = {
   mode: "production",
+  output: {
+    publicPath: "https://shell.acme.com/",
+    uniqueName: "shell",
+  },
   plugins: [
     new ModuleFederationPlugin({
-      name: "shellApp",
+      name: "shell",
+
+      // Declare where to find each remote's manifest
       remotes: {
-        // key: alias used in import statements
-        // value: globalName@remoteEntryUrl
-        productApp: "productApp@https://product-app.example.com/remoteEntry.js",
+        // "catalog" → import("catalog/ProductPage") at runtime
+        // The URL points to the remoteEntry.js manifest
+        catalog: "catalog@https://catalog.acme.com/remoteEntry.js",
+        checkout: "checkout@https://checkout.acme.com/remoteEntry.js",
       },
+
       shared: {
-        react: { singleton: true, requiredVersion: "^18.0.0" },
-        "react-dom": { singleton: true, requiredVersion: "^18.0.0" },
+        react: {
+          singleton: true,
+          requiredVersion: "^18.0.0",
+          // eager: true on the HOST ensures React is available before any remote loads
+          eager: true,
+        },
+        "react-dom": {
+          singleton: true,
+          requiredVersion: "^18.0.0",
+          eager: true,
+        },
+        "@acme/design-system": {
+          singleton: true,
+          requiredVersion: "^3.0.0",
+        },
       },
     }),
   ],
 };
 ```
 
-### Consuming the Remote Module in React
-
 ```tsx
-// src/pages/StorePage.tsx (inside shell-app)
-import React, { Suspense, lazy } from "react";
+// shell-app/src/App.tsx — consuming remote modules
+import { lazy, Suspense } from "react";
 
-// This import resolves to the federated module at runtime
-const ProductCard = lazy(() => import("productApp/ProductCard"));
+// Dynamic import of a remote module — loads catalog's remoteEntry.js at runtime
+// then fetches only the ProductPage chunk
+const RemoteProductPage = lazy(() => import("catalog/ProductPage"));
+const RemoteCartDrawer = lazy(() => import("checkout/CartDrawer"));
 
-export default function StorePage() {
+export function App() {
   return (
-    <main>
-      <h1>Our Products</h1>
-      {/* Suspense is required — the remote chunk loads asynchronously */}
-      <Suspense fallback={<p>Loading product card...</p>}>
-        <ProductCard productId="sku-9021" />
+    <Router>
+      <Route
+        path="/products/:id"
+        element={
+          <Suspense fallback={<div>Loading product…</div>}>
+            <RemoteProductPage />
+          </Suspense>
+        }
+      />
+      <Suspense fallback={null}>
+        <RemoteCartDrawer />
       </Suspense>
-    </main>
+    </Router>
   );
 }
 ```
 
-### Vite Setup (alternative)
+---
+
+### TypeScript Type Contracts for Remote Modules
+
+Remote modules don't have local TypeScript declarations by default — the host doesn't have the remote's source files. Two approaches:
+
+**Manual declaration files:**
 
 ```ts
-// vite.config.ts (remote — using @originjs/vite-plugin-federation)
+// shell-app/src/types/remotes.d.ts
+// Declare the shape of modules exposed by each remote
+
+declare module "catalog/ProductPage" {
+  import { ComponentType } from "react";
+
+  interface ProductPageProps {
+    productId: string;
+    onAddToCart?: (productId: string) => void;
+  }
+
+  const ProductPage: ComponentType<ProductPageProps>;
+  export default ProductPage;
+}
+
+declare module "catalog/ProductCard" {
+  import { ComponentType } from "react";
+  interface ProductCardProps {
+    id: string;
+    name: string;
+    price: number;
+    imageUrl: string;
+  }
+  const ProductCard: ComponentType<ProductCardProps>;
+  export default ProductCard;
+}
+
+declare module "checkout/CartDrawer" {
+  import { ComponentType } from "react";
+  const CartDrawer: ComponentType<{ isOpen: boolean; onClose: () => void }>;
+  export default CartDrawer;
+}
+```
+
+**Shared types package (recommended for teams):**
+
+```ts
+// packages/federation-types/src/index.ts
+// Published as @acme/federation-types — consumed by host and all remotes
+
+export interface ProductPageProps {
+  productId: string;
+  onAddToCart?: (productId: string) => void;
+}
+
+export interface CartDrawerProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+// Each remote's component must satisfy its declared contract
+// The host imports the types for its declaration files
+```
+
+```ts
+// shell-app/src/types/remotes.d.ts — using shared types
+import type { ProductPageProps } from "@acme/federation-types";
+import type { ComponentType } from "react";
+
+declare module "catalog/ProductPage" {
+  const ProductPage: ComponentType<ProductPageProps>;
+  export default ProductPage;
+}
+```
+
+---
+
+### Dynamic Remote URLs — Runtime Configuration
+
+Hardcoding remote URLs in `webpack.config.ts` requires rebuilding the shell whenever a remote's URL changes. Dynamic federation loads URLs from a config endpoint at runtime:
+
+```ts
+// shell-app/src/federation-config.ts
+interface FederationManifest {
+  catalog: string;
+  checkout: string;
+}
+
+let manifest: FederationManifest | null = null;
+
+export async function loadFederationManifest(): Promise<FederationManifest> {
+  if (manifest) return manifest;
+
+  const res = await fetch("/api/federation-manifest");
+  if (!res.ok) throw new Error("Failed to load federation manifest");
+
+  manifest = await res.json();
+  return manifest;
+}
+```
+
+```ts
+// shell-app/webpack.config.ts — use Module Federation's dynamic remote syntax
+remotes: {
+  // Instead of a static URL, use a promise that resolves to the container
+  catalog: `promise new Promise(async (resolve) => {
+    const { loadFederationManifest } = await import('./src/federation-config');
+    const manifest = await loadFederationManifest();
+    const container = window['catalog'];
+    resolve(container);
+  })`,
+},
+```
+
+---
+
+### Vite Module Federation — `@originjs/vite-plugin-federation`
+
+For Vite-based projects, the `@originjs/vite-plugin-federation` plugin provides equivalent functionality:
+
+```bash
+npm install --save-dev @originjs/vite-plugin-federation
+```
+
+```ts
+// catalog-app/vite.config.ts — remote
 import { defineConfig } from "vite";
-import federation from "@originjs/vite-plugin-federation";
 import react from "@vitejs/plugin-react";
+import federation from "@originjs/vite-plugin-federation";
 
 export default defineConfig({
   plugins: [
     react(),
     federation({
-      name: "productApp",
+      name: "catalog",
       filename: "remoteEntry.js",
       exposes: {
+        "./ProductPage": "./src/pages/ProductPage.tsx",
         "./ProductCard": "./src/components/ProductCard.tsx",
       },
       shared: ["react", "react-dom"],
     }),
   ],
   build: {
-    target: "esnext", // required for top-level await used by Vite federation
+    target: "esnext", // required for top-level await in federation runtime
+    minify: false, // easier debugging across remotes
   },
 });
 ```
 
 ```ts
-// vite.config.ts (host)
-import { defineConfig } from "vite";
+// shell-app/vite.config.ts — host
 import federation from "@originjs/vite-plugin-federation";
-import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [
     react(),
     federation({
-      name: "shellApp",
+      name: "shell",
       remotes: {
-        productApp: "https://product-app.example.com/assets/remoteEntry.js",
+        catalog: "https://catalog.acme.com/assets/remoteEntry.js",
+        checkout: "https://checkout.acme.com/assets/remoteEntry.js",
       },
       shared: ["react", "react-dom"],
     }),
   ],
-  build: {
-    target: "esnext",
-  },
+  build: { target: "esnext" },
 });
+```
+
+<Callout type="warn">
+  `@originjs/vite-plugin-federation` has known limitations: HMR across remotes
+  doesn't work in all cases during development, and SSR support is partial. For
+  production Vite+federation setups, evaluate `@module-federation/vite` (from
+  the Module Federation team) as an alternative.
+</Callout>
+
+---
+
+### Error Boundaries for Remote Failures
+
+Remote modules can fail to load (CDN outage, deployment in progress). Each remote needs its own error boundary in the host:
+
+```tsx
+// shell-app/src/RemoteErrorBoundary.tsx
+import { Component, type ReactNode } from "react";
+
+interface Props {
+  remoteName: string;
+  fallback: ReactNode;
+  children: ReactNode;
+}
+
+interface State {
+  hasError: boolean;
+  error: Error | null;
+}
+
+export class RemoteErrorBoundary extends Component<Props, State> {
+  state: State = { hasError: false, error: null };
+
+  static getDerivedStateFromError(error: Error): State {
+    return { hasError: true, error };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      console.error(
+        `Remote "${this.props.remoteName}" failed to load:`,
+        this.state.error,
+      );
+      return this.props.fallback;
+    }
+    return this.props.children;
+  }
+}
+```
+
+```tsx
+// Usage in App.tsx
+<RemoteErrorBoundary
+  remoteName="catalog"
+  fallback={<div>Product catalog is temporarily unavailable.</div>}
+>
+  <Suspense fallback={<div>Loading…</div>}>
+    <RemoteProductPage productId={params.id} />
+  </Suspense>
+</RemoteErrorBoundary>
 ```
 
 ---
 
 ## Real-World Use Case
 
-An e-commerce platform has three teams:
+**Enterprise SaaS platform.** Three product teams: Catalog (product browsing), Checkout (cart and payment), and Account (profile and settings). Each deploys independently on their own schedule — Catalog ships daily, Checkout ships weekly with PCI compliance review, Account ships monthly.
 
-- **Shell team** — owns the navigation, auth, and page layout.
-- **Product team** — owns the product listing and detail pages.
-- **Checkout team** — owns the cart and payment flow.
-
-Without Module Federation, any change to the `ProductCard` component requires the shell team to update their dependency and redeploy everything.
-
-With Module Federation, the product team deploys their app independently. The shell fetches the latest `ProductCard` at runtime — no rebuild, no coordination, no versioning ceremony. The checkout team does the same with their `MiniCart` widget.
-
-Each team ships on their own schedule. The shell always serves the freshest version of each team's components.
+The shell application (`shell.acme.com`) declares all three as remotes. Users navigate to `/products` → the shell loads `catalog/remoteEntry.js` → fetches and renders the Catalog team's `ProductPage`. The Catalog team deployed a new feature 20 minutes ago — users get it immediately without the shell redeploying. React and the shared design system are loaded once by the shell — all three remotes share the single instance. Each remote has its own error boundary in the shell — a Checkout deployment issue doesn't bring down the Catalog view.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-### 1. Forgetting `singleton: true` for React
+**1. Missing `singleton: true` for React.** Without it, the host and each remote bundle their own React — multiple instances, "Invalid hook call" errors at runtime. Always set `singleton: true` for React, React DOM, and any library that uses React Context internally.
 
-If both host and remote load separate copies of React, you'll get the infamous **"Invalid hook call"** error, because hooks depend on a single React instance per page.
+**2. Hardcoding `publicPath` with the wrong URL.** `publicPath` in the remote's Webpack config is used to construct chunk URLs in `remoteEntry.js`. If it's wrong (e.g., still set to `auto` or a localhost URL in production), chunk fetches in the host will 404.
 
-```js
-// Always mark framework dependencies as singleton
-shared: {
-  react: { singleton: true, requiredVersion: '^18.0.0' },
-  'react-dom': { singleton: true, requiredVersion: '^18.0.0' },
-},
-```
+**3. `eager: true` on remotes.** Setting `eager: true` in a remote's shared config includes the shared module in the initial `remoteEntry.js` payload — increasing its size and defeating the lazy-loading purpose. `eager: true` belongs on the host for modules that must be available before any remote loads.
 
-<Callout type="warn">
-  Omitting `singleton: true` on React is the #1 cause of runtime errors in
-  federated apps. Make it a non-negotiable convention across all your remotes
-  and hosts.
-</Callout>
+**4. Importing directly between remotes.** Remote A importing from Remote B creates an undeclared dependency — if B is down, A fails. All cross-remote communication should go through the host's event bus or shared context, not direct module imports.
 
-### 2. Relative or missing `publicPath` in production
-
-Module Federation uses `publicPath` to construct the URL for chunk fetching. If it's set to `auto` or a relative path, chunk requests will resolve against the _host's_ domain, not the remote's — causing 404s.
-
-Always set an **absolute URL** for `publicPath` in production remote builds.
-
-### 3. TypeScript has no type information for remote modules
-
-Out of the box, TypeScript doesn't know the shape of `import('productApp/ProductCard')`. You'll get `any` types everywhere.
-
-Fix this with [`@module-federation/typescript`](https://github.com/module-federation/typescript) or by manually authoring type declaration files:
-
-```ts
-// src/types/remotes.d.ts
-declare module "productApp/ProductCard" {
-  import { FC } from "react";
-  const ProductCard: FC<{ productId: string }>;
-  export default ProductCard;
-}
-```
-
-### 4. Version mismatches cause silent fallbacks
-
-If the host requires React `^18.0.0` and the remote ships `17.x`, Module Federation won't throw — it will silently load two copies unless `strictVersion: true` is set. This can cause subtle bugs.
-
-```js
-shared: {
-  react: {
-    singleton: true,
-    strictVersion: true, // throws at runtime instead of silently loading a second copy
-    requiredVersion: '^18.0.0',
-  },
-},
-```
-
-### 5. Dynamic remote URLs require runtime initialization
-
-The `remotes` field in `ModuleFederationPlugin` is evaluated at **build time**. If you need to resolve remote URLs dynamically (e.g. from a config API), you need to use the **dynamic remote** pattern with `__webpack_init_sharing__` and `__webpack_share_scopes__` — which is significantly more complex.
-
-<Callout type="info">
-  For dynamic remotes, consider using the `@module-federation/enhanced` runtime
-  API or a purpose-built orchestrator like Module Federation's own runtime
-  package.
-</Callout>
+**5. No TypeScript declarations for remote modules.** Without `declare module "catalog/ProductPage"`, TypeScript uses `any` for the imported component — losing type safety at the integration boundary where it matters most.
 
 ---
 
 ## Summary
 
-Module Federation enables independent applications to share code at runtime rather than at build time, making it the core primitive for Micro-Frontend architectures. A **remote** exposes specific modules via a generated manifest (`remoteEntry.js`), and a **host** fetches and executes those modules on demand using standard dynamic `import()` syntax. Shared dependencies like React must be marked as `singleton` to prevent duplicate instances and the runtime errors they cause. TypeScript support requires manual declaration files or a dedicated plugin. When used correctly, Module Federation lets independent teams deploy independently while still composing into a unified user experience.
+Module Federation shares code between independently deployed applications at runtime via `remoteEntry.js` manifests. The remote exposes named modules; the host declares remote URLs and imports modules via dynamic `import()`. Shared dependency configuration (`singleton: true`) ensures only one React instance runs in the browser — the most critical configuration for correctness. TypeScript type contracts for remote modules prevent the integration boundary from becoming an untyped `any`. Dynamic remote URLs decouple the host from specific CDN paths. Vite projects use `@originjs/vite-plugin-federation` with the same conceptual model. Every remote in the host needs its own error boundary — remote failures should be isolated, not cascading.
+
+---
+
+## Interview Questions
+
+**Q1. What is `remoteEntry.js` and what does it contain?**
+
+`remoteEntry.js` is the manifest file generated by Webpack Module Federation for a remote application. It contains: the names and paths of all exposed modules, the URLs of the chunks that implement those modules, and the shared dependency metadata (which packages the remote wants to share, at what version ranges, and with what options like `singleton`). When the host imports a remote module, it first fetches `remoteEntry.js` from the remote's CDN URL. The manifest tells the host what chunks to fetch for that module and whether shared dependencies are available. The host then fetches only the chunks needed for the modules it actually uses — not all of the remote's code.
+
+**Q2. Why does `singleton: true` matter for React in Module Federation and what happens without it?**
+
+React's hooks (`useState`, `useContext`, `useEffect`) store state in a singleton — a global React instance attached to the module's scope. If the host and a remote each bundle their own React (different instances), a component from the remote uses one instance while the host's components use another. When the remote's component calls `useState`, it registers state in the remote's React instance. But React's reconciler (running in the host's instance) can't see that state — it's in a different scope. The result is the "Invalid hook call" runtime error: "Hooks can only be called inside of the body of a function component." Setting `singleton: true` tells Webpack to negotiate a single shared React instance — all components use the same one, eliminating the error.
+
+**Q3. What is the difference between `eager: true` on a host vs a remote in the `shared` config?**
+
+In the host, `eager: true` on a shared package (like React) includes it in the host's initial bundle rather than in a lazy-loaded chunk. This ensures React is available synchronously before any remote module loads — necessary because remotes expect React to already be initialized when they run. In a remote, `eager: true` would include the shared package in `remoteEntry.js` — inflating its size and potentially bundling the package even when the host already provides it. `eager: true` belongs on the host for packages that must be present at startup; remotes should leave `eager` as `false` (the default) so they rely on the host's already-loaded version.
+
+**Q4. How do you maintain TypeScript type safety across the federation boundary?**
+
+The federation boundary — where the host imports `"catalog/ProductPage"` — is untyped by default because the host doesn't have the remote's source files. Three approaches: (1) manual `declare module` files in the host's codebase declaring the expected prop types for each remote export; (2) a shared types package (`@acme/federation-types`) published to npm (or referenced via monorepo workspace) that both the remote's implementation and the host's declarations import from — the remote must satisfy the declared interface, enforced by TypeScript; (3) Module Federation's `@module-federation/typescript` plugin that generates and publishes type definitions automatically from the remote's build. The shared types package approach is most maintainable for large teams because it creates an explicit contract that both sides must satisfy.
+
+**Q5. What are the risks of importing directly from one remote to another?**
+
+Direct remote-to-remote imports create an undeclared runtime dependency. If Remote B is temporarily unavailable (deployment in progress, CDN outage), Remote A also fails — and the shell has no way to isolate the failure because it doesn't know about the dependency. Direct imports also create circular dependency risks (A depends on B depends on A) and versioning conflicts when remotes update their APIs. The correct pattern: all cross-remote communication goes through the host — via shared state (Zustand store initialized by the shell), a custom events bus, or shared Context provided by the shell. This keeps each remote's failure surface independent and the shell in control of cross-team contracts.
+
+**Q6. How does Module Federation differ from simply publishing shared packages to npm?**
+
+npm packages are resolved at build time — the consuming app includes the package version specified in its `package.json` when it was last built. Updating a shared package requires every consuming app to update its dependency, rebuild, and redeploy. Module Federation resolves at runtime — the remote deploys a new version of its module, and all hosts consuming it get the new version immediately without rebuilding. This enables true independent deployment: the Catalog team can ship a bug fix, and the shell and all hosts see it within seconds. The tradeoff: runtime resolution introduces potential API mismatches (the remote's module signature changed but the host's declaration file wasn't updated), whereas npm packages fail at build time with TypeScript errors. Module Federation requires stronger runtime contracts and integration testing to compensate for moving the compatibility check from build time to runtime.

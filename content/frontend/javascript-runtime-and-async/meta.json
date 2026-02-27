@@ -5,7 +5,8 @@
     "event-loop-macro-microtasks",
     "task-starvation-scheduler-priorities",
     "promise-combinators-error-propagation",
+    "async-await-error-handling",
     "abort-controller-streaming-fetch",
-    "websockets-vs-sse-vs-long-polling"
+    "concurrency-vs-parallelism"
   ]
 }

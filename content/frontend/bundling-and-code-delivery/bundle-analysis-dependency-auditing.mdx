@@ -1,17 +1,17 @@
 ---
 title: Bundle Analysis & Dependency Auditing
-description: A practical guide to analyzing your JavaScript bundle size and auditing npm dependencies for security vulnerabilities and bloat.
+description: Using @next/bundle-analyzer, source-map-explorer, and size-limit to find bundle bloat — plus npm audit, knip, and npm ls to manage dependency security, duplicates, and dead weight.
 ---
 
 ## Overview
 
-Bundle analysis and dependency auditing are two distinct but related practices that help you ship faster, safer web apps.
+Bundle analysis and dependency auditing are two distinct practices that together ensure your production JavaScript is lean and secure.
 
-**Bundle analysis** lets you visualize exactly what ends up in your production JavaScript — which packages take up the most space, what's being duplicated, and where you can cut weight to improve load performance.
+**Bundle analysis** lets you visualize exactly what's in your production output — which packages take the most space, what's duplicated, and where you can cut weight to improve load performance.
 
-**Dependency auditing** is about understanding the packages you rely on: are they vulnerable to known security exploits? Are they still maintained? Are you accidentally pulling in five versions of the same utility?
+**Dependency auditing** is about the packages themselves: are they vulnerable? Maintained? Are you accidentally shipping five slightly different versions of the same utility?
 
-Together, these practices are non-negotiable for any production app that has grown beyond a few dependencies.
+Neither is a one-time task. Performance regresses silently as features are added. Vulnerabilities appear in packages that were clean six months ago. Both practices belong in your regular development cycle — and the most impactful checks should run in CI on every pull request.
 
 ---
 
@@ -19,25 +19,19 @@ Together, these practices are non-negotiable for any production app that has gro
 
 ### Bundle Analysis
 
-When you run a production build, your bundler (Webpack, Turbopack, Rollup, etc.) merges and tree-shakes your source files and node_modules into one or more output chunks. A bundle analyzer intercepts this process — either via a plugin or a stats file — and produces an interactive treemap showing the size of every module inside each chunk.
+A production build merges and tree-shakes your source files and `node_modules` into output chunks. A bundle analyzer intercepts this — either via a plugin or a generated stats file — and produces an interactive treemap showing the size of every module inside every chunk.
 
-The treemap lets you answer questions like:
-
-- Why is my main chunk 900KB?
-- Is `lodash` being imported as the full library instead of individual methods?
-- Is `moment.js` still in there even though I thought I replaced it?
+The treemap answers: "Why is my main chunk 900KB? Is `lodash` being imported as a whole instead of individual methods? Is `moment.js` still in there even though I replaced it?"
 
 ### Dependency Auditing
 
-`npm audit` (and equivalents like `pnpm audit`, `yarn npm audit`) cross-references your installed packages against the [GitHub Advisory Database](https://github.com/advisories). It flags packages with known CVEs, describes the severity, and often suggests a fix version.
-
-Separate from security, tools like `depcheck` and `knip` statically analyze your codebase to find packages you've listed in `package.json` but never actually import — dead weight that slows installs and inflates your attack surface.
+`npm audit` cross-references your installed packages against the GitHub Advisory Database and reports known CVEs by severity. Separate from security, tools like `knip` statically analyze your codebase to find packages listed in `package.json` that are never imported — dead weight slowing installs and expanding your attack surface. `npm ls` reveals duplicate packages: multiple versions of the same library installed simultaneously, inflating your bundle with nearly identical code.
 
 ---
 
 ## Code Examples
 
-### 1. Analyzing a Next.js Bundle with `@next/bundle-analyzer`
+### `@next/bundle-analyzer` — Interactive Treemap
 
 ```bash
 npm install --save-dev @next/bundle-analyzer
@@ -49,7 +43,6 @@ import type { NextConfig } from "next";
 import bundleAnalyzer from "@next/bundle-analyzer";
 
 const withBundleAnalyzer = bundleAnalyzer({
-  // Only generate the report when this env var is set
   enabled: process.env.ANALYZE === "true",
 });
 
@@ -61,188 +54,352 @@ export default withBundleAnalyzer(nextConfig);
 ```
 
 ```bash
-# Run the analysis — opens an interactive treemap in your browser
-ANALYZE=true npm run build
+# Open the interactive treemap — two tabs: client bundle + server bundle
+ANALYZE=true next build
 ```
 
-After the build, two browser tabs open automatically: one for the client bundle and one for the server bundle. Look for unexpectedly large rectangles — those are your optimization targets.
+What to look for in the treemap:
 
-### 2. Auditing for Security Vulnerabilities
+- **Unexpectedly large rectangles** — a package taking more space than expected
+- **Duplicate rectangles** — the same package appearing in multiple chunks (deduplication issue)
+- **`node_modules` dominating** — more third-party code than app code
+- **`moment`/`lodash` at full size** — these have lightweight alternatives (`date-fns`, `lodash-es`)
+
+---
+
+### `source-map-explorer` — Chunk-Level Inspection
+
+`source-map-explorer` reads source maps and shows exactly which source file contributed how many bytes to each chunk. More granular than the treemap:
 
 ```bash
-# Audit and see a summary of vulnerabilities by severity
+npm install --save-dev source-map-explorer
+```
+
+```json
+// package.json
+{
+  "scripts": {
+    "analyze:sourcemap": "source-map-explorer '.next/static/chunks/*.js'"
+  }
+}
+```
+
+```bash
+next build   # generates chunks with source maps (ensure sourceMaps: true in next.config.ts)
+npm run analyze:sourcemap
+```
+
+```ts
+// next.config.ts — enable source maps for analysis builds
+const nextConfig: NextConfig = {
+  productionBrowserSourceMaps: true, // enables .map files for client chunks
+};
+```
+
+<Callout type="warn">
+  Disable `productionBrowserSourceMaps` for actual production deployments —
+  source maps expose your source code. Enable only for analysis builds and strip
+  them before deploying.
+</Callout>
+
+---
+
+### `size-limit` — Enforce Bundle Budgets in CI
+
+`size-limit` integrates with CI and **fails the build** when your bundle exceeds defined limits. This prevents bundle regressions from silently shipping:
+
+```bash
+npm install --save-dev size-limit @size-limit/file
+```
+
+```json
+// package.json
+{
+  "scripts": {
+    "size": "size-limit",
+    "build": "next build"
+  },
+  "size-limit": [
+    {
+      "path": ".next/static/chunks/main-*.js",
+      "limit": "80 KB",
+      "gzip": true
+    },
+    {
+      "path": ".next/static/chunks/pages/**/*.js",
+      "limit": "50 KB",
+      "gzip": true
+    }
+  ]
+}
+```
+
+```yaml
+# .github/workflows/bundle-size.yml — CI enforcement
+name: Bundle Size
+
+on: [pull_request]
+
+jobs:
+  size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build
+      - run: npm run size
+      # size-limit exits non-zero if any limit is exceeded → CI fails
+```
+
+<Callout type="info">
+  The `andresz1/size-limit-action` GitHub Action posts size diffs as PR comments
+  — developers see exactly how much their change added to the bundle, in the PR
+  review workflow.
+</Callout>
+
+---
+
+### `npm audit` — Security Vulnerability Detection
+
+```bash
+# Summary of vulnerabilities by severity
 npm audit
 
-# Automatically fix vulnerabilities that have a safe semver-compatible update
+# Only show high and critical — low/moderate often don't affect your usage
+npm audit --audit-level=high
+
+# Auto-fix vulnerabilities with safe semver-compatible updates
 npm audit fix
 
-# Fix vulnerabilities even if it requires a major version bump
-# ⚠️ Review breaking changes before using this
+# Fix even if it requires a major version bump — review diff before committing
 npm audit fix --force
+```
+
+```yaml
+# .github/workflows/security.yml — fail CI on high/critical vulnerabilities
+- name: Security audit
+  run: npm audit --audit-level=high
+  # Exits non-zero on high+ severity → CI fails and blocks merge
 ```
 
 <Callout type="warn">
   `npm audit fix --force` can silently upgrade packages past breaking changes.
-  Always review the diff in `package-lock.json` and run your test suite before
+  Always review `package-lock.json` changes and run your test suite before
   committing.
 </Callout>
 
-### 3. Finding Unused Dependencies with `knip`
+---
 
-`knip` is a modern alternative to `depcheck` with better monorepo and TypeScript support.
+### `knip` — Finding Unused Dependencies
 
 ```bash
 npm install --save-dev knip
 ```
 
 ```json
-// package.json — add a script
+// package.json
 {
-  "scripts": {
-    "knip": "knip"
-  }
+  "scripts": { "knip": "knip" }
+}
+```
+
+```jsonc
+// knip.json — configure entry points and ignore patterns
+{
+  "entry": ["src/index.ts", "app/**/*.{ts,tsx}"],
+  "project": ["src/**/*.{ts,tsx}", "app/**/*.{ts,tsx}"],
+  "ignore": ["**/*.test.ts", "**/*.spec.ts"],
+  "ignoreDependencies": [
+    "@types/node", // used by TypeScript but not explicitly imported
+  ],
 }
 ```
 
 ```bash
 npm run knip
+# Output example:
+# Unused dependencies (2)
+#   moment
+#   react-spring
+# Unused devDependencies (1)
+#   ts-jest
+# Unused exports (4)
+#   src/utils/legacy.ts: formatLegacyDate, parseLegacyDate
 ```
 
-Example output:
+Verify each finding manually — `knip` produces false positives for packages used in config files, Babel plugins, or `require()` calls in scripts.
 
-```
-Unused dependencies (3)
-  moment
-  @types/lodash
-  uuid
+---
 
-Unused devDependencies (1)
-  ts-jest
-```
+### `npm ls` — Detecting Duplicate Package Versions
 
-Once you've confirmed these are genuinely unused, remove them:
+Multiple versions of the same package installed simultaneously inflate your bundle with nearly identical code. `npm ls` reveals them:
 
 ```bash
-npm uninstall moment @types/lodash uuid ts-jest
+# See all installed versions of a specific package
+npm ls react
+# Output:
+# my-app@1.0.0
+# ├── react@18.3.1
+# └── some-legacy-lib@2.1.0
+#     └── react@16.14.0  ← duplicate — two React versions!
+
+# Find all packages with multiple versions
+npm ls --json | npx jq '[.. | objects | select(.version) | .name] | group_by(.) | map(select(length > 1)) | .[]'
 ```
 
-### 4. Checking Package Cost Before Installing
+Fix duplicates with `overrides` (npm) or `resolutions` (pnpm/yarn):
 
-Use [Bundlephobia](https://bundlephobia.com) via its CLI equivalent to evaluate a package before adding it:
+```json
+// package.json — force all packages to use the same React version
+{
+  "overrides": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}
+
+// pnpm-workspace.yaml equivalent — pnpm uses pnpm.overrides
+```
+
+```json
+// pnpm package.json equivalent
+{
+  "pnpm": {
+    "overrides": {
+      "react": "^18.3.1",
+      "react-dom": "^18.3.1"
+    }
+  }
+}
+```
+
+Multiple React versions is a particularly serious duplicate — it causes "Invalid hook call" runtime errors because hooks rely on the React instance being a singleton.
+
+---
+
+### Replacing Heavy Dependencies
+
+```ts
+// ❌ moment — 72KB gzipped, includes all locales by default
+import moment from "moment";
+const formatted = moment(isoString).format("MMM D, YYYY");
+
+// ✅ date-fns — only the imported functions are bundled (~3KB for these two)
+import { format, parseISO } from "date-fns";
+const formatted = format(parseISO(isoString), "MMM d, yyyy");
+```
+
+```ts
+// ❌ Full lodash — ~70KB, CommonJS, cannot be tree-shaken as a whole
+import _ from "lodash";
+const grouped = _.groupBy(orders, "status");
+
+// ✅ lodash-es — ESM, tree-shakeable
+import { groupBy } from "lodash-es";
+const grouped = groupBy(orders, "status");
+
+// ✅ Or: individual lodash functions — smallest possible import
+import groupBy from "lodash/groupBy";
+const grouped = groupBy(orders, "status");
+```
+
+---
+
+### Checking a Package Before Installing
 
 ```bash
-# npx cost-of-modules gives a breakdown of node_modules sizes
-npx cost-of-modules --less --no-install
-
-# Or check a single package before installing
+# Check bundle size impact before adding a dependency
 npx bundlephobia date-fns
+
+# Or use the CLI tool for a broader snapshot
+npx cost-of-modules --less --no-install
 ```
 
 This habit prevents "just adding a small utility" from secretly importing 200KB of transitive dependencies.
-
-### 5. Replacing a Heavy Package — Real Refactor Example
-
-A common find during analysis is `moment.js` (72KB minified+gzipped). Here's how to replace it with `date-fns`:
-
-```ts
-// ❌ Before — pulls in the entire moment library
-import moment from "moment";
-
-function formatOrderDate(isoString: string): string {
-  return moment(isoString).format("MMM D, YYYY");
-}
-```
-
-```ts
-// ✅ After — only the `format` and `parseISO` functions are bundled (~3KB)
-import { format, parseISO } from "date-fns";
-
-function formatOrderDate(isoString: string): string {
-  return format(parseISO(isoString), "MMM d, yyyy");
-}
-```
 
 ---
 
 ## Real-World Use Case
 
-Imagine you're working on a SaaS dashboard. After six months of feature development, your Lighthouse performance score drops from 91 to 63. Time to open the bundle analyzer.
+A SaaS dashboard's Lighthouse performance score drops from 91 to 63 after six months of feature work. The bundle analyzer reveals two problems: `react-data-grid` (340KB) is loaded on every page but used only on one admin page, and `lodash` appears twice in different chunks at slightly different versions.
 
-The treemap immediately shows two problems:
-
-1. `react-data-grid` accounts for 340KB — but it's only used on one admin-only page.
-2. `lodash` appears twice in different chunks at slightly different versions (a common deduplication issue).
-
-You fix both by dynamically importing the data grid component and aligning lodash versions in `package.json` using the `overrides` field:
+Fix 1: lazy-load the data grid:
 
 ```tsx
 // app/admin/reports/page.tsx
-import dynamic from 'next/dynamic'
+import dynamic from "next/dynamic";
 
-// Only loaded when the admin reports page is visited
-const DataGrid = dynamic(() => import('react-data-grid'), {
-  loading: () => <p>Loading grid...</p>,
-  ssr: false, // react-data-grid relies on browser APIs
-})
-
-export default function ReportsPage() {
-  return <DataGrid columns={[...]} rows={[...]} />
-}
+const DataGrid = dynamic(() => import("react-data-grid"), {
+  loading: () => <p>Loading grid…</p>,
+  ssr: false,
+});
 ```
+
+Fix 2: force lodash deduplication:
 
 ```json
-// package.json — force a single resolved version of lodash
-{
-  "overrides": {
-    "lodash": "^4.17.21"
-  }
-}
+// package.json
+{ "overrides": { "lodash": "^4.17.21" } }
 ```
 
-After these two changes and a fresh `npm install`, the main bundle drops by 280KB and the Lighthouse score recovers.
+After `npm install` and rebuild, the main bundle drops 280KB and the Lighthouse score recovers.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Importing entire libraries instead of specific functions**
+**1. Importing entire libraries instead of specific functions.**
 
 ```ts
 // ❌ Imports all of lodash (~70KB)
 import _ from "lodash";
-const result = _.groupBy(orders, "status");
-
 // ✅ Imports only groupBy (~3KB)
 import groupBy from "lodash/groupBy";
-const result = groupBy(orders, "status");
 ```
 
-Tree-shaking can't always save you here — especially with CommonJS modules. Named imports from ESM packages are safer, but always verify in the analyzer.
+**2. Ignoring the server bundle.** `@next/bundle-analyzer` opens both client and server tabs. Bloated server bundles slow serverless cold starts — especially on Vercel or AWS Lambda where init latency is billed.
 
-**2. Ignoring the server bundle**
+**3. Running `npm audit` and ignoring "moderate" severities.** Triage practically: fix `critical` and `high` immediately, schedule `moderate` for the next sprint, document accepted `low` risk. Never let the list grow silently — run it in CI on every PR.
 
-`@next/bundle-analyzer` opens tabs for both client and server. Developers often focus only on the client tab. But bloated server bundles slow cold starts — especially relevant for serverless deployments (Vercel, AWS Lambda) where every millisecond of initialization latency is billed.
+**4. Not re-running `npm audit` after `npm install`.** Vulnerability databases update daily. A package clean six months ago may now have a CVE. Run audit in CI on every pull request, not just when adding dependencies.
 
-**3. Running `npm audit` and ignoring "moderate" severities**
-
-Teams often treat `npm audit` output as noise because it lists dozens of issues. The practical approach is to triage: fix `critical` and `high` severity issues immediately, schedule `moderate` ones for the next sprint, and document why `low` ones are acceptable. Never let the list grow silently.
-
-<Callout type="info">
-  Use `npm audit --audit-level=high` in your CI pipeline to fail builds only on
-  high/critical vulnerabilities, avoiding noise from low-severity issues that
-  block deployments.
-</Callout>
-
-**4. Not re-auditing after `npm install`**
-
-Vulnerability databases are updated daily. A package that was clean six months ago may now have a CVE. Run `npm audit` as part of your CI pipeline on every pull request — not just when you're adding new dependencies.
-
-**5. Treating `knip` / `depcheck` output as gospel**
-
-These tools do static analysis and can produce false positives. A package used only in a config file, a Babel plugin, or a `require()` inside a script may appear "unused." Always manually verify before uninstalling.
+**5. Treating `knip` output as absolute truth.** Static analysis produces false positives for packages used only in config files, Babel plugins, or dynamic `require()` calls. Always verify manually before uninstalling.
 
 ---
 
 ## Summary
 
-Bundle analysis reveals what's inside your production JavaScript and where the weight is coming from — the essential first step before any performance optimization. Dependency auditing keeps your project secure and lean by surfacing vulnerable or unused packages. The two practices work best together as part of a regular maintenance rhythm: analyze your bundle after major feature work, run `npm audit` in CI on every PR, and periodically sweep with `knip` to remove dead dependencies. Small, targeted fixes — replacing a heavy date library, lazy-loading a rarely-used component — compound into meaningfully faster, safer applications over time.
+Bundle analysis reveals what's in your production JavaScript and where the weight is — the essential first step before any optimization. `@next/bundle-analyzer` provides the treemap; `source-map-explorer` provides file-level attribution. `size-limit` enforces budgets in CI, blocking regressions before they ship. `npm audit --audit-level=high` in CI catches security vulnerabilities on every pull request. `knip` finds unused packages; `npm ls` finds duplicate versions. The two practices complement each other: analysis tells you what's big, auditing tells you what's risky or redundant. Run both regularly — performance and security degrade silently without them.
+
+---
+
+## Interview Questions
+
+**Q1. How do you find out which package is causing a bundle to be unexpectedly large?**
+
+Run `ANALYZE=true next build` to open the `@next/bundle-analyzer` treemap. Large rectangles in the treemap indicate large modules. Click into a chunk to see its module breakdown — look for `node_modules` entries that are disproportionately large. For more granularity, use `source-map-explorer '.next/static/chunks/*.js'` to see file-level attribution — it shows exactly how many bytes each source file contributed. If a specific package is suspected, search for it in the treemap by name. Common culprits: `moment` (72KB, includes all locales), `lodash` (70KB, often imported as a whole), `@sentry/browser` (40KB+), icon libraries included as full icon sets.
+
+**Q2. What is `size-limit` and how does it prevent bundle regressions?**
+
+`size-limit` is a CLI tool that measures the gzipped size of your output files and compares them against defined limits in `package.json`. If any file exceeds its limit, `size-limit` exits with a non-zero code — failing the CI build. This prevents the "slow creep" where each PR adds a few KB until the bundle is double its original size. The `andresz1/size-limit-action` GitHub Action extends this by posting a PR comment showing the size diff — developers see the bundle impact of their change during review, before merge. The limits should be set based on the current bundle size plus a small margin, and reviewed periodically as the app grows.
+
+**Q3. What does `npm ls react` reveal and why does having two React versions cause runtime errors?**
+
+`npm ls react` shows all installed versions of React across the entire dependency tree — your app's version and any version required by dependencies. Multiple React versions are problematic because React's hooks (and Context) work by storing state in a singleton — a global React instance. When a component from a library uses a different React instance than your app code, hooks like `useState` look up state in the wrong instance and throw "Invalid hook call." This is a runtime error, not a build error — it appears only when the library component actually renders. Fix with `overrides` in `package.json` to force all packages to resolve to the same React version.
+
+**Q4. How do you safely fix a security vulnerability found by `npm audit`?**
+
+First, read the advisory — understand what the vulnerability is and whether your usage is actually affected (many CVEs require specific usage patterns you may not exercise). For `critical` and `high`: run `npm audit fix` to apply safe semver-compatible updates. If no safe update exists, run `npm audit fix --force` cautiously — review the `package-lock.json` diff to understand what major versions changed, then run your full test suite to catch breaking changes. If a dependency can't be safely updated and your usage is genuinely safe, document the accepted risk in a code comment or security policy. For CI: use `--audit-level=high` to fail only on critical/high — avoid blocking deployments on low-severity noise.
+
+**Q5. What is `knip` and how does it differ from `depcheck`?**
+
+Both tools find unused dependencies by static analysis, but `knip` is more accurate for modern TypeScript and monorepo setups. `depcheck` was designed for simple package structures and misses many modern patterns (TypeScript path aliases, dynamic imports, framework-specific conventions). `knip` understands TypeScript's module resolution, Next.js conventions, monorepo workspace patterns, and can identify unused exports within your own codebase — not just unused dependencies. Both produce false positives (packages used in config files, Babel plugins, or implicit runtime dependencies). The workflow: run `knip`, manually verify each finding, then remove confirmed dead packages.
+
+**Q6. What is the `overrides` field in `package.json` and when should you use it?**
+
+`overrides` (npm v8+, `pnpm.overrides` in pnpm, `resolutions` in Yarn) forces all packages in the dependency tree to resolve a specific package to a specific version — regardless of what each package's own `package.json` specifies. Use it when: (1) a transitive dependency has a security vulnerability and the direct dependency hasn't released a fix yet — override to the patched version; (2) multiple versions of the same package are installed (detected via `npm ls`) causing runtime errors (multiple React instances) or bundle bloat — force deduplication to one version; (3) a peer dependency conflict causes npm to install duplicate versions when one would work. Treat overrides as temporary technical debt — monitor for when the upstream dependency releases a fix so you can remove the override.

@@ -7,6 +7,7 @@
     "samesite-cookie-modes",
     "authentication-flows",
     "api-paradigms",
-    "rate-limiting-client"
+    "rate-limiting-client",
+    "websockets-vs-sse-vs-long-polling"
   ]
 }

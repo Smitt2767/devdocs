@@ -1,114 +1,257 @@
 ---
 title: Edge Rendering
-description: A guide to rendering content at the network edge using runtimes like Vercel Edge and Cloudflare Workers, with a focus on Next.js App Router patterns.
+description: How the edge runtime executes server logic at CDN nodes near users, what WinterCG defines as the standard API surface, how middleware differs from route handlers, and when edge rendering beats static generation or Node.js SSR.
 ---
 
 ## Overview
 
-Edge rendering means running your server-side code on infrastructure that lives geographically close to your users — not in a single centralized region, but distributed across dozens of locations worldwide.
+Edge rendering means executing server-side logic at geographically distributed CDN nodes — not in a single origin server region. When a user in Tokyo requests a page, the code runs in a data center in Tokyo (or Osaka), not in us-east-1. The round-trip time drops from 200–300ms to 20–40ms.
 
-Instead of a request from Tokyo hitting a server in Virginia, it hits a node in Tokyo (or Osaka). The result: dramatically lower latency for dynamic content.
+The tradeoff is a constrained runtime. Edge functions don't run in Node.js — they run in a lightweight V8-based environment defined by the **WinterCG** (Web-interoperable Runtime Community Group) standard. No `fs`, no native addons, no full Node.js API surface. But cold starts are near-zero, scaling is automatic, and the execution environment is closer to the browser's than Node.js is.
 
-In Next.js App Router, you opt a route into the edge runtime with a single export. The tradeoff is a constrained runtime — no full Node.js APIs, smaller bundle limits, but fast cold starts and global distribution.
-
-<Callout type="info">
-  Edge rendering is not the same as a CDN serving static files. The edge
-  *executes code* — it can read cookies, fetch data, rewrite responses, and
-  return personalized HTML dynamically.
-</Callout>
+In Next.js App Router, you opt routes into the edge runtime with `export const runtime = 'edge'`. Middleware always runs on the edge by default.
 
 ---
 
 ## How It Works
 
-By default, Next.js runs server-side code in a Node.js runtime on a single server region. When you switch to the edge runtime, your route handler or page is compiled to a lightweight format (based on the Web Standards API — `Request`, `Response`, `fetch`) and deployed to every edge location in your provider's network.
+### WinterCG — The Standard Runtime API
 
-The request lifecycle looks like this:
+WinterCG defines a common API surface for non-browser JavaScript environments. Instead of Node.js's `http.IncomingMessage`, you get the same `Request` and `Response` objects from the browser's Fetch API. This means edge code is more portable — closer to browser code than Node.js code:
 
-1. User makes a request.
-2. The CDN/edge network routes it to the nearest edge node.
-3. Your code runs there — reading headers, cookies, env vars — and returns a `Response`.
-4. The user receives HTML or data with minimal round-trip time.
+```ts
+// Node.js API surface (not available on edge)
+import { readFileSync } from "fs";
+import { createServer } from "http";
+import { IncomingMessage } from "http";
 
-Because the edge runtime is stripped-down (no `fs`, no native modules, limited `crypto`), cold starts are near-zero. But it also means you can't use everything you'd use in a normal Node.js server.
+// WinterCG / Edge API surface (works on edge and in browsers)
+const response = await fetch("https://api.example.com/data");
+const request = new Request("https://example.com", { method: "POST" });
+const headers = new Headers({ "Content-Type": "application/json" });
+const url = new URL(request.url);
+const encoder = new TextEncoder();
 
-<Callout type="warn">
-  The edge runtime does **not** support Node.js built-ins like `fs`, `path`,
-  `child_process`, or most native npm packages. If your route needs those, stick
-  with the Node.js runtime.
-</Callout>
+// crypto, ReadableStream, WritableStream, TransformStream — all standard
+const hash = await crypto.subtle.digest("SHA-256", encoder.encode("data"));
+```
+
+**What's available on edge:**
+
+- `fetch`, `Request`, `Response`, `Headers`, `URL`, `URLSearchParams`
+- `crypto.subtle` (Web Crypto API)
+- `ReadableStream`, `WritableStream`, `TransformStream`
+- `TextEncoder`, `TextDecoder`
+- `atob`, `btoa`
+- `setTimeout`, `clearTimeout` (limited)
+- Environment variables (those provisioned to the edge)
+
+**What's not available:**
+
+- `fs`, `path`, `child_process`, `os`, `net`
+- Native Node.js addons
+- Most npm packages that depend on Node.js builtins
+- Long-running processes (edge functions have CPU time limits, typically 25–100ms)
+
+### Middleware vs Route Handlers
+
+Next.js has two edge-capable primitives with different roles:
+
+**Middleware (`middleware.ts`)** — always runs on the edge, before any route handler or page render. Intercepts every request. Used for: auth token validation, geo-based redirects, A/B test cookie assignment, request rewriting, bot detection. Cannot render full pages — it modifies requests and returns responses or passes through.
+
+**Edge Route Handlers / Pages (`export const runtime = 'edge'`)** — standard route handlers and pages that opt into the edge runtime. Can render full responses including streaming HTML. Used for: personalized pages, geo-customized content, low-latency API endpoints.
+
+The distinction matters: middleware fires on _every_ request (including static assets), while route handlers only fire for their specific routes.
+
+### Streaming from the Edge
+
+Edge functions can stream HTML using `ReadableStream` — sending content to the browser progressively as it's generated, rather than waiting for the full response:
+
+```ts
+// Streaming is particularly valuable on edge because it starts delivering
+// HTML immediately, hiding the latency of upstream data fetches
+new Response(
+  new ReadableStream({
+    async start(controller) {
+      controller.enqueue(encoder.encode("<html><body>"));
+      const data = await fetch("https://api.example.com/data");
+      controller.enqueue(encoder.encode(await data.text()));
+      controller.enqueue(encoder.encode("</body></html>"));
+      controller.close();
+    },
+  }),
+  { headers: { "Content-Type": "text/html; charset=utf-8" } },
+);
+```
+
+In practice, Next.js handles streaming automatically for edge-runtime pages — Suspense boundaries stream their content just as they do in Node.js SSR.
 
 ---
 
 ## Code Examples
 
-### Edge Route Handler
+### Edge Route Handler — Geo-Personalized Response
 
 ```ts
-// app/api/geo/route.ts
+// app/api/content/route.ts
 export const runtime = "edge"; // opt this route into the edge runtime
 
 export async function GET(request: Request) {
-  // Access geo headers injected by Vercel's edge network
-  const country = request.headers.get("x-vercel-ip-country") ?? "Unknown";
-  const city = request.headers.get("x-vercel-ip-city") ?? "Unknown";
+  // Vercel injects geo headers at the edge node
+  const country = request.headers.get("x-vercel-ip-country") ?? "US";
+  const region = request.headers.get("x-vercel-ip-country-region") ?? "";
+  const city = request.headers.get("x-vercel-ip-city") ?? "";
 
-  return Response.json({
-    message: `Hello from ${city}, ${country}`,
-  });
+  // Fetch from origin — this runs at the edge node closest to the user,
+  // reducing round-trip time for this upstream call too
+  const res = await fetch(
+    `https://content-api.internal/content?country=${country}`,
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.CONTENT_API_KEY}`,
+        "X-Country": country,
+      },
+    },
+  );
+
+  if (!res.ok) {
+    return Response.json({ error: "Content unavailable" }, { status: 503 });
+  }
+
+  const content = await res.json();
+
+  return Response.json(
+    { content, location: { country, region, city } },
+    {
+      headers: {
+        // stale-while-revalidate: serve cached response for 60s,
+        // then revalidate in the background while still serving stale content
+        "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300",
+      },
+    },
+  );
 }
 ```
 
-### Edge Middleware (Next.js)
+---
 
-Middleware in Next.js _always_ runs on the edge runtime — no opt-in needed.
+### Middleware — Auth, Redirects, and A/B Testing
 
 ```ts
-// middleware.ts (project root)
+// middleware.ts — runs on the edge before every request
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-export function middleware(request: NextRequest) {
-  const country = request.geo?.country ?? "US";
+// Lightweight JWT verification using Web Crypto (available on edge)
+async function verifyToken(token: string): Promise<boolean> {
+  try {
+    // Use Web Crypto to verify the JWT signature — no jsonwebtoken package needed
+    // (jsonwebtoken uses Node.js crypto, not available on edge)
+    const [headerB64, payloadB64, sigB64] = token.split(".");
 
-  // Redirect users from Germany to a localized route
-  if (country === "DE") {
-    return NextResponse.redirect(new URL("/de", request.url));
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(process.env.JWT_SECRET!),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+
+    const signature = Uint8Array.from(
+      atob(sigB64.replace(/-/g, "+").replace(/_/g, "/")),
+      (c) => c.charCodeAt(0),
+    );
+    const data = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+
+    return await crypto.subtle.verify("HMAC", key, signature, data);
+  } catch {
+    return false;
+  }
+}
+
+export async function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  // ── Auth check for protected routes ──────────────────────────────────────
+  if (pathname.startsWith("/dashboard")) {
+    const token = request.cookies.get("auth-token")?.value;
+
+    if (!token || !(await verifyToken(token))) {
+      const loginUrl = new URL("/login", request.url);
+      loginUrl.searchParams.set("from", pathname);
+      return NextResponse.redirect(loginUrl);
+    }
+  }
+
+  // ── Geo-based redirect ────────────────────────────────────────────────────
+  const country =
+    request.geo?.country ?? request.headers.get("x-vercel-ip-country");
+
+  if (country === "DE" && !pathname.startsWith("/de")) {
+    return NextResponse.redirect(new URL(`/de${pathname}`, request.url));
+  }
+
+  // ── A/B test cookie assignment ────────────────────────────────────────────
+  // Assign variant on first visit, persist in cookie for subsequent visits
+  if (pathname === "/" && !request.cookies.has("ab-variant")) {
+    const variant = Math.random() < 0.5 ? "control" : "treatment";
+    const response = NextResponse.next();
+    response.cookies.set("ab-variant", variant, {
+      httpOnly: true,
+      maxAge: 60 * 60 * 24 * 30, // 30 days
+      sameSite: "lax",
+    });
+    return response;
   }
 
   return NextResponse.next();
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  // Run middleware only on app routes — skip static assets and API routes
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|api/).*)"],
 };
 ```
 
-### Edge Server Component Page
+---
+
+### Edge-Rendered Page with `stale-while-revalidate`
 
 ```tsx
-// app/dashboard/page.tsx
+// app/storefront/[slug]/page.tsx — edge-rendered, ISR-style caching
 export const runtime = "edge";
 
-async function getUserData(userId: string) {
-  // fetch() is fully supported on the edge — use it instead of Node http
-  const res = await fetch(`https://api.example.com/users/${userId}`, {
-    headers: { Authorization: `Bearer ${process.env.API_SECRET}` },
-    // Next.js extended fetch: opt out of caching for dynamic data
-    cache: "no-store",
+// revalidate: how long (seconds) before the CDN considers the page stale
+// Edge rendering + revalidation = low latency + fresh content
+export const revalidate = 60; // revalidate every 60 seconds
+
+interface Props {
+  params: { slug: string };
+}
+
+async function getStorefrontData(slug: string) {
+  const res = await fetch(`https://cms.example.com/api/storefront/${slug}`, {
+    // Next.js extended fetch — participates in Next.js's revalidation system
+    next: {
+      revalidate: 60,
+      tags: [`storefront-${slug}`], // cache tag for on-demand revalidation
+    },
   });
 
-  if (!res.ok) throw new Error("Failed to fetch user");
+  if (!res.ok) throw new Error(`Failed to fetch storefront: ${res.status}`);
   return res.json();
 }
 
-export default async function DashboardPage() {
-  const user = await getUserData("user_abc123");
+export default async function StorefrontPage({ params }: Props) {
+  // Reads geo from Vercel edge request context
+  // Available because this page runs on the edge runtime
+  const data = await getStorefrontData(params.slug);
 
   return (
     <main>
-      <h1>Welcome, {user.name}</h1>
-      <p>Last login: {new Date(user.lastLogin).toLocaleDateString()}</p>
+      <h1>{data.name}</h1>
+      <p>{data.tagline}</p>
+      {/* Rest of the page — React Suspense boundaries work here too */}
     </main>
   );
 }
@@ -116,52 +259,109 @@ export default async function DashboardPage() {
 
 ---
 
+### On-Demand Cache Invalidation
+
+```ts
+// app/api/revalidate/route.ts — webhook handler for CMS updates
+export const runtime = "edge";
+
+import { revalidatePath, revalidateTag } from "next/cache";
+
+export async function POST(request: Request) {
+  // Verify the webhook is from our CMS
+  const signature = request.headers.get("x-cms-signature");
+  const body = await request.text();
+
+  const expected = await crypto.subtle
+    .importKey(
+      "raw",
+      new TextEncoder().encode(process.env.CMS_WEBHOOK_SECRET!),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    )
+    .then((key) =>
+      crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)),
+    )
+    .then((sig) => btoa(String.fromCharCode(...new Uint8Array(sig))));
+
+  if (signature !== expected) {
+    return Response.json({ error: "Invalid signature" }, { status: 401 });
+  }
+
+  const { type, slug } = JSON.parse(body);
+
+  if (type === "storefront.updated") {
+    // Invalidate by cache tag — all pages/fetches tagged storefront-${slug}
+    revalidateTag(`storefront-${slug}`);
+  }
+
+  if (type === "product.updated") {
+    // Invalidate a specific path
+    revalidatePath(`/products/${slug}`);
+  }
+
+  return Response.json({ revalidated: true });
+}
+```
+
+---
+
 ## Real-World Use Case
 
-**Personalized storefronts at scale.**
+**International e-commerce platform.** Products, pricing, and promotions differ by country. With Node.js SSR in us-east-1, users in Singapore get ~250ms TTFB just from routing. With edge rendering: product pages run at the nearest edge node (Singapore, ~20ms TTFB), reading the `x-vercel-ip-country` header to select the correct price list and promotion set. `stale-while-revalidate=300` means the edge caches the response for 5 minutes, serving the vast majority of requests from cache with sub-10ms response times. When prices update, the CMS sends a webhook to the revalidation endpoint — `revalidateTag` purges the relevant cache entries within seconds.
 
-An e-commerce platform serves millions of users across Asia, Europe, and the Americas. Product pages need to be dynamic — showing local currency, regional promotions, and inventory per warehouse.
-
-With a Node.js-only setup, all requests funnel through one region. Users in Singapore wait on a round-trip to us-east-1 for every page load.
-
-By opting product pages into the edge runtime and reading geo headers or a session cookie, the team serves localized, dynamic HTML from the nearest edge node. Latency drops from ~300ms to ~40ms for international users, with no static pre-generation required.
+**Authentication-gated dashboard.** Every dashboard request requires a valid session. With origin-side auth checks, every unauthenticated request travels to the origin before being redirected. With middleware on the edge: the JWT is verified at the edge node (using Web Crypto, no Node.js dependency) and the redirect happens before the request ever reaches the origin. Unauthenticated users are redirected within ~5ms instead of waiting for a round-trip to the origin.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Importing Node.js-only packages into edge routes.**
+**1. Importing Node.js-only packages in edge routes.**
+Any npm package that imports `fs`, `Buffer` (Node.js's Buffer, not Web API), `crypto` (Node.js's, not Web Crypto), `path`, or native addons will fail or produce incorrect behavior in the edge runtime. Check the package's README for edge/WinterCG compatibility before importing. Alternatives: Web Crypto for cryptography, `fetch` for HTTP, `URL` for URL parsing.
 
-If you import a library that uses `fs`, `Buffer` (outside Web APIs), or native bindings, your edge build will fail or silently break. Always check whether a package explicitly supports the edge/WinterCG runtime.
+**2. Using edge runtime for CPU-heavy or long-running work.**
+Edge functions typically have 25–100ms CPU time limits (not wall time — actual CPU cycles). Image processing, PDF generation, large database queries, or anything with significant computation belongs in the Node.js runtime or a background job. The edge is optimized for fast, lightweight logic: header inspection, redirects, simple data fetching, response modification.
 
-```ts
-// ❌ This will break in the edge runtime
-import { readFileSync } from "fs";
+**3. Conflating edge rendering with CDN caching.**
+Edge _rendering_ executes code on every request (unless the response is cached). A CDN _cache_ serves pre-generated static responses. For content that rarely changes, static generation with `revalidate` is faster and cheaper than edge rendering. Use edge rendering when you need dynamic, per-request logic (personalization, auth, geo-based content). Use static generation + CDN for content that's the same for all users.
 
-// ✅ Use fetch or edge-compatible alternatives
-const data = await fetch("/api/config").then((r) => r.json());
-```
+**4. Running middleware on every route including static assets.**
+The default `matcher` configuration in `middleware.ts` applies middleware to all routes. Static assets (`/_next/static`, `/images`, `/favicon.ico`) don't need middleware and running it on them adds unnecessary overhead. Always configure `matcher` to exclude static paths.
 
-**2. Expecting full environment variable access.**
-
-Only environment variables explicitly exposed to the edge runtime are available. In Next.js, server-only vars (non-`NEXT_PUBLIC_`) work, but you must ensure they're provisioned in your edge deployment environment, not just `.env.local`.
-
-**3. Using edge runtime for CPU-heavy or long-running tasks.**
-
-Edge functions have strict CPU time limits (often 50ms–100ms). Tasks like image processing, PDF generation, or large database queries belong in a Node.js runtime or a background job queue — not on the edge.
-
-<Callout type="warn">
-  Edge functions are optimized for **fast, lightweight logic** — auth checks,
-  redirects, header manipulation, and simple data fetching. Don't move your
-  entire API to the edge just because you can.
-</Callout>
-
-**4. Conflating edge rendering with static generation.**
-
-Edge-rendered routes run on every request. They are dynamic by nature. If your content rarely changes, consider ISR (Incremental Static Regeneration) or static generation with revalidation instead — they'll be faster and cheaper.
+**5. Not verifying webhook signatures in edge route handlers.**
+Edge revalidation endpoints are publicly accessible URLs. Without signature verification, anyone can trigger cache purges or cause excessive revalidation. Always verify webhook payloads using the provider's signature mechanism — Web Crypto's HMAC is sufficient and available on edge.
 
 ---
 
 ## Summary
 
-Edge rendering executes server-side code at geographically distributed nodes, reducing latency for users worldwide. In Next.js App Router, you opt routes into the edge runtime with `export const runtime = 'edge'`, and middleware runs on the edge by default. The edge runtime is based on Web Standard APIs — not full Node.js — so native modules and CPU-intensive work are off the table. It's best suited for personalization, geo-routing, auth checks, and lightweight dynamic responses. Used correctly, edge rendering closes the gap between static performance and dynamic flexibility.
+Edge rendering executes server logic at geographically distributed CDN nodes, reducing TTFB for global users from 200–300ms to 20–40ms. The edge runtime is based on the WinterCG standard — `Request`, `Response`, `fetch`, `Headers`, Web Crypto, and streams — not Node.js. Middleware runs on the edge before every request and is the right place for auth checks, redirects, A/B assignment, and geo routing. Edge route handlers and pages opt in with `export const runtime = 'edge'` and can stream HTML and JSON responses. `stale-while-revalidate` caching headers enable ISR-style freshness at the edge. Edge functions are best for fast, lightweight per-request logic — CPU-heavy work belongs in the Node.js runtime.
+
+---
+
+## Interview Questions
+
+**Q1. What is WinterCG and why does it matter for edge runtimes?**
+
+WinterCG (Web-interoperable Runtime Community Group) is a W3C community group that defines a common API surface for server-side JavaScript runtimes that aren't Node.js — Cloudflare Workers, Deno, Bun, and Vercel's Edge Runtime all implement it. The core premise: use the same `Request`, `Response`, `fetch`, `Headers`, `URL`, `ReadableStream`, and `crypto.subtle` APIs that browsers expose, rather than Node.js-specific equivalents. This matters for edge runtimes because: (1) code written against WinterCG APIs is more portable across providers, (2) the APIs are already standardized by the web platform, (3) developers who know browser APIs can write edge code without learning Node.js-specific modules. It's also why Node.js-only packages (`fs`, native addons) don't work on edge — they depend on Node.js internals, not the WinterCG standard surface.
+
+**Q2. What is the difference between Next.js middleware and an edge route handler?**
+
+Middleware (`middleware.ts`) runs before every request — before routing, before page rendering, before any other handler. It intercepts at the HTTP level and can redirect, rewrite, or modify request/response headers. It runs on the edge by default and cannot render full pages or access the Next.js cache. Edge route handlers (`app/api/x/route.ts` with `export const runtime = 'edge'`) are standard route handlers that run in the edge runtime instead of Node.js. They render full responses, can use `revalidatePath`/`revalidateTag`, and run only for their specific routes. Middleware is for cross-cutting concerns (auth, redirects, geo); route handlers are for endpoint-specific logic.
+
+**Q3. What is `stale-while-revalidate` and how does it enable ISR-like behavior on the edge?**
+
+`Cache-Control: s-maxage=60, stale-while-revalidate=300` tells CDN edge caches: serve the cached response for 60 seconds. After 60 seconds, the cache is "stale" — but with `stale-while-revalidate=300`, the CDN can serve the stale response for up to 300 more seconds _while_ revalidating in the background. Users during the revalidation window get a fast stale response (cache hit latency ~10ms) instead of a full render (~50ms). This approximates ISR: pages are regenerated periodically without blocking users. In Next.js, `export const revalidate = 60` on an edge page sets the `s-maxage` automatically. `revalidateTag()` purges specific cache entries on demand (e.g., when CMS content updates).
+
+**Q4. Why can't you use `jsonwebtoken` for JWT verification on the edge, and what's the alternative?**
+
+`jsonwebtoken` depends on Node.js's `crypto` module — a native binding that doesn't exist in the WinterCG/edge runtime. The alternative is the Web Crypto API (`crypto.subtle`), which is available in all WinterCG-compliant runtimes and in browsers. Web Crypto provides `importKey`, `sign`, `verify`, and `digest` for HMAC and RSA operations. The code is more verbose than `jwt.verify()` but is standard and portable. Alternatively, lightweight edge-compatible JWT libraries like `jose` (which uses Web Crypto internally) provide a simpler API without Node.js dependencies.
+
+**Q5. When should you use edge rendering vs static generation (SSG) vs Node.js SSR?**
+
+SSG is the fastest for content that's the same for all users and changes infrequently — blog posts, documentation, marketing pages. It has zero per-request cost. Node.js SSR is appropriate when you need per-request dynamic content with access to the full Node.js ecosystem — database queries with Prisma/pg, file system access, CPU-intensive rendering. Edge rendering is the right choice when: you need per-request personalization (geo, user preferences, A/B variants) at global scale with low latency, or when request interception (auth checks, rewrites) needs to happen before origin. The cost: edge runtime constraints (no Node.js APIs, CPU limits). A well-designed system often uses all three: SSG for marketing, Node.js SSR for complex authenticated pages, and edge middleware for auth and routing across all routes.
+
+**Q6. How do you handle secrets and environment variables securely on edge routes?**
+
+Environment variables must be explicitly provisioned to the edge runtime by your deployment platform — they're not automatically available from your `.env` file. In Next.js on Vercel: server-only variables (without the `NEXT_PUBLIC_` prefix) are available in edge routes and middleware when added to the Vercel project's environment variable configuration. They are not sent to the browser. For sensitive values used in cryptographic operations (JWT secrets, webhook secrets), use them only server-side in edge code — they're never exposed in the edge response, only used within the execution. Never log environment variable values in edge functions, as edge logs may be observable in your deployment platform's dashboard.

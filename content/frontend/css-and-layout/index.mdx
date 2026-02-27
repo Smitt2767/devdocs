@@ -1,24 +1,24 @@
 ---
 title: Overview
-description: CSS at the systems level — containment, performance, architecture trade-offs, and design token infrastructure.
+description: CSS at the systems level — architecture tradeoffs, cascade layers, containment, layout thrashing, animation performance, design tokens, and modern responsive strategies.
 ---
 
 ## CSS & Layout
 
-This section isn't about CSS syntax — it assumes you know how to write CSS. It's about the performance, architectural, and browser-internals questions that come up when CSS is applied at scale: why certain properties trigger layout, how to contain style recalculations, and how to design a token system that survives a design system rewrite.
+This section isn't about CSS syntax — it assumes you know how to write CSS. It's about the performance, architectural, and browser-internals questions that arise when CSS is applied at scale: how the cascade and specificity actually resolve conflicts, why certain properties force layout recalculation, how to contain rendering scope to a subtree, and how to design a token system that survives a design system rewrite.
 
-The section opens with the architectural decision — which CSS approach to use — before covering the performance characteristics of CSS and the systems that make it maintainable at scale.
+The section opens with the architectural decision — which CSS approach to use and why — before covering the performance characteristics of CSS and the systems that make it maintainable at scale.
 
-## What's covered
+## What's Covered
 
-**CSS Architecture Trade-offs** — CSS Modules, utility-first (Tailwind), CSS-in-JS, and vanilla CSS — their trade-offs in specificity, runtime cost, bundle size, and developer ergonomics at different scales. Make this decision before writing a line of CSS.
+**CSS Architecture Tradeoffs** — How CSS Modules, Tailwind, runtime CSS-in-JS, and vanilla-extract differ on specificity, runtime cost, RSC compatibility, and scalability. How the CSS cascade and `@layer` work at the mechanism level. How `twMerge` and `cva` solve Tailwind class conflict resolution. Make this decision before writing a line of CSS.
 
-**CSS Containment** — The `contain` property tells the browser a subtree is independent from the rest of the page, enabling aggressive rendering optimizations. Essential for large lists, widgets, and component libraries.
+**CSS Containment** — The `contain` property declares a subtree as independent from the rest of the page, scoping layout and paint recalculations. `content-visibility: auto` skips rendering entirely for off-screen content. The side effects of `paint` containment (new stacking context, clipped overflow) and what `contain: style` does _not_ do (it doesn't scope CSS custom properties).
 
-**Layout Thrashing** — What happens when JavaScript alternates between reading and writing layout properties, forcing the browser to recalculate layout repeatedly in a single frame. How to batch reads and writes to avoid it.
+**Layout Thrashing** — What happens when JavaScript alternates between reading geometric properties and writing to the DOM, forcing the browser to synchronously recalculate layout repeatedly in a single frame. The full list of properties that force layout, the read-write batching fix, `ResizeObserver` as a replacement for polling, and the FastDOM scheduling pattern.
 
-**Animation Performance** — Which CSS properties are GPU-composited (`transform`, `opacity`) and which trigger layout or paint. How to use `will-change` correctly and when it does more harm than good.
+**Animation Performance** — The three rendering phases (layout, paint, composite) and which CSS properties require which. Why `transform` and `opacity` are compositor-only and everything else causes main-thread work. The Web Animations API for programmatic animation, `@starting-style` for native CSS enter animations, and `prefers-reduced-motion` as an accessibility requirement.
 
-**Theming & Design Tokens** — Using CSS custom properties as a token layer — semantic naming, theme switching, component-level overrides, and how to structure tokens for a multi-brand or multi-theme system.
+**Theming & Design Tokens** — The three-tier token hierarchy (primitives → semantic → component), why components must consume semantic tokens and never primitives, how CSS custom properties implement runtime theming via the cascade, preventing flash of wrong theme, and multi-brand token management with Style Dictionary.
 
-**Responsive Design Strategies** — Container queries vs media queries, intrinsic sizing, fluid typography with `clamp()`, and the modern approaches that replace breakpoint-heavy layouts.
+**Responsive Design Strategies** — Container queries (components responding to container size, not viewport), fluid typography with `clamp()` and the slope-intercept formula, logical properties for RTL/LTR internationalization, dynamic viewport units (`dvh`/`svh`/`lvh`) fixing the mobile browser chrome problem, and `:has()` for parent-aware component styles.

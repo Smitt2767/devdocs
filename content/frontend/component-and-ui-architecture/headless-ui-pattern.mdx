@@ -1,254 +1,328 @@
 ---
 title: Headless UI Pattern
-description: How to separate component logic and accessibility from markup entirely — building reusable behavior that any consumer can render however they need.
+description: How to separate component behavior, keyboard navigation, and accessibility from markup entirely — building reusable logic that any consumer can render however they need.
 ---
 
 ## Overview
 
-A headless component owns all the hard parts of a UI widget — state management, keyboard navigation, focus handling, and ARIA attributes — but renders nothing itself. The consumer provides the markup and styles. The headless component just makes everything work.
+A headless component owns all the hard parts of a UI widget — state management, keyboard navigation, focus handling, and ARIA attributes — but renders nothing itself. The consumer provides the markup and styles. The headless component makes everything work.
 
-This is the architectural philosophy behind Radix UI, React Aria, Headless UI, Downshift, and React Table. Each library solves a genuinely difficult problem (an accessible combobox, a sortable data table, a focus-trapped dialog) and exposes the solution as pure behavior, decoupled from any visual opinion.
+This is the architectural philosophy behind Radix UI, React Aria, Headless UI by Tailwind, Downshift, and React Table. Each library solves a genuinely difficult problem (an accessible combobox, a sortable data table, a focus-trapped dialog) and exposes the solution as pure behavior, decoupled from any visual opinion.
 
-The contrast with compound components is important. A compound component shares state across cooperating pieces of markup that it defines — `<Tabs.Trigger>` renders a `<button>`, `<Tabs.Panel>` renders a `<div>`. A headless component defines no markup at all. The consumer owns every element. This makes headless components the right choice when visual rendering must vary across products or teams, but the logic must be consistent everywhere.
+The contrast with compound components matters. A compound component shares state across cooperating markup it defines — `<Tabs.Trigger>` renders a `<button>`. A headless component defines no markup at all. The consumer owns every element. This makes headless components the right choice when visual rendering must vary across products or teams, but the logic must be consistent everywhere.
 
 ---
 
 ## How It Works
 
-Headless components come in two forms, and understanding the distinction matters.
+### Two Forms: Hook-Based vs Render Props
 
-**Hook-based headless** — the component exposes a custom hook. The hook returns state values, event handlers, and pre-built prop objects (`getInputProps`, `getMenuProps`, `getLabelProps`). The consumer spreads those props onto whatever elements they choose. This is the modern approach — hooks compose better and don't introduce extra DOM nodes.
+**Hook-based headless** (the modern approach) — the component exposes a custom hook. The hook returns state values, event handlers, and pre-built prop getter functions (`getInputProps`, `getMenuProps`, `getItemProps`). The consumer spreads those props onto whatever elements they choose:
 
-**Component-based headless (render props)** — the component wraps its children in a function call, passing state and handlers as arguments. The consumer destructures what they need and returns their own JSX. This predates hooks and is less common in new libraries, but you'll encounter it in older codebases and it remains useful in a narrow set of cases where the component needs to inject DOM structure (portals, event boundaries) alongside the logic.
+```tsx
+const { isOpen, getInputProps, getMenuProps, getItemProps } =
+  useCombobox(options);
 
-In both forms, the contract is the same: the library owns the behavior, you own the pixels.
+return (
+  <div>
+    <input {...getInputProps()} />
+    <ul {...getMenuProps()}>
+      {filteredItems.map((item, i) => (
+        <li {...getItemProps(item, i)} key={item.id}>
+          {item.label}
+        </li>
+      ))}
+    </ul>
+  </div>
+);
+```
+
+**Render prop headless** (older, still useful in specific cases) — the component wraps its children in a function call, passing state and handlers as arguments. The use case where render props still win: when the headless component needs to inject DOM structure (a portal) as part of its own output alongside the logic — something a hook alone can't do cleanly.
+
+### Prop Getters
+
+The prop getter pattern is the core API design. Instead of exposing state and asking consumers to manually wire ARIA attributes and event handlers, the hook returns functions that produce a complete prop object:
+
+```ts
+// Consumer uses it:
+<input {...getInputProps()} />
+
+// What getInputProps() returns — all of this is invisible to the consumer:
+{
+  role: "combobox",
+  "aria-autocomplete": "list",
+  "aria-expanded": isOpen,
+  "aria-activedescendant": highlightedIndex >= 0 ? `item-${highlightedIndex}` : undefined,
+  "aria-controls": listId,
+  value: inputValue,
+  onChange: handleChange,
+  onKeyDown: handleKeyDown,
+  onFocus: handleFocus,
+  onBlur: handleBlur,
+}
+```
+
+This guarantees correct ARIA wiring every time. The consumer can't accidentally forget `aria-expanded` or wire the wrong event handler to the wrong element. The hook owns the correctness contract.
 
 ---
 
 ## Code Examples
 
-### 1. Hook-based headless — `useDisclosure`
+### `useDisclosure` — Basic Headless Hook
 
-The simplest case: a hook that manages open/closed state and returns everything needed to wire up an accessible trigger and panel.
+The simplest case: a hook that manages open/closed state and returns props for the trigger and panel:
 
-```tsx
+```ts
 // hooks/use-disclosure.ts
-import { useState, useId, useCallback } from "react";
+import { useState, useId, useCallback, type RefObject } from "react";
+
+interface UseDisclosureOptions {
+  defaultOpen?: boolean;
+  onOpen?: () => void;
+  onClose?: () => void;
+}
 
 interface UseDisclosureReturn {
   isOpen: boolean;
   open: () => void;
   close: () => void;
   toggle: () => void;
-  // Spread onto the trigger element (button, etc.)
-  triggerProps: {
+  getTriggerProps: () => {
     onClick: () => void;
     "aria-expanded": boolean;
     "aria-controls": string;
   };
-  // Spread onto the panel element (div, section, etc.)
-  panelProps: {
+  getPanelProps: () => {
     id: string;
+    role: "region";
     hidden: boolean;
   };
 }
 
-export function useDisclosure(defaultOpen = false): UseDisclosureReturn {
+export function useDisclosure({
+  defaultOpen = false,
+  onOpen,
+  onClose,
+}: UseDisclosureOptions = {}): UseDisclosureReturn {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const panelId = useId();
 
-  const open = useCallback(() => setIsOpen(true), []);
-  const close = useCallback(() => setIsOpen(false), []);
-  const toggle = useCallback(() => setIsOpen((prev) => !prev), []);
+  const open = useCallback(() => {
+    setIsOpen(true);
+    onOpen?.();
+  }, [onOpen]);
+
+  const close = useCallback(() => {
+    setIsOpen(false);
+    onClose?.();
+  }, [onClose]);
+
+  const toggle = useCallback(() => {
+    setIsOpen((prev) => {
+      const next = !prev;
+      next ? onOpen?.() : onClose?.();
+      return next;
+    });
+  }, [onOpen, onClose]);
 
   return {
     isOpen,
     open,
     close,
     toggle,
-    triggerProps: {
+    getTriggerProps: () => ({
       onClick: toggle,
       "aria-expanded": isOpen,
       "aria-controls": panelId,
-    },
-    panelProps: {
+    }),
+    getPanelProps: () => ({
       id: panelId,
+      role: "region" as const,
       hidden: !isOpen,
-    },
+    }),
   };
 }
 ```
 
 ```tsx
-// Usage A: an FAQ accordion — consumer owns the full markup
+// Usage 1: dropdown menu
 "use client";
 
 import { useDisclosure } from "@/hooks/use-disclosure";
 
-interface FAQItemProps {
-  question: string;
-  answer: string;
-}
-
-export function FAQItem({ question, answer }: FAQItemProps) {
-  const { isOpen, triggerProps, panelProps } = useDisclosure();
+export function UserMenu({ user }: { user: { name: string; email: string } }) {
+  const { isOpen, getTriggerProps, getPanelProps } = useDisclosure();
 
   return (
-    <div className="border-b border-border py-4">
+    <div className="relative">
       <button
-        className="flex w-full items-center justify-between text-left font-medium"
-        {...triggerProps}
+        className="flex items-center gap-2 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        {...getTriggerProps()}
       >
-        {question}
-        {/* Consumer decides the icon — the hook doesn't care */}
-        <span aria-hidden="true">{isOpen ? "−" : "+"}</span>
+        <img
+          src={`https://api.dicebear.com/7.x/initials/svg?seed=${user.name}`}
+          alt={user.name}
+          className="h-8 w-8 rounded-full"
+        />
+        <span className="text-sm font-medium">{user.name}</span>
       </button>
 
-      <div className="mt-3 text-sm text-muted-foreground" {...panelProps}>
-        {answer}
+      <div
+        className={`absolute right-0 top-full mt-2 w-56 rounded-xl border border-border bg-background p-1 shadow-lg`}
+        {...getPanelProps()}
+      >
+        <p className="px-3 py-2 text-xs text-muted-foreground">{user.email}</p>
+        <hr className="my-1 border-border" />
+        <a
+          href="/settings"
+          className="block rounded-lg px-3 py-2 text-sm hover:bg-muted"
+        >
+          Settings
+        </a>
+        <button className="block w-full rounded-lg px-3 py-2 text-left text-sm text-destructive hover:bg-destructive/10">
+          Sign out
+        </button>
       </div>
     </div>
   );
 }
-```
 
-```tsx
-// Usage B: a sidebar drawer — same hook, completely different markup
-"use client";
-
-import { useEffect } from "react";
-import { useDisclosure } from "@/hooks/use-disclosure";
-
-export function Sidebar() {
-  const { isOpen, open, close, triggerProps, panelProps } = useDisclosure();
-
-  // Close on Escape key — the hook owns state, the component owns behavior
-  useEffect(() => {
-    if (!isOpen) return;
-    function handleKey(e: KeyboardEvent) {
-      if (e.key === "Escape") close();
-    }
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [isOpen, close]);
+// Usage 2: exact same hook, completely different markup
+export function FilterPanel({ children }: { children: React.ReactNode }) {
+  const { isOpen, getTriggerProps, getPanelProps } = useDisclosure();
 
   return (
-    <>
-      <button className="hamburger-btn" {...triggerProps}>
-        Menu
-      </button>
-
-      {/* Completely different DOM structure than the FAQ — same hook */}
-      <aside
-        className={`fixed inset-y-0 left-0 w-64 bg-background shadow-xl transition-transform ${
-          isOpen ? "translate-x-0" : "-translate-x-full"
-        }`}
-        {...panelProps}
+    <aside className="rounded-xl border border-border">
+      <button
+        className="flex w-full items-center justify-between p-4 text-sm font-medium"
+        {...getTriggerProps()}
       >
-        <nav>...</nav>
-      </aside>
-
-      {isOpen && (
-        <div
-          className="fixed inset-0 bg-black/40"
-          onClick={close}
-          aria-hidden="true"
-        />
-      )}
-    </>
+        Filters
+        <span aria-hidden="true">{isOpen ? "▲" : "▼"}</span>
+      </button>
+      <div className="px-4 pb-4" {...getPanelProps()}>
+        {children}
+      </div>
+    </aside>
   );
 }
 ```
 
-The same 30 lines of hook logic powers two completely different components. Neither required the other to change.
-
 ---
 
-### 2. Hook-based headless — `useCombobox`
+### `useCombobox` — Full Accessible Combobox Hook
 
-A more complex example: a combobox (autocomplete input). This is where headless shines — keyboard navigation, ARIA, and filtering logic are genuinely hard. The hook owns all of it.
-
-```tsx
+```ts
 // hooks/use-combobox.ts
 "use client";
 
-import {
-  useState,
-  useRef,
-  useId,
-  useCallback,
-  type KeyboardEvent,
-} from "react";
+import { useState, useId, useRef, useCallback } from "react";
 
 interface UseComboboxOptions<T> {
   items: T[];
   itemToString: (item: T) => string;
   onSelect?: (item: T) => void;
+  filterItems?: (items: T[], inputValue: string) => T[];
+}
+
+interface UseComboboxReturn<T> {
+  isOpen: boolean;
+  inputValue: string;
+  filteredItems: T[];
+  highlightedIndex: number;
+  selectedItem: T | null;
+  getInputProps: () => React.InputHTMLAttributes<HTMLInputElement> & {
+    "aria-activedescendant"?: string;
+  };
+  getMenuProps: () => React.HTMLAttributes<HTMLUListElement>;
+  getItemProps: (
+    item: T,
+    index: number,
+  ) => React.LiHTMLAttributes<HTMLLIElement> & { id: string };
+  getToggleButtonProps: () => React.ButtonHTMLAttributes<HTMLButtonElement>;
 }
 
 export function useCombobox<T>({
   items,
   itemToString,
   onSelect,
-}: UseComboboxOptions<T>) {
-  const [inputValue, setInputValue] = useState("");
+  filterItems,
+}: UseComboboxOptions<T>): UseComboboxReturn<T> {
   const [isOpen, setIsOpen] = useState(false);
+  const [inputValue, setInputValue] = useState("");
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
+  const [selectedItem, setSelectedItem] = useState<T | null>(null);
 
-  const inputRef = useRef<HTMLInputElement>(null);
-  const listId = useId();
   const inputId = useId();
+  const listId = useId();
+  const labelId = useId();
+  const itemIdPrefix = useId();
 
-  const filtered = items.filter((item) =>
-    itemToString(item).toLowerCase().includes(inputValue.toLowerCase()),
+  const defaultFilter = useCallback(
+    (items: T[], value: string) =>
+      items.filter((item) =>
+        itemToString(item).toLowerCase().includes(value.toLowerCase()),
+      ),
+    [itemToString],
   );
 
-  const selectItem = useCallback(
-    (item: T) => {
-      setInputValue(itemToString(item));
-      setIsOpen(false);
-      setHighlightedIndex(-1);
-      onSelect?.(item);
-      inputRef.current?.focus();
-    },
-    [itemToString, onSelect],
-  );
+  const filter = filterItems ?? defaultFilter;
+  const filteredItems = filter(items, inputValue);
 
-  function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
-    if (!isOpen) {
-      if (e.key === "ArrowDown") setIsOpen(true);
-      return;
-    }
+  function selectItem(item: T) {
+    setSelectedItem(item);
+    setInputValue(itemToString(item));
+    setIsOpen(false);
+    setHighlightedIndex(-1);
+    onSelect?.(item);
+  }
 
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setHighlightedIndex((i) => Math.min(i + 1, filtered.length - 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setHighlightedIndex((i) => Math.max(i - 1, 0));
-    } else if (e.key === "Enter" && highlightedIndex >= 0) {
-      e.preventDefault();
-      selectItem(filtered[highlightedIndex]);
-    } else if (e.key === "Escape") {
-      setIsOpen(false);
-      setHighlightedIndex(-1);
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        setIsOpen(true);
+        setHighlightedIndex((i) => Math.min(i + 1, filteredItems.length - 1));
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        setHighlightedIndex((i) => Math.max(i - 1, -1));
+        break;
+      case "Enter":
+        e.preventDefault();
+        if (highlightedIndex >= 0 && filteredItems[highlightedIndex]) {
+          selectItem(filteredItems[highlightedIndex]);
+        }
+        break;
+      case "Escape":
+        setIsOpen(false);
+        setHighlightedIndex(-1);
+        break;
+      case "Tab":
+        setIsOpen(false);
+        break;
     }
   }
 
   return {
     isOpen,
-    filtered,
+    inputValue,
+    filteredItems,
     highlightedIndex,
-    selectItem,
-    // Pre-built prop getters — spread onto elements
+    selectedItem,
+
     getInputProps: () => ({
-      ref: inputRef,
       id: inputId,
-      value: inputValue,
-      role: "combobox" as const,
+      role: "combobox",
+      "aria-autocomplete": "list",
       "aria-expanded": isOpen,
-      "aria-controls": listId,
-      "aria-autocomplete": "list" as const,
+      "aria-haspopup": "listbox",
+      "aria-controls": isOpen ? listId : undefined,
+      "aria-activedescendant":
+        isOpen && highlightedIndex >= 0
+          ? `${itemIdPrefix}-${highlightedIndex}`
+          : undefined,
+      value: inputValue,
       onChange: (e: React.ChangeEvent<HTMLInputElement>) => {
         setInputValue(e.target.value);
         setIsOpen(true);
@@ -258,23 +332,35 @@ export function useCombobox<T>({
       onBlur: () => setTimeout(() => setIsOpen(false), 150),
       onKeyDown: handleKeyDown,
     }),
+
     getMenuProps: () => ({
       id: listId,
-      role: "listbox" as const,
+      role: "listbox",
+      "aria-label": "Suggestions",
     }),
+
     getItemProps: (item: T, index: number) => ({
-      role: "option" as const,
+      id: `${itemIdPrefix}-${index}`,
+      role: "option",
       "aria-selected": index === highlightedIndex,
-      onMouseDown: (e: React.MouseEvent) => e.preventDefault(), // prevent input blur
+      // onMouseDown: prevent input blur before click registers
+      onMouseDown: (e: React.MouseEvent) => e.preventDefault(),
       onClick: () => selectItem(item),
+    }),
+
+    getToggleButtonProps: () => ({
+      "aria-label": isOpen ? "Close suggestions" : "Open suggestions",
+      "aria-expanded": isOpen,
+      "aria-controls": listId,
+      onClick: () => setIsOpen((o) => !o),
+      tabIndex: -1, // toggle button doesn't need to be in tab order
     }),
   };
 }
 ```
 
 ```tsx
-// components/country-selector.tsx
-// Consumer owns every pixel — the hook owns all the behavior
+// components/country-selector.tsx — consumer owns every pixel
 "use client";
 
 import { useCombobox } from "@/hooks/use-combobox";
@@ -285,46 +371,64 @@ const countries = [
   { code: "DE", name: "Germany" },
   { code: "JP", name: "Japan" },
   { code: "BR", name: "Brazil" },
+  { code: "AU", name: "Australia" },
+  { code: "CA", name: "Canada" },
 ];
 
-export function CountrySelector() {
+export function CountrySelector({
+  onSelect,
+}: {
+  onSelect?: (code: string) => void;
+}) {
   const {
     isOpen,
-    filtered,
+    filteredItems,
     highlightedIndex,
     getInputProps,
     getMenuProps,
     getItemProps,
+    getToggleButtonProps,
   } = useCombobox({
     items: countries,
     itemToString: (c) => c.name,
-    onSelect: (c) => console.log("Selected:", c.code),
+    onSelect: (c) => onSelect?.(c.code),
   });
 
   return (
-    <div className="relative w-72">
-      <label htmlFor="country-input" className="mb-1 block text-sm font-medium">
+    <div className="relative w-80">
+      <label
+        htmlFor="country-input"
+        className="mb-1.5 block text-sm font-medium"
+      >
         Country
       </label>
 
-      <input
-        id="country-input"
-        className="w-full rounded-md border border-input px-3 py-2 text-sm"
-        placeholder="Search countries..."
-        {...getInputProps()}
-      />
+      <div className="flex items-center rounded-lg border border-input bg-background focus-within:ring-2 focus-within:ring-ring">
+        <input
+          id="country-input"
+          className="flex-1 bg-transparent px-3 py-2 text-sm outline-none"
+          placeholder="Search countries…"
+          {...getInputProps()}
+        />
+        <button
+          className="px-2 text-muted-foreground hover:text-foreground"
+          {...getToggleButtonProps()}
+        >
+          {isOpen ? "▲" : "▼"}
+        </button>
+      </div>
 
-      {isOpen && filtered.length > 0 && (
+      {isOpen && filteredItems.length > 0 && (
         <ul
-          className="absolute z-10 mt-1 w-full rounded-md border border-border bg-background shadow-md"
+          className="absolute z-10 mt-1 max-h-60 w-full overflow-y-auto rounded-lg border border-border bg-background py-1 shadow-lg"
           {...getMenuProps()}
         >
-          {filtered.map((country, index) => (
+          {filteredItems.map((country, index) => (
             <li
               key={country.code}
               className={`cursor-pointer px-3 py-2 text-sm ${
                 index === highlightedIndex
-                  ? "bg-accent text-accent-foreground"
+                  ? "bg-primary text-primary-foreground"
                   : "hover:bg-muted"
               }`}
               {...getItemProps(country, index)}
@@ -334,163 +438,214 @@ export function CountrySelector() {
           ))}
         </ul>
       )}
+
+      {isOpen && filteredItems.length === 0 && (
+        <div className="absolute z-10 mt-1 w-full rounded-lg border border-border bg-background py-3 px-3 text-sm text-muted-foreground shadow-lg">
+          No countries found.
+        </div>
+      )}
     </div>
   );
 }
 ```
 
-The keyboard navigation, ARIA wiring, and filtering are entirely in the hook. The component is just markup and Tailwind classes. Swap the styling, change the element types, add an icon — none of it touches the hook.
+---
+
+### Testing Headless Behavior
+
+Headless hooks are straightforward to test because behavior is decoupled from rendering:
+
+```ts
+// hooks/use-combobox.test.ts
+import { renderHook, act } from "@testing-library/react";
+import { useCombobox } from "./use-combobox";
+
+const countries = [
+  { code: "US", name: "United States" },
+  { code: "IN", name: "India" },
+  { code: "DE", name: "Germany" },
+];
+
+describe("useCombobox", () => {
+  it("filters items when input value changes", () => {
+    const { result } = renderHook(() =>
+      useCombobox({ items: countries, itemToString: (c) => c.name }),
+    );
+
+    act(() => {
+      // Simulate input change via the prop getter's onChange
+      result.current.getInputProps().onChange({
+        target: { value: "ind" },
+      } as React.ChangeEvent<HTMLInputElement>);
+    });
+
+    // Only India should be in filteredItems
+    expect(result.current.filteredItems).toEqual([
+      { code: "IN", name: "India" },
+    ]);
+    expect(result.current.isOpen).toBe(true);
+  });
+
+  it("selects an item on Enter key", () => {
+    const onSelect = jest.fn();
+    const { result } = renderHook(() =>
+      useCombobox({ items: countries, itemToString: (c) => c.name, onSelect }),
+    );
+
+    act(() => {
+      // Open and highlight first item
+      result.current.getInputProps().onFocus!(
+        {} as React.FocusEvent<HTMLInputElement>,
+      );
+      result.current.getInputProps().onKeyDown!({
+        key: "ArrowDown",
+        preventDefault: jest.fn(),
+      } as unknown as React.KeyboardEvent<HTMLInputElement>);
+    });
+
+    act(() => {
+      result.current.getInputProps().onKeyDown!({
+        key: "Enter",
+        preventDefault: jest.fn(),
+      } as unknown as React.KeyboardEvent<HTMLInputElement>);
+    });
+
+    expect(onSelect).toHaveBeenCalledWith(countries[0]);
+    expect(result.current.isOpen).toBe(false);
+    expect(result.current.inputValue).toBe("United States");
+  });
+
+  it("returns correct ARIA attributes", () => {
+    const { result } = renderHook(() =>
+      useCombobox({ items: countries, itemToString: (c) => c.name }),
+    );
+
+    const inputProps = result.current.getInputProps();
+    expect(inputProps.role).toBe("combobox");
+    expect(inputProps["aria-expanded"]).toBe(false);
+    expect(inputProps["aria-autocomplete"]).toBe("list");
+  });
+});
+```
 
 ---
 
-### 3. When render props still make sense
+### ARIA Live Regions for Dynamic Announcements
 
-Hooks replaced render props for most use cases, but there's one scenario where the render prop form still wins: when the headless component needs to inject DOM structure alongside the logic — specifically, a portal for a floating element that must escape the current stacking context.
+Headless components that update content dynamically need to announce changes to screen readers via ARIA live regions:
 
 ```tsx
-// components/tooltip/index.tsx
+// components/live-announcement.tsx — used inside headless combobox
 "use client";
 
-import { useState, useRef, useId, createPortal, type ReactNode } from "react";
+import { useEffect, useRef } from "react";
 
-interface TooltipRenderArgs {
-  isVisible: boolean;
-  triggerProps: {
-    onMouseEnter: () => void;
-    onMouseLeave: () => void;
-    onFocus: () => void;
-    onBlur: () => void;
-    "aria-describedby": string;
-  };
+interface LiveAnnouncementProps {
+  message: string;
+  politeness?: "polite" | "assertive";
 }
 
-interface TooltipProps {
-  content: string;
-  children: (args: TooltipRenderArgs) => ReactNode;
-}
+export function LiveAnnouncement({
+  message,
+  politeness = "polite",
+}: LiveAnnouncementProps) {
+  const ref = useRef<HTMLDivElement>(null);
 
-export function Tooltip({ content, children }: TooltipProps) {
-  const [isVisible, setIsVisible] = useState(false);
-  const triggerRef = useRef<HTMLElement | null>(null);
-  const tooltipId = useId();
-
-  const show = () => setIsVisible(true);
-  const hide = () => setIsVisible(false);
+  useEffect(() => {
+    // Setting textContent triggers screen readers to announce the change
+    if (ref.current) {
+      ref.current.textContent = "";
+      // Small timeout ensures the clear happens before the new message
+      setTimeout(() => {
+        if (ref.current) ref.current.textContent = message;
+      }, 50);
+    }
+  }, [message]);
 
   return (
-    <>
-      {children({
-        isVisible,
-        triggerProps: {
-          onMouseEnter: show,
-          onMouseLeave: hide,
-          onFocus: show,
-          onBlur: hide,
-          "aria-describedby": tooltipId,
-        },
-      })}
-
-      {/* Portal: renders outside the current stacking context */}
-      {isVisible &&
-        createPortal(
-          <div
-            id={tooltipId}
-            role="tooltip"
-            className="fixed z-50 rounded bg-foreground px-2 py-1 text-xs text-background shadow"
-          >
-            {content}
-          </div>,
-          document.body,
-        )}
-    </>
+    <div
+      ref={ref}
+      role="status"
+      aria-live={politeness}
+      aria-atomic="true"
+      // Visually hidden but present in the accessibility tree
+      className="sr-only"
+    />
   );
 }
+
+// Usage inside a headless combobox:
+// Announce the number of results when the filter changes
+<LiveAnnouncement
+  message={
+    filteredItems.length === 0
+      ? "No results found"
+      : `${filteredItems.length} result${filteredItems.length === 1 ? "" : "s"} available`
+  }
+/>;
 ```
-
-```tsx
-// Usage — consumer owns the trigger element entirely
-import { Tooltip } from "@/components/tooltip";
-
-export function DeleteButton() {
-  return (
-    <Tooltip content="Permanently delete this record">
-      {({ triggerProps }) => (
-        <button
-          className="rounded bg-destructive px-3 py-1.5 text-sm text-white"
-          {...triggerProps}
-        >
-          Delete
-        </button>
-      )}
-    </Tooltip>
-  );
-}
-```
-
-The render prop is justified here because the `Tooltip` needs to render the portal (a DOM element outside the consumer's tree) as part of its own output — not something a hook alone can do cleanly.
 
 ---
 
 ## Real-World Use Case
 
-Your company ships three products: a B2B dashboard, a consumer mobile web app, and an internal admin tool. All three need a `<Select>` component with keyboard navigation, searchable options, grouped items, and full ARIA compliance.
+**Multi-product design system.** Three products — a B2B analytics dashboard, a consumer mobile web app, and an internal admin tool — all need an accessible searchable `<Select>` component with keyboard navigation, grouped options, and full ARIA compliance.
 
-The B2B dashboard uses Tailwind with a dense, compact design. The consumer app uses large touch targets and a bottom-sheet presentation on mobile. The admin tool uses an older design system with completely different CSS conventions.
+The B2B dashboard uses a dense compact design with small text. The consumer app needs large touch targets and a bottom-sheet on mobile. The admin tool uses a legacy CSS framework.
 
-Without headless components, you'd build three separate selects — or a single one with an unmaintainable pile of props controlling every visual variation.
+Without the headless pattern: each team builds their own Select with different keyboard behavior, different ARIA implementations, and different levels of accessibility correctness. Three components, three bugs, three maintenance burdens.
 
-With a headless `useSelect` hook, you build the keyboard navigation, ARIA management, and filtering once. Each product team wraps it in their own markup. The hook's behavior is consistent everywhere. When a keyboard navigation bug is fixed in the hook, all three products get the fix instantly.
+With a shared `useCombobox` hook: one implementation of keyboard navigation, ARIA wiring, and filtering logic. Each team builds their own visual implementation on top of it — completely different markup, completely different styles. The behavior is correct and consistent across all three products.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Building hooks that know too much about the DOM**
+**1. Exposing raw state instead of prop getters.**
+Exposing `{ isOpen, setIsOpen, highlightedIndex, setHighlightedIndex }` puts the burden of correct ARIA wiring on every consumer. Consumers will forget `aria-expanded`, wire events to the wrong elements, or implement keyboard handling inconsistently. Prop getters (`getInputProps()`, `getMenuProps()`) bundle everything a consumer needs for correct behavior — the hook owns the correctness contract.
 
-A headless hook should return state and handlers — not refs to DOM nodes it creates itself. The consumer should pass in refs or attach handlers to their own elements. If your hook calls `document.querySelector` internally, it's no longer truly headless.
+**2. Forgetting `onMouseDown: e.preventDefault()` on list items.**
+When a user clicks a list item, the sequence is: `mousedown` (blur fires on the input) → `click` on the item. The `onBlur` handler on the input typically closes the menu (with a setTimeout) before the `onClick` on the item can fire. `onMouseDown: e.preventDefault()` prevents the input from losing focus during the click sequence, allowing the item's `onClick` to fire before the menu closes.
 
-**2. Not using `useCallback` on returned functions**
+**3. Not announcing dynamic content changes to screen readers.**
+A visual combobox showing "3 results" gives sighted users immediate feedback. Screen reader users receive nothing unless you use an ARIA live region to announce the change. Add a visually hidden `role="status"` element that updates when the result count changes.
 
-If your hook returns new function references on every render (handlers, selectors), consumers that spread those into `useEffect` dependency arrays or pass them to memoized children will see unnecessary re-renders. Wrap returned callbacks in `useCallback`.
+**4. Using `display: none` vs `hidden` attribute for toggled content.**
+`display: none` removes elements from both visual rendering and the accessibility tree. The `hidden` HTML attribute does the same but more semantically. For content that should be keyboard-reachable when open (listbox options), ensure it's not hidden when the menu is open. For content that should be fully inaccessible when closed, both work — but `hidden` is more semantic.
 
-```ts
-// ❌ New function reference every render
-return {
-  toggle: () => setIsOpen((prev) => !prev),
-};
-
-// ✅ Stable reference
-const toggle = useCallback(() => setIsOpen((prev) => !prev), []);
-return { toggle };
-```
-
-**3. Reaching for render props when a hook suffices**
-
-If the headless component renders no DOM of its own (no portals, no event capture boundaries), it should be a hook, not a render prop component. Render props add a wrapper call and make the JSX harder to read for no benefit. The rule: if it returns `<>{children(state)}</>` with no DOM output, it's a hook waiting to happen.
-
-**4. Not handling `onBlur` timing with `setTimeout`**
-
-When a user clicks a list item in a combobox, the input fires `onBlur` before the item's `onClick`. Without a small `setTimeout` delay on the blur handler, the list closes and the click never lands. This is a near-universal gotcha in headless floating elements.
-
-```ts
-// Without the delay, the menu closes before onClick fires
-onBlur: () => setTimeout(() => setIsOpen(false), 150),
-```
-
-**5. Forgetting that hooks can't be used in Server Components**
-
-Headless hooks use `useState`, `useRef`, and `useId` — they're inherently client-side. Any component that calls a headless hook must be marked `'use client'`. The hook itself doesn't need the directive, but its consumers do.
-
-<Callout type="info">
-  You don't need to build headless components from scratch for common widgets.
-  Radix UI Primitives and React Aria cover most of the hard cases (dialogs,
-  tooltips, comboboxes, menus) with battle-tested keyboard and ARIA
-  implementations. Build your own headless hooks for domain-specific logic that
-  no library covers.
-</Callout>
+**5. Testing only the component, not the hook.**
+If the hook is tested in isolation with `renderHook`, behavior tests (keyboard navigation, filtering, selection) run without a DOM and are much faster. Testing the component tests visual integration. Do both — hook tests for behavior correctness, component tests for visual integration. Don't rely only on component tests that are slower and harder to assert on ARIA.
 
 ---
 
 ## Summary
 
-Headless components separate behavior from markup by owning state, keyboard navigation, and accessibility attributes while rendering nothing themselves. Hook-based headless is the modern default — the hook returns prop getter functions that consumers spread onto their own elements, keeping the library out of the DOM entirely. Render props remain useful when the headless component needs to inject its own DOM (portals, event capture boundaries) alongside the logic. The pattern's core value is reuse without visual constraints: the same keyboard navigation and ARIA logic powers a compact dropdown in one product and a full-screen sheet in another. Use `useCallback` on all returned handlers for stable references, handle `onBlur` timing carefully in floating elements, and reach for Radix UI or React Aria before building your own for standard widgets.
+Headless components own behavior, accessibility wiring, and keyboard navigation without rendering any markup. The hook-based form returns prop getter functions that produce complete, correct ARIA prop objects — consumers spread them onto whatever elements they choose. This guarantees consistent, accessible behavior across any visual implementation. The render prop form remains appropriate when the headless component needs to inject DOM structure (like a portal) alongside its logic. Test hooks in isolation with `renderHook` for fast behavior tests; test components for visual integration. ARIA live regions bridge the gap between dynamic content updates and screen reader announcements.
+
+---
+
+## Interview Questions
+
+**Q1. What is the headless component pattern and how does it differ from compound components?**
+
+Headless components separate behavior from rendering entirely — the component or hook owns all state, keyboard navigation, and ARIA logic, but renders nothing. The consumer provides 100% of the markup and styles. Compound components share state across cooperating markup that the component _does_ define — `<Tabs.Trigger>` renders a `<button>`, `<Tabs.Panel>` renders a `<div>`. The choice between them is about rendering ownership: if the same accessibility behavior needs to render in radically different visual forms across teams or products, headless is the right choice. If the visual structure is fixed and only styling varies, compound components are simpler and sufficient.
+
+**Q2. What is a prop getter and why is it the preferred API for headless hooks?**
+
+A prop getter is a function that returns a complete prop object for a specific element — for example, `getInputProps()` returns all of `role`, `aria-expanded`, `aria-controls`, `value`, `onChange`, `onKeyDown`, and `onBlur` needed for a correct combobox input. The consumer spreads the result: `<input {...getInputProps()} />`. This pattern guarantees correctness: the consumer cannot accidentally omit `aria-expanded` or wire the wrong event handler, because the hook provides all necessary props in one call. The alternative — exposing raw state and expecting consumers to wire things correctly — creates opportunities for accessibility errors in every consumer implementation.
+
+**Q3. Why is `onMouseDown: e.preventDefault()` important in combobox list items?**
+
+Clicking a list item triggers events in this order: `mousedown` (on the item) → `blur` (on the input) → `mouseup` (on the item) → `click` (on the item). The input's `onBlur` handler typically closes the menu — often with a `setTimeout(() => setIsOpen(false), 150)`. If `onMouseDown` doesn't call `e.preventDefault()`, the input blurs during the `mousedown` phase, the close timeout is set, and by the time the `click` event fires on the item, the menu is closed and the item's `onClick` handler may not trigger. `e.preventDefault()` on `mousedown` prevents the blur, keeping the input focused long enough for the item's `click` to fire and select the item.
+
+**Q4. How do you announce dynamic content changes from a headless component to screen readers?**
+
+Visually dynamic updates (filtering a list from 20 items to 3) are invisible to screen readers unless announced via an ARIA live region. A live region is a DOM element with `role="status"` (or `aria-live="polite"`) and `aria-atomic="true"`. When its `textContent` changes, screen readers announce the new content at their next opportunity (polite) or immediately (assertive). In a headless combobox, add a visually hidden live region that updates when `filteredItems.length` changes: "3 results available." The visually-hidden CSS (`position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0)`) keeps it out of visual layout without removing it from the accessibility tree.
+
+**Q5. How do you test a headless hook effectively?**
+
+Use `renderHook` from `@testing-library/react` to test the hook in isolation — no component mounting needed. Test: initial state matches options; state changes correctly on simulated events (call the `onChange` function from the prop getter with a simulated event object); keyboard navigation moves `highlightedIndex` correctly; selection calls `onSelect` with the right item and closes the menu; `escape` key closes without selecting; `aria-expanded` and `aria-activedescendant` return the correct values based on state. These tests are faster than component tests, don't depend on rendered markup, and directly verify the behavioral contract that every consumer relies on.
+
+**Q6. When would you choose a render prop form over a hook for a headless component?**
+
+Render props are appropriate when the headless component needs to control DOM structure alongside the logic — specifically when it needs to render a portal as part of its own output. A `Tooltip` headless component, for example, needs to: (1) manage visibility state and ARIA attributes (which a hook can do), and (2) render the tooltip panel into `document.body` via `createPortal` to escape stacking contexts. A hook cannot `return` a portal render — it can only return values. The render prop form lets the component render both the logic-enhanced trigger element and the portal in a single coherent unit. This is the specific case where render props still outperform hooks.

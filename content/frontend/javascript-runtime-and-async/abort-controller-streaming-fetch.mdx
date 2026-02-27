@@ -1,13 +1,17 @@
 ---
 title: AbortController & Streaming Fetch
-description: How to cancel fetch requests and process streaming HTTP responses using AbortController and the ReadableStream API.
+description: How to cancel in-flight fetch requests with AbortController, read streaming HTTP responses with ReadableStream, and build production patterns like cancellable search and AI token streaming.
 ---
 
 ## Overview
 
-`AbortController` gives you a way to cancel in-flight `fetch` requests — something the basic `fetch` API doesn't support on its own. Streaming fetch response handling lets you process a response body incrementally as chunks arrive, rather than waiting for the full payload.
+`fetch` is the browser's built-in HTTP client — but out of the box it gives you no way to cancel a request once it's in flight. `AbortController` fills that gap. It's a small API with a big impact: it's what makes typeahead search correct, streaming AI chat interfaces possible, and race condition-free data fetching achievable.
 
-Together, these two primitives are essential for building responsive UIs: think typeahead search that cancels stale requests, AI chat interfaces that render tokens as they stream in, or large file downloads with progress tracking.
+The second half of this article covers **streaming fetch** — reading a response body incrementally as chunks arrive rather than waiting for the full payload. These two primitives are deeply connected: most real streaming implementations use `AbortController` for cleanup, and understanding how `ReadableStream` works explains why streaming is better than polling for long-running responses.
+
+This article builds on the async/await and Promise error handling patterns from the previous articles. The examples here use both extensively.
+
+---
 
 ## How It Works
 
@@ -15,57 +19,127 @@ Together, these two primitives are essential for building responsive UIs: think 
 
 An `AbortController` instance exposes two things:
 
-- **`controller.signal`** — an `AbortSignal` you pass into `fetch`. It's a live object that broadcasts "cancelled" to anything listening.
-- **`controller.abort()`** — triggers that broadcast, causing the associated `fetch` to reject with a `DOMException` named `AbortError`.
+- **`controller.signal`** — an `AbortSignal` object you pass to `fetch` (and other APIs). It's a live event target that broadcasts a "cancelled" signal to anything listening.
+- **`controller.abort(reason?)`** — triggers that broadcast. Any `fetch` using the signal rejects immediately with a `DOMException` named `"AbortError"`.
 
 ```
 AbortController
-  └── .signal  ──────────────────► fetch(url, { signal })
-  └── .abort() ── triggers ──────► fetch rejects with AbortError
+  ├── .signal  ──────────────────► fetch(url, { signal })
+  │                                  └── rejects with AbortError when aborted
+  └── .abort() ── triggers ──────► signal.aborted = true
+                                   signal.dispatchEvent("abort")
 ```
 
-### Streaming via ReadableStream
+Once a controller has been aborted, its signal stays in the aborted state permanently. Creating a new `fetch` with an already-aborted signal rejects immediately — you must create a **fresh `AbortController`** for each new request.
 
-When a server sends a response with chunked transfer encoding (common with AI APIs, SSE-like endpoints, or large payloads), `response.body` is a `ReadableStream`. You read it with a `reader`:
+### Streaming via `ReadableStream`
+
+When a server sends a response with chunked transfer encoding — common with AI APIs, build log endpoints, or large file downloads — `response.body` is a `ReadableStream`. Rather than buffering the entire response before handing it to your code, you can read it chunk by chunk as data arrives.
 
 ```
-response.body
-  └── .getReader()
-        └── .read() → { value: Uint8Array, done: boolean }
+response.body (ReadableStream)
+  └── .getReader()          → ReadableStreamDefaultReader
+        └── .read()         → Promise<{ value: Uint8Array, done: boolean }>
+              ├── value     → raw bytes of the current chunk
+              └── done      → true when the stream is closed
 ```
 
-Each call to `reader.read()` resolves with the next chunk, or `{ done: true }` when the stream closes. You decode `Uint8Array` chunks with a `TextDecoder`.
+Each `reader.read()` call resolves with the next available chunk, or `{ done: true }` when the stream closes. Raw chunks are `Uint8Array` — use `TextDecoder` to convert them to strings.
+
+<Callout type="info">
+  Pass `{ stream: true }` to `TextDecoder.decode(chunk, { stream: true })` when processing chunks in a loop. Without it, multi-byte characters (like emoji or non-Latin scripts) that happen to span a chunk boundary will be decoded incorrectly.
+</Callout>
+
+---
 
 ## Code Examples
 
-### 1. Cancellable Fetch (Basic)
+### 1. Basic Cancellable Fetch
+
+The simplest pattern — create a controller, pass its signal to `fetch`, and abort when you're done or when the component unmounts:
 
 ```ts
 // utils/fetch-with-abort.ts
 
-export async function fetchWithAbort(url: string, signal: AbortSignal) {
+export async function fetchWithAbort<T>(
+  url: string,
+  signal: AbortSignal,
+): Promise<T> {
   const response = await fetch(url, { signal });
 
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    throw new Error(
+      `Request failed: ${response.status} ${response.statusText}`,
+    );
   }
 
-  return response.json();
+  return response.json() as Promise<T>;
 }
 ```
 
 ```tsx
-// app/search/page.tsx
+// components/UserProfile.tsx
 "use client";
 
 import { useEffect, useState } from "react";
 import { fetchWithAbort } from "@/utils/fetch-with-abort";
 
-type Result = { id: number; title: string };
+interface User {
+  id: string;
+  name: string;
+  email: string;
+}
 
-export default function SearchPage() {
+export function UserProfile({ userId }: { userId: string }) {
+  const [user, setUser] = useState<User | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    fetchWithAbort<User>(`/api/users/${userId}`, controller.signal)
+      .then(setUser)
+      .catch((err) => {
+        // AbortError is intentional — don't surface it as a UI error
+        if (err.name !== "AbortError") {
+          setError(err.message);
+        }
+      });
+
+    // Cleanup: abort the request if userId changes or component unmounts.
+    // The cleanup runs before the next effect — so a rapid userId change
+    // cancels the previous request before starting a new one.
+    return () => controller.abort();
+  }, [userId]);
+
+  if (error) return <p>Error: {error}</p>;
+  if (!user) return <p>Loading...</p>;
+  return <p>{user.name}</p>;
+}
+```
+
+---
+
+### 2. Typeahead Search — Cancelling Stale Requests
+
+Without cancellation, a search input that fires on every keystroke can produce responses out of order — a slow response for an old query overwriting a fast response for the latest query. `AbortController` eliminates this race condition:
+
+```tsx
+// components/ProductSearch.tsx
+"use client";
+
+import { useEffect, useState } from "react";
+
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+}
+
+export function ProductSearch() {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<Result[]>([]);
+  const [results, setResults] = useState<Product[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
     if (!query.trim()) {
@@ -73,22 +147,29 @@ export default function SearchPage() {
       return;
     }
 
-    // Create a new controller for every query change
     const controller = new AbortController();
+    setIsLoading(true);
 
-    fetchWithAbort(
-      `/api/search?q=${encodeURIComponent(query)}`,
-      controller.signal,
-    )
-      .then(setResults)
+    fetch(`/api/products/search?q=${encodeURIComponent(query)}`, {
+      signal: controller.signal,
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Search failed: ${res.status}`);
+        return res.json() as Promise<Product[]>;
+      })
+      .then((data) => {
+        setResults(data);
+        setIsLoading(false);
+      })
       .catch((err) => {
-        // Ignore aborts — they're intentional, not errors
         if (err.name !== "AbortError") {
-          console.error("Search failed:", err);
+          console.error("Search error:", err.message);
+          setIsLoading(false);
         }
+        // AbortError: a newer request superseded this one — do nothing
       });
 
-    // Cleanup: abort the previous request when query changes or component unmounts
+    // Each query change aborts the previous request before starting a new one
     return () => controller.abort();
   }, [query]);
 
@@ -99,9 +180,12 @@ export default function SearchPage() {
         onChange={(e) => setQuery(e.target.value)}
         placeholder="Search products..."
       />
+      {isLoading && <span>Searching...</span>}
       <ul>
-        {results.map((r) => (
-          <li key={r.id}>{r.title}</li>
+        {results.map((p) => (
+          <li key={p.id}>
+            {p.name} — ${p.price}
+          </li>
         ))}
       </ul>
     </div>
@@ -110,14 +194,103 @@ export default function SearchPage() {
 ```
 
 <Callout type="info">
-  The cleanup function returned from `useEffect` fires before the next effect
-  runs. This means each keystroke aborts the previous in-flight request
-  automatically.
+  The `useEffect` cleanup function fires before the next effect runs. This means
+  each new query value automatically cancels the in-flight request from the
+  previous query before starting a new one — no debouncing required for
+  correctness (though debouncing is still good for reducing request volume).
 </Callout>
 
 ---
 
-### 2. Streaming Response (AI Chat Pattern)
+### 3. Timeout with AbortController
+
+The cleanest way to enforce a request deadline — no `Promise.race` needed:
+
+```ts
+// lib/fetch-with-timeout.ts
+
+export async function fetchWithTimeout<T>(
+  url: string,
+  options: RequestInit & { timeoutMs?: number } = {},
+): Promise<T> {
+  const { timeoutMs = 5000, ...fetchOptions } = options;
+
+  // AbortSignal.timeout() is a newer static method that creates a signal
+  // that aborts automatically after the given duration.
+  // It's cleaner than manually managing setTimeout + AbortController.
+  const signal = AbortSignal.timeout(timeoutMs);
+
+  try {
+    const response = await fetch(url, { ...fetchOptions, signal });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    return response.json() as Promise<T>;
+  } catch (error) {
+    if (error instanceof DOMException) {
+      if (error.name === "TimeoutError") {
+        throw new Error(`Request to ${url} timed out after ${timeoutMs}ms`);
+      }
+      if (error.name === "AbortError") {
+        throw new Error(`Request to ${url} was cancelled`);
+      }
+    }
+    throw error;
+  }
+}
+```
+
+<Callout type="info">
+  `AbortSignal.timeout(ms)` is available in modern browsers and Node.js 17.3+. It's a cleaner alternative to the manual `setTimeout(() => controller.abort(), ms)` pattern for pure timeout use cases. For cases where you need to abort from multiple conditions (user action AND timeout), use a manual `AbortController` and `setTimeout` instead.
+</Callout>
+
+---
+
+### 4. Combining Multiple Abort Conditions
+
+Sometimes you need to abort for more than one reason — a timeout AND a user-initiated cancel:
+
+```ts
+// lib/abortable-operation.ts
+
+export function combineSignals(...signals: AbortSignal[]): AbortSignal {
+  const controller = new AbortController();
+
+  for (const signal of signals) {
+    // If any input signal is already aborted, abort immediately
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+
+    // Otherwise, listen for abort on each signal
+    signal.addEventListener("abort", () => {
+      controller.abort(signal.reason);
+    });
+  }
+
+  return controller.signal;
+}
+
+// Usage
+async function loadDataWithControls(url: string, userSignal: AbortSignal) {
+  const timeoutSignal = AbortSignal.timeout(8000);
+
+  // Aborts if EITHER the user cancels OR the timeout fires
+  const combinedSignal = combineSignals(userSignal, timeoutSignal);
+
+  const response = await fetch(url, { signal: combinedSignal });
+  return response.json();
+}
+```
+
+---
+
+### 5. Streaming Response — AI Token-by-Token Rendering
+
+The most common real-world use of streaming fetch today is rendering AI-generated text as tokens arrive:
 
 ```tsx
 // app/chat/page.tsx
@@ -126,69 +299,72 @@ export default function SearchPage() {
 import { useState, useRef } from "react";
 
 export default function ChatPage() {
-  const [message, setMessage] = useState("");
-  const [streamedText, setStreamedText] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [output, setOutput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const controllerRef = useRef<AbortController | null>(null);
 
-  async function sendMessage() {
+  async function startStream() {
     // Abort any existing stream before starting a new one
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
 
-    setStreamedText("");
+    setOutput("");
     setIsStreaming(true);
 
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ prompt }),
         signal: controller.signal,
       });
 
       if (!response.ok || !response.body) {
-        throw new Error(`Unexpected response: ${response.status}`);
+        throw new Error(`Stream failed: ${response.status}`);
       }
 
       const reader = response.body.getReader();
-      const decoder = new TextDecoder(); // Converts Uint8Array → string
+      // { stream: true } handles multi-byte characters across chunk boundaries
+      const decoder = new TextDecoder("utf-8");
 
       while (true) {
         const { value, done } = await reader.read();
 
-        if (done) break; // Stream closed by server
+        if (done) break;
 
-        // Decode the chunk and append it to the displayed text
         const chunk = decoder.decode(value, { stream: true });
-        setStreamedText((prev) => prev + chunk);
+        setOutput((prev) => prev + chunk);
       }
-    } catch (err: unknown) {
+    } catch (err) {
       if (err instanceof Error && err.name !== "AbortError") {
-        console.error("Stream error:", err);
+        console.error("Stream error:", err.message);
       }
     } finally {
       setIsStreaming(false);
     }
   }
 
-  function stopStreaming() {
+  function stopStream() {
     controllerRef.current?.abort();
   }
 
   return (
     <div>
       <textarea
-        value={message}
-        onChange={(e) => setMessage(e.target.value)}
-        placeholder="Ask something..."
+        value={prompt}
+        onChange={(e) => setPrompt(e.target.value)}
+        placeholder="Enter your prompt..."
+        rows={4}
       />
-      <button onClick={sendMessage} disabled={isStreaming}>
-        Send
-      </button>
-      {isStreaming && <button onClick={stopStreaming}>Stop</button>}
-      <pre>{streamedText}</pre>
+      <div>
+        <button onClick={startStream} disabled={isStreaming}>
+          {isStreaming ? "Generating..." : "Generate"}
+        </button>
+        {isStreaming && <button onClick={stopStream}>Stop</button>}
+      </div>
+      <pre style={{ whiteSpace: "pre-wrap" }}>{output}</pre>
     </div>
   );
 }
@@ -196,15 +372,15 @@ export default function ChatPage() {
 
 ```ts
 // app/api/chat/route.ts
-// A minimal streaming API route that simulates token-by-token output
 
 import { NextRequest } from "next/server";
 
 export async function POST(req: NextRequest) {
-  const { message } = await req.json();
+  const { prompt } = await req.json();
 
+  // Simulate streaming token output — in production, pipe from OpenAI or similar
   const words =
-    `You asked: "${message}". Here is a streamed response word by word.`.split(
+    `You asked: "${prompt}". Here is a streamed response word by word.`.split(
       " ",
     );
 
@@ -212,74 +388,142 @@ export async function POST(req: NextRequest) {
     async start(controller) {
       for (const word of words) {
         controller.enqueue(new TextEncoder().encode(word + " "));
-        // Simulate network/processing delay
-        await new Promise((r) => setTimeout(r, 80));
+        // Simulate per-token delay
+        await new Promise((r) => setTimeout(r, 60));
       }
       controller.close();
     },
   });
 
   return new Response(stream, {
-    headers: { "Content-Type": "text/plain; charset=utf-8" },
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      // Disable buffering on proxies — required for true streaming
+      "X-Accel-Buffering": "no",
+    },
   });
 }
 ```
 
-<Callout type="warn">
-  Pass `{ stream: true }` to `TextDecoder.decode()` when processing chunks in a loop. Without it, multi-byte characters (like emoji or non-Latin scripts) that span chunk boundaries will be decoded incorrectly.
-</Callout>
+---
+
+### 6. Streaming with Backpressure Awareness
+
+For high-frequency streams where each chunk triggers expensive work (parsing, DOM updates), you need to be careful not to fall behind:
+
+```ts
+// lib/stream-processor.ts
+
+async function processStream(
+  stream: ReadableStream<Uint8Array>,
+  onChunk: (text: string) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder("utf-8");
+
+  // Register abort handler to cancel the read loop
+  signal.addEventListener("abort", () => reader.cancel(), { once: true });
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+
+      if (done) break;
+      if (signal.aborted) break;
+
+      const text = decoder.decode(value, { stream: true });
+
+      // For expensive per-chunk work, batch renders using rAF
+      // instead of calling setState on every single chunk
+      requestAnimationFrame(() => onChunk(text));
+    }
+  } finally {
+    // Always release the reader lock — even if an error occurs mid-stream
+    reader.releaseLock();
+  }
+}
+```
 
 ---
 
 ## Real-World Use Case
 
-**AI chat interface (e.g., a GPT-powered assistant):** The server streams tokens as the model generates them. Without streaming, the user stares at a blank screen for several seconds. With streaming + `AbortController`, you can render each token as it arrives and give users a "Stop generating" button — exactly how ChatGPT and similar UIs work.
+**AI chat interface** — the definitive use case for both primitives together. The server streams tokens as the model generates them. Without streaming, the user waits several seconds staring at a blank area. With streaming + `AbortController`, each token renders as it arrives and the user gets a "Stop generating" button. This is exactly how ChatGPT, Claude, and similar UIs work — `text/event-stream` (SSE) or raw `ReadableStream` over HTTP, with `AbortController` wired to the stop button.
 
-**Search-as-you-type:** Each keystroke fires a new fetch. Without aborting the previous request, responses can arrive out of order — a slow response from an old query might overwrite a fast response from the latest one. `AbortController` eliminates this race condition.
+**Search-as-you-type** — each keystroke fires a new request. Without `AbortController`, a slow response from an older query can overwrite a fast response from the newest one. Users see the wrong results for their current input. Aborting the previous request before starting the next one makes this impossible.
+
+**Large file download with progress** — instead of waiting for the full response, you can read the stream chunk by chunk, track bytes received vs. `Content-Length`, and update a progress bar in real time.
+
+---
 
 ## Common Mistakes / Gotchas
 
-**1. Not checking for `AbortError` before logging**
-
-When you call `controller.abort()`, the fetch promise rejects. If you log all errors unconditionally, your console fills with noise. Always filter:
-
-```ts
-.catch((err) => {
-  if (err.name !== 'AbortError') console.error(err);
-});
-```
-
-**2. Reusing an AbortController after calling `.abort()`**
-
-Once aborted, a controller's signal is permanently in the aborted state. Creating a new `fetch` with that signal will reject immediately. Always create a fresh `AbortController` for each new request.
+**1. Reusing an `AbortController` after calling `.abort()`.**
+Once aborted, a controller's signal is permanently in the aborted state. Any `fetch` passed that signal rejects immediately. Always create a fresh `AbortController` for each new operation.
 
 ```ts
-// ❌ Wrong — signal is already aborted
+// ❌ Signal is already aborted — new fetch rejects immediately
 controller.abort();
-fetch(url, { signal: controller.signal }); // Rejects instantly
+fetch(url, { signal: controller.signal }); // rejects before the request is even sent
 
-// ✅ Correct — fresh controller
+// ✅ Fresh controller for each request
 const newController = new AbortController();
 fetch(url, { signal: newController.signal });
 ```
 
-**3. Forgetting to release the reader lock**
+**2. Not filtering `AbortError` in catch blocks.**
+When you abort a fetch, it rejects with a `DOMException` where `error.name === "AbortError"`. This is intentional — not a bug. If you log or surface all errors unconditionally, your UI will show misleading error states whenever a request is legitimately cancelled.
 
-If you call `response.body.getReader()` and an error occurs mid-stream, the lock on the stream is not automatically released. Wrap your streaming loop in `try/finally` and call `reader.releaseLock()` or `reader.cancel()` in the `finally` block if you need to reuse the stream (uncommon but worth knowing).
+**3. Forgetting to release the reader lock after streaming.**
+Calling `response.body.getReader()` acquires an exclusive lock on the stream. If your read loop exits due to an error without releasing the lock, the stream is permanently locked. Wrap your read loop in `try/finally` and call `reader.releaseLock()` in `finally`.
+
+**4. Not setting streaming-friendly response headers.**
+If your streaming API route sits behind a proxy or CDN, the proxy may buffer the entire response before forwarding it — eliminating the streaming benefit. Set `"X-Accel-Buffering": "no"` (Nginx) and `"Cache-Control": "no-cache"` to prevent this.
+
+**5. Using `TextDecoder` without `{ stream: true }` in chunk loops.**
+Without the `stream: true` option, `TextDecoder` treats each chunk as a complete, independent byte sequence. Multi-byte UTF-8 characters (emoji, CJK characters, accented letters) that span chunk boundaries will produce replacement characters (`\uFFFD`) instead of the correct character. Always pass `{ stream: true }` when decoding in a loop.
+
+**6. Not handling the case where `response.body` is null.**
+`response.body` can be `null` — for example, on a 204 No Content response, or in some test/mock environments. Always null-check before calling `.getReader()`.
 
 ```ts
-const reader = response.body.getReader();
-try {
-  // ... read loop
-} finally {
-  reader.releaseLock();
+if (!response.body) {
+  throw new Error("Response has no body to stream");
 }
+const reader = response.body.getReader();
 ```
 
-**4. Ignoring backpressure on very fast streams**
-
-`ReadableStream` has built-in backpressure, but if you're doing expensive work per chunk (e.g., parsing, DOM updates), you can fall behind. For UI updates, batch chunks or throttle rendering with `requestAnimationFrame`.
+---
 
 ## Summary
 
-`AbortController` lets you cancel any in-flight `fetch` by passing `controller.signal` to the request options and calling `controller.abort()` when needed — crucial for avoiding race conditions in search and preventing wasted work. Streaming fetch responses are read chunk-by-chunk via `response.body.getReader()`, decoding `Uint8Array` values with `TextDecoder`. Always guard against `AbortError` in your catch handlers, and always create a new `AbortController` instance per request. These two APIs together form the foundation of real-time, interruptible data fetching in modern web apps.
+`AbortController` solves the fundamental problem of cancelling in-flight fetch requests. Create one controller per request, pass its `signal` to `fetch`, and call `controller.abort()` whenever the request is no longer needed — on component unmount, on new input, or on timeout. Always create a fresh controller for each new request; signals are permanently aborted once triggered. For timeouts specifically, `AbortSignal.timeout(ms)` is a cleaner one-liner than managing `setTimeout` manually. Streaming fetch uses `response.body.getReader()` to process a `ReadableStream` chunk by chunk as data arrives — essential for AI token streaming, large downloads, and live log tailing. Always decode with `{ stream: true }`, release the reader lock in a `finally` block, and set proxy bypass headers if your API sits behind Nginx or a CDN.
+
+---
+
+## Interview Questions
+
+**Q1. What problem does `AbortController` solve and how does it work?**
+
+`fetch` has no built-in cancellation. Once a request is sent, you can't stop it from resolving. `AbortController` provides a `signal` object you pass to `fetch` as an option. When you call `controller.abort()`, the signal broadcasts a cancellation event, and any `fetch` holding that signal immediately rejects with a `DOMException` named `"AbortError"`. The underlying HTTP connection is also closed. This is essential for typeahead search (cancelling stale requests), component unmount cleanup, and timeout enforcement.
+
+**Q2. Why must you create a new `AbortController` for each request?**
+
+Once `controller.abort()` is called, the controller's signal is permanently in the aborted state — `signal.aborted` is `true` and never goes back to `false`. If you pass that signal to a new `fetch`, it rejects immediately before the request is even sent. A controller is a one-shot mechanism, not a reusable handle. Create a fresh one for every new operation.
+
+**Q3. How would you implement a search input that cancels the previous request on each keystroke?**
+
+Use a `useEffect` that depends on the query value. Inside the effect, create a new `AbortController`, fire the fetch with its signal, and return a cleanup function that calls `controller.abort()`. React's `useEffect` cleanup runs before the next effect executes — so each new query value triggers cleanup of the previous effect (aborting the previous request) before starting the new one. Filter `AbortError` in the catch block so cancelled requests don't show as UI errors.
+
+**Q4. What is `ReadableStream` and why is it useful for HTTP responses?**
+
+`ReadableStream` represents a source of data that arrives incrementally. `response.body` in the Fetch API is a `ReadableStream<Uint8Array>`. Instead of waiting for the entire response to buffer in memory before your code can access it, you call `response.body.getReader()` and then `reader.read()` in a loop — each call resolves with the next available chunk of bytes and a `done` flag. This lets you start processing and rendering data immediately as it arrives rather than after the complete response downloads, which is what makes AI token streaming and live log tailing possible.
+
+**Q5. What is `AbortSignal.timeout()` and when would you use it over a manual `AbortController`?**
+
+`AbortSignal.timeout(ms)` is a static factory method that returns a signal that automatically aborts after the specified duration — without you needing to create a controller, manage a `setTimeout`, or clean up. It's the cleanest approach for simple timeout use cases: `fetch(url, { signal: AbortSignal.timeout(5000) })`. Use a manual `AbortController` instead when you need to abort from multiple conditions simultaneously (e.g., both a timeout and a user-initiated cancel), since you can combine multiple signals manually or use a helper like `combineSignals`.
+
+**Q6. Why do you need `{ stream: true }` when decoding streaming fetch chunks with `TextDecoder`?**
+
+UTF-8 is a variable-length encoding — a single character can be 1 to 4 bytes. When streaming, chunk boundaries don't align with character boundaries. A chunk might end in the middle of a multi-byte character. Without `{ stream: true }`, `TextDecoder` treats each chunk as a complete, self-contained byte sequence and replaces incomplete characters at the end of a chunk with the replacement character `\uFFFD`. With `{ stream: true }`, the decoder retains incomplete bytes in an internal buffer and completes them with the next chunk — producing correct output regardless of where chunks are split.

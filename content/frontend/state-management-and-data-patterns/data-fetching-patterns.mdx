@@ -1,79 +1,79 @@
 ---
 title: Data Fetching Patterns
-description: The mental models behind client-side data fetching — cache keys, deduplication, background revalidation, and how SWR and React Query relate to React Server Components.
+description: The mental models behind TanStack Query and SWR — cache keys, deduplication, background revalidation, prefetching with SSR hydration, parallel and dependent queries, and when to use a client cache versus a Server Component fetch.
 ---
 
 ## Overview
 
-Data fetching in a React application is not just `fetch()` inside `useEffect`. The moment you care about loading states, error states, caching, deduplication, background refresh, optimistic updates, and pagination — you are building a client-side cache. SWR and React Query exist because that cache is hard to build correctly, and teams kept rebuilding it badly.
+Client-side data fetching is not just `fetch()` inside `useEffect`. The moment you care about loading states, caching, deduplication, background refresh, optimistic updates, and cache invalidation — you are building a client-side cache. TanStack Query and SWR exist because that cache is hard to build correctly, and teams kept rebuilding it badly.
 
-This article covers the underlying mechanics those libraries implement, when to use them versus React Server Components, and the patterns that apply regardless of which tool you reach for.
+This article covers the underlying mechanics both libraries implement, the patterns that matter most in production (prefetching, SSR hydration, parallel and dependent queries), how SWR compares to TanStack Query, and when to skip the client cache entirely in favor of a Server Component fetch.
 
 ---
 
 ## How It Works
 
-### The client-side cache model
+### The Client-Side Cache Model
 
-Every serious data fetching library is built around the same core idea: a **cache keyed by request identity**. When a component requests data, the library checks the cache first. If a fresh entry exists, it returns it immediately — no network request. If the entry is stale or missing, it fetches, stores the result, and notifies all subscribers.
+Every serious data fetching library is built around a cache keyed by request identity. When a component mounts and requests data, the library checks the cache first. Fresh entry → return immediately, no network request. Stale or missing → fetch, store, notify subscribers.
 
-This model solves several problems that raw `useEffect` fetching cannot:
+This solves three problems that raw `useEffect` fetching cannot:
 
-**Deduplication** — If three components on the same page all request `/api/user/42` simultaneously, a naive implementation fires three network requests. A cache-backed library fires one, and all three components receive the result when it resolves.
+**Deduplication** — If 10 components simultaneously request `['user', 42]`, the library fires one request and delivers the result to all 10 when it resolves.
 
-**Background revalidation** — Stale-while-revalidate (SWR, the strategy the library is named after): return the cached value immediately so the UI renders instantly, then fetch a fresh copy in the background and update when it arrives. The user sees data right away — no loading spinner for data they've seen before.
+**Background revalidation** — Return the cached (stale) value immediately so the UI renders without a spinner, then fetch a fresh copy and update silently when it arrives.
 
-**Shared state without a global store** — Because both components read from the same cache key, two `useQuery({ queryKey: ['user', 42] })` calls in different parts of the tree are automatically synchronized. Mutate the data in one place — the cache updates everywhere.
+**Shared state without a global store** — Two `useQuery({ queryKey: ['user', 42] })` calls in different parts of the tree are automatically synchronized — one mutation invalidates the cache and both update.
 
-### Cache keys
+### Cache Keys
 
-The cache key is the identity of a request. In React Query it's an array (`['user', userId]`). In SWR it's a string or function. The key must be:
+The cache key is the identity of a request. In TanStack Query it's an array; in SWR it's a string or function. Keys must be deterministic (same logical request → same key), specific (different requests → different keys), and must not contain unstable references (no inline objects or arrays).
 
-- **Deterministic** — the same logical request must always produce the same key
-- **Specific** — different requests must produce different keys
-- **Serializable** — no functions, class instances, or circular references
+```ts
+// ✅ Primitive values — stable and deterministic
+useQuery({ queryKey: ["user", userId] });
+useQuery({ queryKey: ["products", category, page, sort] });
 
-Getting cache keys right is the most common source of bugs in both libraries.
+// ❌ Inline object — new reference every render → infinite refetch loop
+useQuery({ queryKey: ["user", { id: userId }] });
+```
 
-### Stale time vs cache time
+### Stale Time vs Cache Time
 
-These two settings are confused constantly:
+**`staleTime`** — how long cached data is considered fresh. During this window, no background refetch happens. After it expires, the next component mount or window focus triggers a background refresh while showing the stale value immediately.
 
-- **Stale time** — how long cached data is considered fresh. During this window, no background refetch happens. After it expires, the next mount or focus event triggers a background refresh.
-- **Cache time / `gcTime`** — how long unused data stays in the cache before being garbage collected. A query that's been unmounted is still in cache for this duration, so remounting it renders the cached value instantly before refetching.
+**`gcTime`** (formerly `cacheTime`) — how long _unused_ data stays in memory before garbage collection. A query unmounted for less than `gcTime` can remount and render instantly from cache before refetching.
 
 ```
-Request resolves → data is FRESH for staleTime
-                 → after staleTime, data is STALE (shown immediately, refetch in background)
-                 → after unmount + gcTime, data is EVICTED from cache
+Request resolves → FRESH for staleTime (no background fetch)
+                 → STALE after staleTime (background fetch on next mount/focus)
+                 → EVICTED after gcTime with no active subscribers
 ```
 
 ---
 
 ## Code Examples
 
-### 1. React Query — foundational setup and a basic query
+### TanStack Query Setup
 
 ```tsx
 // app/providers.tsx
 "use client";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 import { useState, type ReactNode } from "react";
 
 export function ReactQueryProvider({ children }: { children: ReactNode }) {
-  // Create the client inside useState so each request gets a fresh client in SSR
-  // Never create QueryClient outside a component — it would be shared across requests
+  // Create inside useState — each server-side render gets a fresh client
+  // A module-level QueryClient is shared across all SSR requests → data leaks between users
   const [queryClient] = useState(
     () =>
       new QueryClient({
         defaultOptions: {
           queries: {
-            // Data stays fresh for 60 seconds — no background refetch during this window
-            staleTime: 60 * 1000,
-            // Retry failed requests twice before showing an error
+            staleTime: 60 * 1000, // 1 min fresh window — reduces unnecessary refetches
             retry: 2,
-            // Refetch when the user focuses the tab — catches staleness from background tabs
             refetchOnWindowFocus: true,
           },
         },
@@ -81,435 +81,337 @@ export function ReactQueryProvider({ children }: { children: ReactNode }) {
   );
 
   return (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    <QueryClientProvider client={queryClient}>
+      {children}
+      {process.env.NODE_ENV === "development" && <ReactQueryDevtools />}
+    </QueryClientProvider>
   );
 }
 ```
 
-```tsx
-// app/layout.tsx
-import { ReactQueryProvider } from "./providers";
+---
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
-  return (
-    <html lang="en">
-      <body>
-        <ReactQueryProvider>{children}</ReactQueryProvider>
-      </body>
-    </html>
-  );
+### Parallel Queries — Independent Data at the Same Time
+
+```tsx
+// hooks/use-product-page.ts
+import { useQueries } from "@tanstack/react-query";
+
+// useQueries fires all queries in parallel — total time = slowest query, not sum
+export function useProductPage(productId: string, userId: string | null) {
+  const results = useQueries({
+    queries: [
+      {
+        queryKey: ["product", productId],
+        queryFn: async () => {
+          const res = await fetch(`/api/products/${productId}`);
+          if (!res.ok) throw new Error("Failed to fetch product");
+          return res.json();
+        },
+        staleTime: 5 * 60 * 1000,
+      },
+      {
+        queryKey: ["inventory", productId],
+        queryFn: async () => {
+          const res = await fetch(`/api/products/${productId}/inventory`);
+          if (!res.ok) throw new Error("Failed to fetch inventory");
+          return res.json();
+        },
+        staleTime: 30 * 1000,
+        refetchInterval: 60 * 1000, // poll every 60s — inventory changes frequently
+      },
+      {
+        queryKey: ["user-purchases", userId, productId],
+        queryFn: async () => {
+          const res = await fetch(
+            `/api/users/${userId}/purchases?productId=${productId}`,
+          );
+          if (!res.ok) throw new Error("Failed to fetch history");
+          return res.json();
+        },
+        enabled: !!userId, // skip if no user logged in
+      },
+    ],
+  });
+
+  const [product, inventory, purchaseHistory] = results;
+  return {
+    product: product.data,
+    inventory: inventory.data,
+    purchaseHistory: purchaseHistory.data,
+    isLoading: results.some((r) => r.isLoading),
+    isError: results.some((r) => r.isError),
+  };
 }
 ```
 
+---
+
+### Dependent Queries — Sequential Fetch When B Needs A's Data
+
 ```tsx
-// hooks/use-user.ts
+// hooks/use-user-orders.ts
 import { useQuery } from "@tanstack/react-query";
 
-interface User {
-  id: string;
-  name: string;
-  email: string;
-  role: "admin" | "member";
-}
-
-async function fetchUser(userId: string): Promise<User> {
-  const res = await fetch(`/api/users/${userId}`);
-  if (!res.ok) throw new Error(`Failed to fetch user: ${res.status}`);
-  return res.json();
-}
-
-export function useUser(userId: string) {
-  return useQuery({
-    // Cache key: ['user', userId] — each userId gets its own cache entry
-    queryKey: ["user", userId],
-    queryFn: () => fetchUser(userId),
-    // Override the global staleTime for user data — stays fresh for 5 minutes
-    staleTime: 5 * 60 * 1000,
-    // Don't fetch if userId is empty — avoids a request with an invalid key
-    enabled: !!userId,
-  });
-}
-```
-
-```tsx
-// components/user-profile.tsx
-"use client";
-
-import { useUser } from "@/hooks/use-user";
-
-export function UserProfile({ userId }: { userId: string }) {
-  const { data: user, isLoading, isError, error } = useUser(userId);
-
-  if (isLoading) {
-    return <div className="h-16 animate-pulse rounded-md bg-muted" />;
-  }
-
-  if (isError) {
-    return (
-      <p className="text-sm text-destructive">
-        Failed to load profile: {error.message}
-      </p>
-    );
-  }
-
-  return (
-    <div className="flex items-center gap-3">
-      <div className="h-10 w-10 rounded-full bg-primary/10" />
-      <div>
-        <p className="font-medium">{user.name}</p>
-        <p className="text-sm text-muted-foreground">{user.email}</p>
-      </div>
-    </div>
-  );
-}
-```
-
----
-
-### 2. Mutations with cache invalidation
-
-Mutations don't just send data — they invalidate related cache entries so the UI reflects the updated server state.
-
-```tsx
-// hooks/use-update-user.ts
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-
-interface UpdateUserPayload {
-  name?: string;
-  email?: string;
-}
-
-async function updateUser(userId: string, payload: UpdateUserPayload) {
-  const res = await fetch(`/api/users/${userId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error("Failed to update user");
-  return res.json();
-}
-
-export function useUpdateUser(userId: string) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: (payload: UpdateUserPayload) => updateUser(userId, payload),
-
-    // onSuccess: invalidate the user cache so all components refetch fresh data
-    onSuccess: () => {
-      // Invalidate the specific user entry
-      queryClient.invalidateQueries({ queryKey: ["user", userId] });
-      // Also invalidate any list that might contain this user
-      queryClient.invalidateQueries({ queryKey: ["users"] });
-    },
-
-    onError: (error) => {
-      console.error("User update failed:", error);
+export function useUserOrders() {
+  // Step 1: fetch the authenticated user
+  const userQuery = useQuery({
+    queryKey: ["me"],
+    queryFn: async () => {
+      const res = await fetch("/api/me");
+      if (!res.ok) throw new Error("Not authenticated");
+      return res.json() as Promise<{ id: string; name: string }>;
     },
   });
-}
-```
 
-```tsx
-// components/edit-user-form.tsx
-"use client";
-
-import { useState } from "react";
-import { useUser } from "@/hooks/use-user";
-import { useUpdateUser } from "@/hooks/use-update-user";
-
-export function EditUserForm({ userId }: { userId: string }) {
-  const { data: user } = useUser(userId);
-  const { mutate: updateUser, isPending, isError } = useUpdateUser(userId);
-  const [name, setName] = useState(user?.name ?? "");
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    updateUser({ name });
-  }
-
-  return (
-    <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-      <input
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        className="rounded-md border border-input px-3 py-2 text-sm"
-        disabled={isPending}
-      />
-      {isError && (
-        <p className="text-sm text-destructive">Update failed. Try again.</p>
-      )}
-      <button
-        type="submit"
-        disabled={isPending}
-        className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground"
-      >
-        {isPending ? "Saving..." : "Save changes"}
-      </button>
-    </form>
-  );
-}
-```
-
----
-
-### 3. Optimistic mutations with React Query
-
-Show the result immediately, roll back on error — without manual state management.
-
-```tsx
-// hooks/use-toggle-like.ts
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-
-interface Post {
-  id: string;
-  likeCount: number;
-  likedByUser: boolean;
-}
-
-export function useToggleLike(postId: string) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async () => {
-      const res = await fetch(`/api/posts/${postId}/like`, { method: "POST" });
-      if (!res.ok) throw new Error("Failed to toggle like");
+  // Step 2: fetch orders — only runs after userId is available
+  const ordersQuery = useQuery({
+    queryKey: ["orders", userQuery.data?.id],
+    queryFn: async () => {
+      const res = await fetch(`/api/users/${userQuery.data!.id}/orders`);
+      if (!res.ok) throw new Error("Failed to fetch orders");
       return res.json();
     },
-
-    // onMutate runs before the request — apply the optimistic update here
-    onMutate: async () => {
-      // Cancel any in-flight refetches that would overwrite the optimistic update
-      await queryClient.cancelQueries({ queryKey: ["post", postId] });
-
-      // Snapshot the current value in case we need to roll back
-      const previousPost = queryClient.getQueryData<Post>(["post", postId]);
-
-      // Apply the optimistic update to the cache
-      queryClient.setQueryData<Post>(["post", postId], (old) => {
-        if (!old) return old;
-        return {
-          ...old,
-          likedByUser: !old.likedByUser,
-          likeCount: old.likedByUser ? old.likeCount - 1 : old.likeCount + 1,
-        };
-      });
-
-      // Return snapshot so onError can roll back
-      return { previousPost };
-    },
-
-    // onError: restore the previous value from the snapshot
-    onError: (_error, _variables, context) => {
-      if (context?.previousPost) {
-        queryClient.setQueryData(["post", postId], context.previousPost);
-      }
-    },
-
-    // onSettled: always refetch to ensure server and client are in sync
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["post", postId] });
-    },
+    enabled: !!userQuery.data?.id, // prevents the query from running prematurely
   });
+
+  return {
+    user: userQuery.data,
+    orders: ordersQuery.data,
+    isLoading: userQuery.isLoading || ordersQuery.isLoading,
+    isError: userQuery.isError || ordersQuery.isError,
+  };
 }
 ```
+
+<Callout type="info">
+  Dependent queries are a sequential waterfall. If possible, pass the required
+  value from a Server Component layout (which can `await Promise.all(...)` on
+  the server), so both queries can run in parallel on the client.
+</Callout>
 
 ---
 
-### 4. SWR — the same patterns with a lighter API
+### Prefetching + SSR Hydration
 
-SWR is a leaner alternative. Same stale-while-revalidate model, simpler configuration surface.
+This pattern pre-populates the TanStack Query cache on the server so the page renders with data on initial load — no loading spinners:
 
 ```tsx
-// hooks/use-dashboard-stats.ts
-import useSWR from "swr";
+// app/products/page.tsx — Server Component prefetches into QueryClient
+import {
+  dehydrate,
+  HydrationBoundary,
+  QueryClient,
+} from "@tanstack/react-query";
+import { ProductList } from "@/components/ProductList";
 
-interface DashboardStats {
-  totalUsers: number;
-  activeToday: number;
-  revenue: number;
+async function fetchProducts(category: string) {
+  const res = await fetch(
+    `${process.env.API_URL}/products?category=${category}`,
+    { next: { revalidate: 60 } },
+  );
+  if (!res.ok) throw new Error("Failed to fetch products");
+  return res.json();
 }
 
-// SWR uses a fetcher function — define it once and reuse
-const fetcher = (url: string) =>
-  fetch(url).then((res) => {
-    if (!res.ok) throw new Error(`Request failed: ${res.status}`);
-    return res.json();
+export default async function ProductsPage({
+  searchParams,
+}: {
+  searchParams: { category?: string };
+}) {
+  const category = searchParams.category ?? "all";
+  const queryClient = new QueryClient();
+
+  // Pre-populate the cache on the server — same queryKey the client component uses
+  await queryClient.prefetchQuery({
+    queryKey: ["products", category],
+    queryFn: () => fetchProducts(category),
   });
 
-export function useDashboardStats() {
-  return useSWR<DashboardStats>("/api/dashboard/stats", fetcher, {
-    // Refresh every 30 seconds — dashboard stats should be near-real-time
-    refreshInterval: 30_000,
-    // Keep showing stale data while revalidating — no loading spinner on refresh
-    keepPreviousData: true,
-  });
+  // dehydrate: serialize the populated cache to JSON
+  // HydrationBoundary: delivers the serialized cache to the client
+  // On the client, TanStack Query rehydrates — cache is already populated
+  return (
+    <HydrationBoundary state={dehydrate(queryClient)}>
+      <ProductList category={category} />
+    </HydrationBoundary>
+  );
 }
 ```
 
 ```tsx
-// components/stats-panel.tsx
+// components/ProductList.tsx
 "use client";
 
-import { useDashboardStats } from "@/hooks/use-dashboard-stats";
+import { useQuery } from "@tanstack/react-query";
 
-export function StatsPanel() {
-  const { data, error, isLoading } = useDashboardStats();
+type Product = { id: string; name: string; price: number };
 
-  if (isLoading)
-    return <p className="text-muted-foreground">Loading stats...</p>;
-  if (error) return <p className="text-destructive">Failed to load stats.</p>;
+export function ProductList({ category }: { category: string }) {
+  const { data: products, isLoading } = useQuery({
+    queryKey: ["products", category],
+    queryFn: async () => {
+      const res = await fetch(`/api/products?category=${category}`);
+      if (!res.ok) throw new Error("Failed to fetch products");
+      return res.json() as Promise<Product[]>;
+    },
+    staleTime: 60 * 1000,
+  });
+
+  // Initial load: cache already populated from server prefetch — no loading state shown
+  // After staleTime: background refetch runs silently
+  if (isLoading) return <div>Loading…</div>;
 
   return (
-    <dl className="grid grid-cols-3 gap-4">
-      <div>
-        <dt className="text-sm text-muted-foreground">Total Users</dt>
-        <dd className="text-2xl font-bold">
-          {data.totalUsers.toLocaleString()}
-        </dd>
-      </div>
-      <div>
-        <dt className="text-sm text-muted-foreground">Active Today</dt>
-        <dd className="text-2xl font-bold">
-          {data.activeToday.toLocaleString()}
-        </dd>
-      </div>
-      <div>
-        <dt className="text-sm text-muted-foreground">Revenue</dt>
-        <dd className="text-2xl font-bold">${data.revenue.toLocaleString()}</dd>
-      </div>
-    </dl>
+    <ul>
+      {products?.map((p) => (
+        <li key={p.id}>
+          {p.name} — ${p.price}
+        </li>
+      ))}
+    </ul>
   );
 }
 ```
 
 ---
 
-### 5. When to use Server Components instead
-
-React Query and SWR solve client-side caching. But if the data is only needed for the initial render and doesn't change based on user interaction, a Server Component with a direct `fetch` is simpler and ships zero JavaScript for the data layer.
+### Mutations with Cache Invalidation
 
 ```tsx
-// app/dashboard/page.tsx — Server Component
-// No React Query, no SWR, no loading state, no client JS for fetching
-import { getUser, getDashboardStats } from "@/lib/db";
+// hooks/use-create-product.ts
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 
-export default async function DashboardPage() {
-  // Parallel fetches — both run simultaneously, not sequentially
-  const [user, stats] = await Promise.all([getUser(), getDashboardStats()]);
+export function useCreateProduct() {
+  const queryClient = useQueryClient();
 
-  return (
-    <main>
-      <h1>Welcome back, {user.name}</h1>
-      <dl>
-        <dt>Total Users</dt>
-        <dd>{stats.totalUsers.toLocaleString()}</dd>
-      </dl>
-    </main>
+  return useMutation({
+    mutationFn: async (payload: {
+      name: string;
+      price: number;
+      category: string;
+    }) => {
+      const res = await fetch("/api/products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error("Failed to create product");
+      return res.json();
+    },
+    onSuccess: (newProduct) => {
+      // Invalidate all product list queries — they'll refetch on next render
+      queryClient.invalidateQueries({ queryKey: ["products"] });
+
+      // Pre-populate the individual product entry — no extra request needed
+      queryClient.setQueryData(["product", newProduct.id], newProduct);
+    },
+  });
+}
+```
+
+---
+
+### SWR — Leaner Alternative
+
+```tsx
+// npm install swr
+
+import useSWR from "swr";
+import useSWRMutation from "swr/mutation";
+
+const fetcher = (url: string) =>
+  fetch(url).then((r) => {
+    if (!r.ok) throw new Error("Request failed");
+    return r.json();
+  });
+
+// Basic query — equivalent to useQuery with string key
+export function useProduct(id: string) {
+  const { data, error, isLoading } = useSWR(
+    id ? `/api/products/${id}` : null, // null disables (like enabled: false)
+    fetcher,
+    {
+      revalidateOnFocus: true,
+      dedupingInterval: 60_000, // SWR equivalent of staleTime
+      keepPreviousData: true, // show previous data while new data loads
+    },
+  );
+  return { product: data, isLoading, isError: !!error };
+}
+
+// Mutation
+export function useUpdateProduct(id: string) {
+  return useSWRMutation(
+    `/api/products/${id}`,
+    async (
+      url: string,
+      { arg }: { arg: { name?: string; price?: number } },
+    ) => {
+      const res = await fetch(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(arg),
+      });
+      if (!res.ok) throw new Error("Update failed");
+      return res.json();
+    },
   );
 }
 ```
 
-```tsx
-// app/dashboard/page.tsx — hybrid: static shell from server, live data on client
-import { StatsPanel } from "@/components/stats-panel"; // client, uses SWR
-import { getUser } from "@/lib/db";
-
-export default async function DashboardPage() {
-  // User identity fetched on the server — no client JS needed for this
-  const user = await getUser();
-
-  return (
-    <main>
-      <h1>Welcome back, {user.name}</h1>
-      {/* StatsPanel polls every 30s — genuinely needs client-side fetching */}
-      <StatsPanel />
-    </main>
-  );
-}
-```
-
-The decision rule: if data changes while the user is on the page and the UI needs to reflect that without a full navigation, use React Query or SWR. If the data is fetched once for the initial render and doesn't change, use a Server Component.
+**TanStack Query vs SWR:** TanStack Query is the better default for complex applications — richer mutation lifecycle (`onMutate`/`onError`/`onSettled` for optimistic updates), `useQueries` for parallel queries, `prefetchQuery` + `dehydrate/hydrate` for SSR, infinite scroll, surgical `setQueryData` cache updates. SWR is lighter-weight and sufficient for simpler fetch-and-cache use cases where bundle size matters.
 
 ---
 
 ## Real-World Use Case
 
-A SaaS dashboard has three panels: an account summary (changes rarely), a live activity feed (updates every 10 seconds), and a notification count in the nav (updates whenever a notification arrives).
-
-**Account summary** — fetched in a Server Component. Rendered at request time with fresh data. No client-side cache needed — the page navigation itself is the refresh mechanism.
-
-**Activity feed** — `useQuery` with `refetchInterval: 10_000`. Cached so switching between tabs doesn't cause flicker. Background revalidation means the user always sees recent data without a loading spinner.
-
-**Notification count** — SWR with a short `refreshInterval` and `keepPreviousData`. The badge updates silently in the background. If the user opens the notifications panel (a mutation that marks them as read), `mutate()` invalidates the count immediately without waiting for the next poll.
-
-Three different fetching strategies, chosen based on how often data changes and whether the user needs to interact with it.
+**Notification feed with SSR and real-time updates.** The notification page is server-rendered — `prefetchQuery` on the server pre-populates the TanStack Query cache with the first page of notifications. On the client: no loading spinner, instant display. `refetchInterval: 30_000` polls for new notifications silently in the background. When the user marks all as read, `onSuccess` invalidates both `['notifications']` and the `['notification-count']` queries — the badge in the header and the list both update with fresh data. No global store. No `useEffect`. No manual loading state management.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Creating `QueryClient` outside a component**
+**1. Creating `QueryClient` at module level.** In SSR, a module-level client is shared across all requests — one user's data leaks into another's. Always create inside `useState`.
 
-```ts
-// ❌ Shared across all server-side requests — data leaks between users
-const queryClient = new QueryClient();
+**2. Unstable cache keys.** Inline objects create a new reference every render and trigger infinite refetch loops. Use primitives: `["user", userId]`, not `["user", { id: userId }]`.
 
-// ✅ Created per-render inside useState
-const [queryClient] = useState(() => new QueryClient());
-```
+**3. `staleTime: 0` (the default) causing excessive refetches.** Every component mount triggers a background refetch. Set a meaningful `staleTime` for data that doesn't change by the second — this is the single biggest performance win for most TanStack Query setups.
 
-In a Next.js App Router app with server rendering, a module-level `QueryClient` is shared across every request on the server. One user's cached data leaks into another user's response.
+**4. Invalidating too broadly.** `queryClient.invalidateQueries()` with no key invalidates everything — all visible components refetch simultaneously, creating a waterfall of spinners. Always specify the exact keys the mutation affects.
 
-**2. Using objects or arrays as cache keys without stabilizing them**
-
-```ts
-// ❌ New array reference every render — triggers an infinite refetch loop
-useQuery({ queryKey: ["user", { id: userId, role }] });
-
-// ✅ Primitive values in the key array are compared by value, not reference
-useQuery({ queryKey: ["user", userId, role] });
-```
-
-React Query deep-compares cache keys, so nested objects work — but only if you're not recreating them inside the render. If the key object is built inline, move it outside the component or memoize it.
-
-**3. Treating `staleTime: 0` (the default) as acceptable**
-
-The default `staleTime` in React Query is `0` — every query is immediately stale after resolving, meaning every mount triggers a background refetch. This is safe but noisy. For data that doesn't change by the second, set a meaningful `staleTime` (60 seconds, 5 minutes) to avoid hammering your API.
-
-**4. Forgetting `enabled: false` for conditional queries**
-
-```ts
-// ❌ Fires a request with `userId = undefined` on first render
-useQuery({ queryKey: ["user", userId], queryFn: () => fetchUser(userId) });
-
-// ✅ Waits until userId is defined before fetching
-useQuery({
-  queryKey: ["user", userId],
-  queryFn: () => fetchUser(userId!),
-  enabled: !!userId,
-});
-```
-
-**5. Invalidating too broadly after mutations**
-
-```ts
-// ❌ Invalidates everything in the cache — nukes unrelated queries
-queryClient.invalidateQueries();
-
-// ✅ Invalidate only what the mutation actually affects
-queryClient.invalidateQueries({ queryKey: ["user", userId] });
-queryClient.invalidateQueries({ queryKey: ["users"] }); // only if a list exists
-```
-
-Broad invalidation causes every visible component to refetch simultaneously, creating a waterfall of requests and a flash of loading states across the page.
+**5. Forgetting `enabled: false` guards.** A queryFn that uses `!` to assert a non-null value (`userId!`) will throw if `enabled` doesn't properly guard. Always pair `enabled: !!value` with non-null assertions in the queryFn.
 
 ---
 
 ## Summary
 
-Client-side data fetching libraries — React Query and SWR — are client-side cache managers, not just fetch wrappers. Their core value is deduplication (one network request for many components), background revalidation (stale data shown immediately, fresh data applied silently), and cache invalidation on mutation. Cache keys are the identity of a request — they must be deterministic, specific, and stable across renders. Use `staleTime` to control how long data is considered fresh and avoid unnecessary background refetches. For data that only shapes the initial render, skip the client cache entirely and fetch directly in a Server Component. The right pattern is always the simplest one that matches how often the data changes and whether the user needs to interact with it.
+TanStack Query and SWR are client-side cache managers — not fetch wrappers. Their core value is deduplication (one network request for many components), background revalidation (stale data shown immediately, fresh data applied silently), and cache invalidation on mutation. Cache keys are the identity of a request — deterministic, specific, primitive values. `staleTime` controls the fresh window; `gcTime` controls memory retention after unmount. `prefetchQuery` + `dehydrate/hydrate` delivers server-rendered pages with a pre-populated client cache — no initial loading spinners. Use parallel `useQueries` for independent data; `enabled` for dependent queries. For static data that only shapes the initial render, skip the client cache and fetch in a Server Component.
+
+---
+
+## Interview Questions
+
+**Q1. What is deduplication in TanStack Query and how does it work mechanically?**
+
+When multiple components call `useQuery` with the same cache key simultaneously, TanStack Query fires exactly one network request and delivers the result to all subscribers. Mechanically: each `useQuery` call creates a `QueryObserver` that subscribes to a `Query` object in the `QueryCache`. The `Query` object tracks whether a fetch is already in-flight — if it is, new observers wait for the existing Promise rather than starting new requests. The result: a page with 10 components needing the current user's data makes one request, not 10. This is the primary reason to prefer TanStack Query over raw `useEffect` + `fetch` — deduplication requires no coordination from the developer.
+
+**Q2. What is the difference between `staleTime` and `gcTime` in TanStack Query?**
+
+`staleTime` is about freshness — how long after a successful fetch the data is considered current. During this window, component mounts and window focus events don't trigger background refetches. After it expires, the data is "stale" — still shown immediately (no loading spinner), but a background refetch starts. `gcTime` (formerly `cacheTime`) is about memory — how long unused data stays in the cache after its last subscriber unmounts. A component that unmounts keeps its cache entry for `gcTime` so that remounting shows the value instantly before refetching. The defaults are `staleTime: 0` (always stale) and `gcTime: 5 minutes`. Setting a meaningful `staleTime` is the most impactful TanStack Query optimization for most apps.
+
+**Q3. How does the `prefetchQuery` + `dehydrate` + `HydrationBoundary` SSR pattern work?**
+
+On the server: a fresh `QueryClient` is created, `prefetchQuery` is called with the same cache key the client will use — this populates the server-side cache with awaited data. `dehydrate(queryClient)` serializes the populated cache to a JSON-safe object. `HydrationBoundary` embeds this serialized state in the rendered HTML. On the client: when TanStack Query initializes, `HydrationBoundary` reads the serialized state and populates the client-side cache before any component renders. When a Client Component calls `useQuery` with the matching key, the cache is already populated — no loading state, no initial network request. After `staleTime` expires, a background refetch runs silently.
+
+**Q4. Why are dependent queries a performance problem and how can you avoid the waterfall?**
+
+Dependent queries run sequentially: request B can't start until request A resolves. With network latency of 100ms each, two dependent queries take 200ms minimum. The pattern is unavoidable when B genuinely requires A's response data (e.g., you don't know the user's ID until you fetch `/api/me`). Avoidance strategies: if the required value is available higher in the component tree, pass it as a prop down to the component making both queries — enabling both to run in parallel. In Next.js App Router, a Server Component layout can `await Promise.all([fetchUser(), fetchOrders(userId)])` in parallel on the server and pass both as props to Client Components, eliminating the client-side waterfall entirely.
+
+**Q5. When should you use TanStack Query over SWR and vice versa?**
+
+TanStack Query is the better default for complex applications: richer mutation lifecycle (`onMutate` for optimistic updates, `onError` for rollback, `onSettled` for cleanup), `useQueries` for typed parallel queries, `prefetchQuery` + `dehydrate/hydrate` for SSR, infinite scroll queries, fine-grained `setQueryData` for surgical cache updates, and a larger ecosystem. SWR is lighter-weight and more opinionated — it's sufficient for simpler fetch-and-cache scenarios where bundle size matters and optimistic mutations aren't needed. Both implement the same core patterns (deduplication, stale-while-revalidate, cache invalidation). Choose SWR for lean, read-heavy apps; TanStack Query for apps with complex mutation workflows, SSR requirements, or advanced caching needs.
+
+**Q6. Why is a module-level `QueryClient` dangerous in Next.js App Router SSR?**
+
+JavaScript modules are cached at the process level in Node.js. A `QueryClient` created at module level is a singleton shared across all HTTP requests to the server. When User A's request populates the cache with their private profile data, and User B's request arrives before the cache entry expires, User B's render reads User A's data from the shared cache — a data privacy violation. The fix: create the `QueryClient` inside `useState(() => new QueryClient())` in the provider component. Each React render tree gets its own fresh client instance. In App Router, each request renders a new tree — so each request gets a fresh `QueryClient` with no shared state between users.

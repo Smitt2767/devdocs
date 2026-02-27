@@ -1,178 +1,389 @@
 ---
 title: Suspense Boundaries
-description: How React Suspense boundaries let you declaratively handle async loading states and coordinate rendering with Server Components and streaming SSR.
+description: How React Suspense boundaries declaratively handle async loading states, how they coordinate with streaming SSR, the use() hook for Client Components, and how to prevent fetch waterfalls with parallel Suspense trees.
 ---
 
 ## Overview
 
-A Suspense boundary is a React component that catches its subtree while it's "not ready yet" and renders a fallback in its place. When the suspended content finishes loading — whether that's a lazy-loaded component, an async Server Component, or a data fetch — React swaps the fallback out for the real UI.
+A Suspense boundary catches its subtree while it's "not ready yet" and renders a fallback in its place. When the suspended content resolves — whether that's a lazy-loaded component, an async Server Component, or a deferred promise — React swaps the fallback for the real UI.
 
-This gives you a declarative way to handle loading states without a maze of `isLoading` booleans scattered across your components.
+The power of Suspense is what it eliminates: `isLoading` booleans, ternary spinners, conditional rendering scattered across a component. The boundary is the single, declarative contract: wrap async content, provide a fallback, let React handle the rest.
 
-```tsx
-<Suspense fallback={<ProductSkeleton />}>
-  <ProductDetails id={productId} />
-</Suspense>
-```
-
-That's the entire contract: wrap anything async, provide a fallback, let React handle the rest.
+In Next.js App Router, Suspense is the primary mechanism for streaming — each boundary is an independent flush point in the HTML stream. The browser receives content progressively as each boundary resolves, rather than waiting for the slowest data fetch to complete.
 
 ---
 
 ## How It Works
 
-When React tries to render a component inside a `<Suspense>` boundary and that component **throws a Promise** (this is what "suspending" means under the hood), React pauses rendering that subtree and renders the `fallback` instead. Once the Promise resolves, React retries rendering the subtree from the boundary downward.
+### The Suspense Mechanism
 
-In the App Router, async Server Components suspend automatically — you don't throw Promises manually. React's runtime handles the coordination between the server stream and the client.
+When React renders a component inside a `<Suspense>` boundary and that component **throws a Promise** — this is what "suspending" means at the mechanism level — React pauses rendering that subtree, renders the `fallback`, and retries the subtree when the Promise resolves.
 
-Think of it like a loading dock: the Suspense boundary is the dock, your async component is a shipment in transit, and the fallback is a "delivery pending" sign. When the shipment arrives, the sign comes down and the real content appears.
-
-**Streaming SSR** makes this even more powerful. Rather than waiting for all data to be ready before sending any HTML, Next.js streams HTML chunks to the browser progressively. Each Suspense boundary becomes an independent "slot" that fills in as its data resolves.
+In the App Router, async Server Components suspend automatically. React's runtime coordinates the server stream and client. You don't throw Promises manually — the framework handles it.
 
 ```
-Initial HTML:  <shell> + <fallback placeholders>
-Stream chunk:  <ProductDetails /> resolves → replaces its placeholder
-Stream chunk:  <Reviews /> resolves → replaces its placeholder
+React encounters an async Server Component:
+  ├── Component suspends (throws a Promise internally)
+  ├── React renders the nearest <Suspense> fallback immediately
+  ├── The async work continues on the server
+  ├── When it resolves, React streams the real content as a new chunk
+  └── The browser swaps the fallback for the real UI
 ```
+
+**Streaming SSR** — instead of waiting for all data before sending any HTML, Next.js sends the page shell immediately with Suspense fallbacks as placeholders. Each boundary fills in as its data resolves:
+
+```
+t=0ms:   Page shell + all Suspense fallbacks sent as HTML
+t=80ms:  UserGreeting resolves → streamed to browser → placeholder replaced
+t=320ms: RevenueChart resolves → streamed to browser → placeholder replaced
+t=700ms: RecentOrders resolves → streamed to browser → placeholder replaced
+```
+
+The user sees content progressively rather than a blank page followed by a sudden full render.
+
+### Suspense Does Not Catch Errors
+
+`<Suspense>` only handles the "loading" state — a suspended Promise. If the async component throws an **Error** (not a Promise), it propagates to the nearest **Error Boundary**, not the Suspense boundary. Always pair Suspense with error handling.
 
 ---
 
 ## Code Examples
 
-### Basic async Server Component with Suspense
+### Granular Boundaries for Parallel Streaming
 
 ```tsx
-// app/products/[id]/page.tsx
-
+// app/dashboard/page.tsx — Server Component
 import { Suspense } from "react";
-import { ProductDetails } from "@/components/product-details";
-import { Reviews } from "@/components/reviews";
-import { ProductSkeleton, ReviewsSkeleton } from "@/components/skeletons";
-
-interface Props {
-  params: { id: string };
-}
-
-export default function ProductPage({ params }: Props) {
-  return (
-    <main className="max-w-3xl mx-auto py-10">
-      {/* Each boundary suspends independently — they load in parallel */}
-      <Suspense fallback={<ProductSkeleton />}>
-        <ProductDetails id={params.id} />
-      </Suspense>
-
-      <Suspense fallback={<ReviewsSkeleton />}>
-        <Reviews productId={params.id} />
-      </Suspense>
-    </main>
-  );
-}
-```
-
-```tsx
-// components/product-details.tsx
-// This is a Server Component — no 'use client' directive
-
-interface Props {
-  id: string;
-}
-
-async function fetchProduct(id: string) {
-  const res = await fetch(`https://api.example.com/products/${id}`, {
-    next: { revalidate: 60 }, // ISR: revalidate every 60 seconds
-  });
-  if (!res.ok) throw new Error("Product not found");
-  return res.json();
-}
-
-export async function ProductDetails({ id }: Props) {
-  const product = await fetchProduct(id); // suspends while fetching
-
-  return (
-    <section>
-      <h1 className="text-2xl font-bold">{product.name}</h1>
-      <p className="text-gray-600">{product.description}</p>
-      <span className="text-lg font-semibold">${product.price}</span>
-    </section>
-  );
-}
-```
-
-### Nested Suspense boundaries
-
-```tsx
-// app/dashboard/page.tsx
-// Outer boundary covers the whole dashboard shell.
-// Inner boundary isolates a slow widget so it doesn't block the rest.
-
-import { Suspense } from "react";
-import { DashboardShell } from "@/components/dashboard-shell";
-import { RevenueChart } from "@/components/revenue-chart";
-import { SlowAnalyticsWidget } from "@/components/slow-analytics-widget";
+import { UserGreeting } from "@/components/user-greeting"; // ~80ms DB query
+import { RevenueChart } from "@/components/revenue-chart"; // ~320ms DB query
+import { RecentOrders } from "@/components/recent-orders"; // ~700ms DB query
+import { ChartSkeleton, TableSkeleton } from "@/components/skeletons";
 
 export default function DashboardPage() {
   return (
-    <Suspense fallback={<p>Loading dashboard…</p>}>
-      <DashboardShell>
-        <RevenueChart />
+    <div className="dashboard">
+      {/*
+        Each boundary is independent — they resolve in parallel on the server.
+        The client sees each section as it becomes ready, not all at once.
+      */}
+      <Suspense fallback={<p className="text-muted-foreground">Loading…</p>}>
+        {/* Fast — appears almost immediately */}
+        <UserGreeting />
+      </Suspense>
 
-        {/* This widget is slow — isolate it so the rest of the dashboard renders first */}
-        <Suspense
-          fallback={<div className="h-32 animate-pulse bg-gray-100 rounded" />}
-        >
-          <SlowAnalyticsWidget />
+      <div className="grid grid-cols-2 gap-6 mt-8">
+        <Suspense fallback={<ChartSkeleton />}>
+          {/* Medium — 320ms */}
+          <RevenueChart />
         </Suspense>
-      </DashboardShell>
-    </Suspense>
+
+        <Suspense fallback={<TableSkeleton />}>
+          {/* Slow — 700ms, but doesn't block the chart */}
+          <RecentOrders />
+        </Suspense>
+      </div>
+    </div>
+  );
+}
+```
+
+```tsx
+// components/revenue-chart.tsx — async Server Component
+import { db } from "@/lib/db";
+import { LineChart } from "@/components/ui/line-chart";
+
+export async function RevenueChart() {
+  // This component suspends while the query runs.
+  // React renders ChartSkeleton until this resolves.
+  const result = await db.query(`
+    SELECT date_trunc('week', created_at) as week, sum(amount_cents) as revenue
+    FROM orders
+    WHERE created_at > now() - interval '90 days'
+    GROUP BY week
+    ORDER BY week
+  `);
+
+  return <LineChart data={result.rows} xKey="week" yKey="revenue" />;
+}
+```
+
+---
+
+### `loading.tsx` — Segment-Level Shorthand
+
+```tsx
+// app/dashboard/loading.tsx
+// Automatically wraps app/dashboard/page.tsx in a Suspense boundary.
+// Equivalent to: <Suspense fallback={<DashboardLoading />}><Page /></Suspense>
+
+export default function DashboardLoading() {
+  return (
+    <div className="dashboard animate-pulse">
+      <div className="h-6 w-48 rounded bg-muted" />
+      <div className="grid grid-cols-2 gap-6 mt-8">
+        <div className="h-64 rounded-xl bg-muted" />
+        <div className="h-64 rounded-xl bg-muted" />
+      </div>
+    </div>
   );
 }
 ```
 
 <Callout type="info">
-  Placing each independently slow component in its own `<Suspense>` boundary lets them resolve in parallel rather than sequentially. This is one of the biggest performance wins with the App Router.
+  `loading.tsx` covers the entire route segment with one boundary. For independent sections that should stream at different times, use explicit `<Suspense>` boundaries inside the page — they are more granular and stream in parallel rather than waiting for the slowest component.
 </Callout>
 
-### Combining Suspense with `use()` in Client Components
+---
+
+### Preventing Fetch Waterfalls
+
+A waterfall happens when data fetches are sequentially dependent across component boundaries. Suspense makes this easy to create accidentally:
 
 ```tsx
-// components/user-profile.tsx
-"use client";
+// ❌ Waterfall — UserProfile suspends, then ProductList suspends
+// Total time = UserProfile time + ProductList time (sequential)
+function Page() {
+  return (
+    <Suspense fallback={<UserSkeleton />}>
+      <UserProfile>
+        {" "}
+        {/* suspends, fetches user (300ms) */}
+        <Suspense fallback={<ListSkeleton />}>
+          <ProductList /> {/* only starts after UserProfile resolves */}
+        </Suspense>
+      </UserProfile>
+    </Suspense>
+  );
+}
+```
 
-import { use, Suspense } from "react";
+```tsx
+// ✅ Parallel — UserProfile and ProductList fetch simultaneously
+function Page() {
+  return (
+    <>
+      <Suspense fallback={<UserSkeleton />}>
+        <UserProfile /> {/* starts immediately */}
+      </Suspense>
 
-// A promise created outside the component (e.g. passed as a prop from a Server Component)
-function UserCard({
-  userPromise,
-}: {
-  userPromise: Promise<{ name: string; avatar: string }>;
-}) {
-  const user = use(userPromise); // suspends this client component while the promise resolves
+      <Suspense fallback={<ListSkeleton />}>
+        <ProductList /> {/* also starts immediately — not nested */}
+      </Suspense>
+    </>
+  );
+}
+```
+
+For cases where children genuinely need parent data, pass the data as a prop (fetch it in the parent Server Component with `Promise.all`):
+
+```tsx
+// Fetch both at the page level in parallel, then pass down
+async function Page({ params }: Props) {
+  const { slug } = await params;
+
+  // Both fetches in-flight simultaneously
+  const [product, relatedIds] = await Promise.all([
+    fetchProduct(slug),
+    fetchRelatedIds(slug),
+  ]);
 
   return (
-    <div className="flex items-center gap-3">
-      <img
-        src={user.avatar}
-        alt={user.name}
-        className="w-10 h-10 rounded-full"
-      />
-      <span>{user.name}</span>
+    <>
+      <ProductDetails product={product} />
+      <Suspense fallback={<RelatedSkeleton />}>
+        {/* relatedIds prop means RelatedProducts doesn't need to fetch product first */}
+        <RelatedProducts ids={relatedIds} />
+      </Suspense>
+    </>
+  );
+}
+```
+
+---
+
+### `use()` Hook — Suspense in Client Components
+
+The `use()` hook lets Client Components suspend on a Promise. Unlike `async/await`, `use()` can be called inside regular functions, conditionals, and loops (within limits):
+
+```tsx
+// app/products/[slug]/page.tsx — Server Component
+import { Suspense } from "react";
+import { UserReviews } from "@/components/user-reviews";
+import { ReviewsSkeleton } from "@/components/skeletons";
+
+export default async function ProductPage({ params }: Props) {
+  const { slug } = await params;
+
+  // Start the reviews fetch and pass the Promise — don't await here.
+  // The Client Component will suspend on it.
+  const reviewsPromise = fetch(`/api/products/${slug}/reviews`).then((r) =>
+    r.json(),
+  );
+
+  return (
+    <Suspense fallback={<ReviewsSkeleton />}>
+      {/* Pass the Promise as a prop — Client Component suspends on it */}
+      <UserReviews reviewsPromise={reviewsPromise} />
+    </Suspense>
+  );
+}
+```
+
+```tsx
+// components/user-reviews.tsx
+"use client";
+
+import { use } from "react";
+
+interface Review {
+  id: string;
+  author: string;
+  rating: number;
+  body: string;
+}
+
+interface Props {
+  reviewsPromise: Promise<Review[]>;
+}
+
+export function UserReviews({ reviewsPromise }: Props) {
+  /*
+    use() suspends this component until reviewsPromise resolves.
+    The nearest <Suspense> boundary (ReviewsSkeleton) shows while suspended.
+    Unlike useEffect, no loading state is needed — Suspense handles it.
+  */
+  const reviews = use(reviewsPromise);
+
+  return (
+    <section>
+      <h2 className="text-xl font-semibold mb-4">Customer Reviews</h2>
+      {reviews.map((review) => (
+        <div key={review.id} className="border-b border-border py-4">
+          <div className="flex items-center gap-2">
+            <span className="font-medium">{review.author}</span>
+            <span className="text-muted-foreground">
+              {"★".repeat(review.rating)}
+            </span>
+          </div>
+          <p className="mt-2 text-sm">{review.body}</p>
+        </div>
+      ))}
+    </section>
+  );
+}
+```
+
+<Callout type="warn">
+  Never create a `new Promise()` inline inside the render function and pass it
+  to `use()`. A new Promise is created on every render attempt — React retries
+  the render when the Promise resolves, creating another new Promise, causing an
+  infinite suspend loop. Promises must be created outside the render function
+  (in a Server Component before passing as props, or in a stable reference like
+  a module-level cache).
+</Callout>
+
+---
+
+### Coordinating Suspense with `useTransition`
+
+`startTransition` prevents a Suspense boundary from reverting to its fallback during updates — useful for tab switches, pagination, and filter changes where you want to show the old content until the new content is ready:
+
+```tsx
+// components/product-tabs.tsx
+"use client";
+
+import { useState, useTransition, Suspense } from "react";
+import { ProductList } from "./product-list";
+import { ProductSkeleton } from "./skeletons";
+
+const categories = ["Electronics", "Clothing", "Books", "Home"];
+
+export function ProductTabs() {
+  const [activeCategory, setActiveCategory] = useState("Electronics");
+  const [isPending, startTransition] = useTransition();
+
+  function handleCategoryChange(category: string) {
+    startTransition(() => {
+      // The transition marks this state update as non-urgent.
+      // If ProductList suspends, the current content stays visible
+      // (not replaced by the skeleton) until the new content is ready.
+      // isPending is true during the transition — use it for visual feedback.
+      setActiveCategory(category);
+    });
+  }
+
+  return (
+    <div>
+      <div role="tablist" className="flex gap-2 mb-6">
+        {categories.map((cat) => (
+          <button
+            key={cat}
+            role="tab"
+            aria-selected={activeCategory === cat}
+            onClick={() => handleCategoryChange(cat)}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+              activeCategory === cat
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted hover:bg-muted/80"
+            }`}
+          >
+            {cat}
+          </button>
+        ))}
+      </div>
+
+      {/*
+        Without startTransition: switching tabs shows the skeleton immediately,
+        causing a jarring layout shift while the new content loads.
+        With startTransition: old content stays visible (slightly dimmed via
+        isPending) until the new content is ready — much smoother.
+      */}
+      <div
+        style={{ opacity: isPending ? 0.6 : 1, transition: "opacity 150ms" }}
+      >
+        <Suspense fallback={<ProductSkeleton />}>
+          <ProductList category={activeCategory} />
+        </Suspense>
+      </div>
     </div>
   );
 }
+```
 
-export function UserProfileSection({
-  userPromise,
-}: {
-  userPromise: Promise<any>;
-}) {
+---
+
+### Pairing Suspense with Error Boundaries
+
+```tsx
+// app/products/[slug]/page.tsx
+import { Suspense } from "react";
+import { ErrorBoundary } from "@/components/error-boundary"; // Client Component
+import { Reviews } from "@/components/reviews"; // Server Component
+import { ReviewsSkeleton } from "@/components/skeletons";
+
+export default function ProductPage({ params }: { params: { slug: string } }) {
   return (
-    <Suspense
-      fallback={
-        <div className="w-10 h-10 rounded-full bg-gray-200 animate-pulse" />
-      }
-    >
-      <UserCard userPromise={userPromise} />
-    </Suspense>
+    <main>
+      {/* ... other product content ... */}
+
+      {/*
+        Error boundary wraps the Suspense boundary.
+        If Reviews throws an Error: ErrorBoundary catches it → shows fallback.
+        If Reviews suspends (Promise): Suspense catches it → shows skeleton.
+        The two boundaries handle distinct failure modes.
+      */}
+      <ErrorBoundary
+        fallback={
+          <p className="text-muted-foreground">
+            Reviews unavailable right now.
+          </p>
+        }
+      >
+        <Suspense fallback={<ReviewsSkeleton />}>
+          <Reviews productSlug={params.slug} />
+        </Suspense>
+      </ErrorBoundary>
+    </main>
   );
 }
 ```
@@ -181,89 +392,78 @@ export function UserProfileSection({
 
 ## Real-World Use Case
 
-On an e-commerce product page, you typically need data from multiple sources: product info, inventory status, user reviews, and recommended items. Each comes from a different API with different response times.
+**E-commerce product page.** The page loads data from four sources: product info (fast DB query, ~40ms), inventory status (inventory service, ~120ms), customer reviews (review service, ~450ms), and personalized recommendations (ML service, ~900ms).
 
-Without Suspense, you'd either wait for the slowest API before rendering anything (bad TTFB), or manage four separate loading states in one component (messy logic).
+Without Suspense: `Promise.all` blocks all content until recommendations resolve at 900ms. Or four separate `useEffect` calls mean four loading spinners and complex coordination logic.
 
-With Suspense boundaries, you wrap each section independently. The product title and price (fast) render immediately. Reviews (slower) stream in 300ms later. Recommendations (slowest, from an ML service) appear last — each transition handled gracefully with a skeleton, zero extra state management.
+With Suspense: each section is an independent async Server Component wrapped in its own `<Suspense>`. Product info streams at 40ms, inventory at 120ms, reviews at 450ms, recommendations at 900ms. The user starts reading product information 860ms sooner than the all-or-nothing approach. Each skeleton is purposely shaped like the content it replaces — no jarring layout shifts when content arrives.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Putting the Suspense boundary too high up the tree**
-
-Wrapping your entire page in one `<Suspense>` means the entire page shows a spinner until _every_ async component resolves. Place boundaries as close to the async component as makes sense for your UX.
+**1. One large Suspense boundary for the entire page.**
+The entire page blocks until the slowest component resolves. Wrap individual slow sections independently.
 
 ```tsx
-// ❌ One big boundary blocks everything
+// ❌ Everything blocks on SlowComponent
 <Suspense fallback={<FullPageSpinner />}>
   <FastComponent />
   <SlowComponent />
 </Suspense>
 
-// ✅ Isolated boundaries — FastComponent renders immediately
+// ✅ FastComponent renders immediately; SlowComponent streams independently
 <FastComponent />
-<Suspense fallback={<Skeleton />}>
+<Suspense fallback={<SlowSkeleton />}>
   <SlowComponent />
 </Suspense>
 ```
 
-**2. Forgetting that Suspense doesn't catch errors**
+**2. Assuming Suspense catches errors.**
+Suspense only catches suspended Promises. Thrown Errors propagate to Error Boundaries. Always pair them.
 
-`<Suspense>` only handles loading states. If your async component throws an _error_ (not a Promise), it propagates up to the nearest **Error Boundary**, not the Suspense boundary. Always pair Suspense with error handling.
+**3. Creating Promises inline in render with `use()`.**
+A new `Promise` created during render is a new reference on every render attempt. React retries after the Promise resolves, creates another new Promise, retries again — an infinite loop. Create Promises outside render (in Server Component scope or stable module-level cache).
 
-```tsx
-// Use Next.js's built-in error.tsx for route-level error boundaries
-// app/products/[id]/error.tsx
-"use client";
+**4. Nesting Suspense boundaries when sibling boundaries suffice.**
+Nested boundaries create sequential dependencies — the outer must resolve before the inner starts. Sibling boundaries resolve in parallel. Only nest when there's a genuine parent/child data dependency.
 
-export default function ProductError({
-  error,
-  reset,
-}: {
-  error: Error;
-  reset: () => void;
-}) {
-  return (
-    <div>
-      <p>Failed to load product: {error.message}</p>
-      <button onClick={reset}>Try again</button>
-    </div>
-  );
-}
-```
+**5. Using Suspense for synchronous state toggling.**
+`useState`-driven loading states don't suspend. Suspense is for async work React coordinates — async Server Components, lazy imports, `use()` with Promises. Don't add a `<Suspense>` wrapper around a component that's synchronously loading from a local state machine.
 
-<Callout type="warn">
-  Without an `error.tsx` (or a React Error Boundary), an unhandled async error
-  inside a Suspense boundary will crash the entire page, not just the suspended
-  section.
-</Callout>
-
-**3. Creating new promises inside the render function**
-
-If you pass a `new Promise(...)` created inline during render to `use()`, React will suspend forever because a new Promise is created on every render attempt.
-
-```tsx
-// ❌ New promise on every render — infinite suspend loop
-function BadComponent() {
-  const data = use(fetch("/api/data").then((r) => r.json()));
-}
-
-// ✅ Promise created outside render (in a Server Component, cache(), or stable reference)
-const dataPromise = fetch("/api/data").then((r) => r.json());
-
-function GoodComponent() {
-  const data = use(dataPromise);
-}
-```
-
-**4. Using Suspense for synchronous state loading**
-
-If you're toggling a `loading` boolean from `useState`, Suspense isn't the right tool — that's just conditional rendering. Suspense is for async work that React itself needs to coordinate (async Server Components, lazy imports, `use()` with promises).
+**6. Missing the fallback design.**
+Skeletons should match the shape of the content they replace. A mismatch between skeleton and real content causes layout shift when content arrives, harming CLS (Cumulative Layout Shift) — a Core Web Vital.
 
 ---
 
 ## Summary
 
-Suspense boundaries give you a declarative, component-level way to handle async loading states in React. In the App Router, async Server Components suspend automatically, making Suspense the primary mechanism for coordinating streaming SSR. Place boundaries close to the components that actually need them to maximize parallelism and minimize how much UI is blocked at any one time. Always pair Suspense with an Error Boundary — Suspense only handles the "waiting" state, not failures. Used well, Suspense boundaries eliminate most manual loading-state logic while dramatically improving perceived performance through streaming.
+Suspense boundaries declaratively handle async loading by rendering a fallback until content is ready. In Next.js App Router, async Server Components suspend automatically — each Suspense boundary is an independent streaming flush point in the HTML response. Place boundaries close to the components that actually suspend, not at the top of the page, to maximize parallelism and minimize blocked UI. The `use()` hook brings Suspense to Client Components — pass Promises as props from Server Components and use them with `use()` to suspend without loading state boilerplate. Pair `startTransition` with Suspense to prevent fallback flashes during user-initiated updates like tab switches. Always pair Suspense with an Error Boundary — Suspense handles loading, Error Boundaries handle failures.
+
+---
+
+## Interview Questions
+
+**Q1. What does "suspending" mean at the mechanism level?**
+
+A component suspends by throwing a Promise. React's reconciler catches the thrown Promise at the nearest `<Suspense>` boundary, renders the `fallback`, and sets up a `.then` callback on the Promise. When the Promise resolves, React re-renders the subtree from the boundary downward — retrying the component that suspended. In the App Router, async Server Components suspend automatically when they `await` async operations — the framework throws the Promise internally. In Client Components, `use(promise)` suspends by the same mechanism: it throws the Promise if it's pending, and returns the resolved value if it's settled.
+
+**Q2. How does Suspense interact with Next.js streaming SSR?**
+
+In Next.js App Router, each `<Suspense>` boundary is an independent HTML flush point. The server immediately sends the page shell with all Suspense fallbacks rendered as HTML placeholders. As each async Server Component resolves, the server streams a new HTML chunk containing the resolved content and a small inline `<script>` that tells the browser which placeholder to replace. The browser progressively updates the page without any client-side JavaScript for the server content — the script tags only handle the DOM swap. This means users see content as it becomes ready rather than waiting for the slowest data fetch.
+
+**Q3. What is the `use()` hook and how does it differ from `useEffect` for data loading?**
+
+`use(promise)` is a React hook that suspends a Client Component until a Promise resolves, returning the settled value. Unlike `useEffect`, `use()` integrates with Suspense — no `isLoading` state, no conditional renders, just the value. `useEffect` runs after render (causing a visible loading state on mount) and doesn't integrate with streaming. `use()` suspends during render (Suspense handles the loading state) and integrates with streaming. A common pattern is to start a fetch in a Server Component (without awaiting), pass the Promise as a prop to a Client Component, and use `use(promise)` there — the Client Component suspends while the Promise settles.
+
+**Q4. Why does creating a Promise inside the render function with `use()` cause an infinite suspend loop?**
+
+When React encounters a suspended component (one that threw a Promise), it retries rendering that component after the Promise resolves. If the Promise is created inside the render function, a new Promise is created on every retry. The new Promise is always pending (it was just created), so the component suspends again immediately, React retries again, a new Promise is created, and so on. Promises passed to `use()` must be stable references — created outside the render function (in Server Component scope before being passed as props, in a module-level cache, or in a stable `useRef`).
+
+**Q5. What does `startTransition` do when combined with Suspense?**
+
+Without `startTransition`, a state update that causes a Suspense boundary to suspend immediately replaces the current content with the fallback — causing a jarring regression where previously visible content disappears. `startTransition` marks a state update as non-urgent. React keeps rendering the current (old) content while processing the transition in the background. If the transition suspends a Suspense boundary, React waits until it resolves before committing the update — the user never sees the fallback for the in-progress state. The `isPending` flag from `useTransition` is true during the transition, useful for showing a subtle loading indicator (like dimming the content or showing a spinner in a button) without reverting to a skeleton.
+
+**Q6. How would you structure Suspense boundaries to avoid fetch waterfalls on a content-heavy page?**
+
+Waterfalls happen when one component suspends, and another component that could fetch independently is nested inside it — it doesn't start fetching until the parent resolves. The fix is: make independently-loading components siblings (not children) in the Suspense hierarchy, and initiate all independent fetches at the page level with `Promise.all` if needed. For components with genuine parent/child data dependencies, fetch both in the parent page component simultaneously with `Promise.all` and pass the results as props — the child receives its data without needing to fetch it independently. For components that are entirely independent, separate `<Suspense>` boundaries side by side resolve in parallel and stream independently.
