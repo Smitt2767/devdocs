@@ -1,18 +1,18 @@
 ---
 title: Monorepo Tooling
-description: A practical guide to structuring and managing monorepos using Turborepo and package manager workspaces.
+description: Structuring and scaling a monorepo with pnpm workspaces and Turborepo — the workspace:* protocol, pnpm catalogs, Turborepo task pipelines, --affected filtering, remote cache self-hosting, and the most common configuration mistakes.
 ---
 
 ## Overview
 
-A monorepo is a single repository that houses multiple related packages or applications. Instead of maintaining separate repos for your `web` app, `mobile` app, and `shared-ui` library, you keep them together — sharing code, tooling, and dependencies without publishing anything to npm.
+A monorepo is a single repository that houses multiple related packages or applications. Instead of maintaining separate repos for a `web` app, `mobile` app, and shared libraries, you keep them together — sharing code, tooling, and dependencies without publishing anything to npm.
 
-The two core tools you'll use:
+Two tools handle this cleanly:
 
-- **Workspaces** (npm, pnpm, or Yarn) — handle linking local packages together and hoisting dependencies.
-- **Turborepo** — adds an intelligent task runner on top of workspaces, with caching, parallelization, and pipeline orchestration.
+- **pnpm workspaces** — links local packages together, enforces strict dependency isolation, and prevents phantom dependencies.
+- **Turborepo** — an intelligent task runner on top of workspaces with dependency-aware ordering, input hashing, parallel execution, and a shared remote cache.
 
-Together they let large codebases scale without turning every `build` or `test` command into a 10-minute wait.
+Together they let codebases scale across teams without turning every `build` command into a 10-minute wait.
 
 ---
 
@@ -20,40 +20,47 @@ Together they let large codebases scale without turning every `build` or `test` 
 
 ### Workspaces
 
-Package managers support a `workspaces` field in the root `package.json`. When defined, the package manager scans the listed directories, symlinks each package into `node_modules`, and lets packages reference each other by name (e.g., `import { Button } from "@acme/ui"`).
+When `pnpm-workspace.yaml` lists directories, pnpm scans them, treats each `package.json` as a workspace package, and symlinks them into the root `node_modules`. Packages reference each other by name — `import { Button } from "@acme/ui"` — and pnpm resolves to the local symlink instead of npm.
 
 ```
 root/
 ├── apps/
-│   ├── web/          # Next.js app
-│   └── docs/         # Another Next.js app
+│   ├── web/           # Next.js storefront
+│   ├── admin/         # Next.js admin dashboard
+│   └── docs/          # Documentation site
 ├── packages/
-│   ├── ui/           # Shared React component library
-│   └── config/       # Shared ESLint/TS configs
-├── package.json      # Workspace root
-└── turbo.json        # Turborepo pipeline config
+│   ├── ui/            # Shared React component library
+│   ├── api-client/    # Typed fetch wrapper
+│   └── config/        # Shared ESLint / TypeScript / Tailwind configs
+├── pnpm-workspace.yaml
+├── package.json       # Repo root — scripts + devDeps
+└── turbo.json         # Turborepo pipeline
 ```
 
-### Turborepo
+### Turborepo's Task Graph
 
-Turborepo understands the dependency graph between your packages. When you run `turbo build`, it:
+Turborepo reads every `package.json` in the workspace, builds a dependency graph from the `dependencies`/`devDependencies` fields, and uses `turbo.json` to define how tasks relate to each other. When you run `turbo build`:
 
-1. Resolves which packages depend on which.
-2. Runs tasks in the correct order (e.g., build `ui` before `web`).
-3. Caches task outputs by hashing inputs (source files, env vars, lockfile). If nothing changed, it replays the cached result instantly.
-4. Runs independent tasks in parallel.
+1. Resolves the package dependency graph
+2. Runs tasks in topological order — `@acme/ui` builds before `@acme/web` depends on it
+3. Hashes all inputs (source files, env vars, lockfile, task config) per package
+4. Replays cached output instantly when the hash matches
+5. Runs independent tasks in parallel
 
-<Callout type="info">
-  Turborepo's remote cache (via Vercel or a self-hosted backend) lets your
-  entire team and CI share the same cache — so a build one developer ran locally
-  won't be re-run on another machine.
-</Callout>
+The cache key is deterministic: the same inputs always produce the same output, regardless of which machine runs the build.
 
 ---
 
 ## Code Examples
 
-### 1. Root `package.json` with pnpm Workspaces
+### Root `package.json` and `pnpm-workspace.yaml`
+
+```yaml
+# pnpm-workspace.yaml
+packages:
+  - "apps/*"
+  - "packages/*"
+```
 
 ```json
 // package.json (repo root)
@@ -64,7 +71,9 @@ Turborepo understands the dependency graph between your packages. When you run `
     "build": "turbo build",
     "dev": "turbo dev",
     "lint": "turbo lint",
-    "format": "prettier --write \"**/*.{ts,tsx,mdx}\""
+    "type-check": "turbo type-check",
+    "test": "turbo test",
+    "format": "prettier --write \"**/*.{ts,tsx,mdx,json}\""
   },
   "devDependencies": {
     "turbo": "^2.0.0",
@@ -73,21 +82,84 @@ Turborepo understands the dependency graph between your packages. When you run `
 }
 ```
 
+<Callout type="info">
+  pnpm is the recommended package manager for monorepos. Unlike npm hoisting,
+  pnpm's symlink strategy prevents phantom dependencies — packages can only
+  import what they explicitly declare in their own `package.json`.
+</Callout>
+
+---
+
+### `workspace:*` Protocol — Linking Local Packages
+
+The `workspace:*` version specifier tells pnpm to resolve the dependency to the local workspace version rather than npm. This is the correct protocol for internal packages:
+
+```json
+// apps/web/package.json
+{
+  "name": "@acme/web",
+  "dependencies": {
+    "@acme/ui": "workspace:*", // always the current local version
+    "@acme/api-client": "workspace:*",
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}
+```
+
+`workspace:*` means "use whatever version is in the workspace" — as the package evolves, consumers automatically pick up changes without version bumps. When publishing packages externally (to npm), `pnpm publish` automatically replaces `workspace:*` with the concrete resolved version in the published `package.json`.
+
+`workspace:^` and `workspace:~` are also valid — they specify a semver range within the workspace, useful when you want consumers to pin to compatible versions after publishing.
+
+---
+
+### `pnpm catalog` — Centralized Dependency Versions
+
+pnpm 9+ supports **catalogs** — a way to declare shared dependency versions once at the workspace root instead of repeating them across every `package.json`:
+
 ```yaml
 # pnpm-workspace.yaml
 packages:
   - "apps/*"
   - "packages/*"
+
+# catalog: field defines pinned versions for the entire workspace
+catalog:
+  react: "^19.0.0"
+  react-dom: "^19.0.0"
+  typescript: "^5.5.0"
+  tailwindcss: "^3.4.0"
+  "@types/react": "^19.0.0"
+  "@types/react-dom": "^19.0.0"
+  zod: "^3.23.0"
+  next: "^15.0.0"
 ```
 
-<Callout type="info">
-  pnpm is the recommended package manager for monorepos. Its symlink strategy
-  avoids the phantom dependency issues common with npm hoisting.
-</Callout>
+```json
+// apps/web/package.json — reference catalog versions
+{
+  "name": "@acme/web",
+  "dependencies": {
+    "@acme/ui": "workspace:*",
+    "next": "catalog:", // ← resolves to "^15.0.0" from the catalog
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@types/react": "catalog:",
+    "tailwindcss": "catalog:"
+  }
+}
+```
+
+Benefits: bump a dependency version in one place (`pnpm-workspace.yaml`) and it's updated across the entire monorepo. Eliminates version drift where `apps/web` uses `zod@3.21` while `apps/admin` uses `zod@3.23`.
 
 ---
 
-### 2. `turbo.json` Pipeline
+### `turbo.json` — Full Pipeline Configuration
 
 ```json
 // turbo.json
@@ -96,20 +168,27 @@ packages:
   "ui": "tui",
   "tasks": {
     "build": {
-      // build depends on the build task of all internal dependencies finishing first
+      // ^build: run the "build" task of all upstream workspace dependencies first
+      // Without the caret: "build" in the same package runs first (rarely what you want)
       "dependsOn": ["^build"],
       "inputs": ["$TURBO_DEFAULT$", ".env*"],
       "outputs": [".next/**", "!.next/cache/**", "dist/**"]
     },
     "dev": {
-      "cache": false, // dev servers should never be cached
-      "persistent": true
+      "cache": false, // dev servers are non-deterministic — never cache
+      "persistent": true // marks as a long-running task (doesn't block other tasks)
     },
     "lint": {
-      "dependsOn": ["^build"] // lint after deps are built so type imports resolve
+      // Lint after all deps are built — ensures import resolution works correctly
+      "dependsOn": ["^build"]
     },
     "type-check": {
       "dependsOn": ["^build"]
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$"],
+      "outputs": ["coverage/**"]
     }
   }
 }
@@ -117,90 +196,143 @@ packages:
 
 ---
 
-### 3. Shared UI Package
+### Filtering Tasks — Run Only What Changed
 
-```tsx
-// packages/ui/src/button.tsx
-import { type ButtonHTMLAttributes } from "react";
+```bash
+# Build only @acme/web and its workspace dependencies
+pnpm turbo build --filter=@acme/web
 
-interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: "primary" | "ghost";
-}
+# Build everything that has changed since the last commit on main
+# --affected computes the diff and only runs tasks for changed packages + their consumers
+pnpm turbo build --affected
 
-export function Button({
-  variant = "primary",
-  children,
-  ...props
-}: ButtonProps) {
-  const base = "rounded-md px-4 py-2 text-sm font-medium transition-colors";
-  const variants = {
-    primary: "bg-indigo-600 text-white hover:bg-indigo-700",
-    ghost: "bg-transparent text-gray-700 hover:bg-gray-100",
-  };
+# Equivalent explicit form: changed since origin/main branch
+pnpm turbo build --filter=...[origin/main]
 
-  return (
-    <button className={`${base} ${variants[variant]}`} {...props}>
-      {children}
-    </button>
-  );
+# Build @acme/web and all packages it depends on (upstream deps)
+pnpm turbo build --filter=@acme/web...
+
+# Build all packages that depend on @acme/ui (downstream consumers)
+pnpm turbo build --filter=...@acme/ui
+
+# Combine: build everything affected by changes in packages/*
+pnpm turbo build --filter=...[origin/main] --filter=!@acme/docs
+```
+
+`--affected` is the most useful flag for CI — it skips tasks for packages whose inputs haven't changed, using Turborepo's hash comparison against the base branch.
+
+---
+
+### Task Graph Visualization
+
+Turborepo can generate a visual dependency graph for any task — essential for debugging unexpected build orders:
+
+```bash
+# Generate the task dependency graph for the build task
+pnpm turbo build --graph
+
+# Output as a specific format (svg, png, pdf, json, mermaid, dot)
+pnpm turbo build --graph=graph.svg
+
+# Open the interactive local UI (Turborepo 2.x)
+pnpm turbo build --ui=tui
+```
+
+The graph shows: which packages run in parallel, which are sequentially ordered, and which have cache hits (shown as replayed nodes). If a package is building unexpectedly early or late, the graph reveals the `dependsOn` chain causing it.
+
+---
+
+### Remote Cache — Setup and Self-Hosting
+
+Turborepo's remote cache lets the entire team and CI share the same task cache. A build one developer ran locally won't be re-run on another machine or in CI.
+
+**Vercel Remote Cache (default, zero config):**
+
+```bash
+# Authenticate with Vercel
+pnpm dlx turbo login
+pnpm dlx turbo link
+
+# After linking, turbo automatically reads/writes the remote cache on every run
+pnpm turbo build
+# "cache miss, executing" on first run
+# "cache hit, replaying output" on subsequent runs with identical inputs
+```
+
+**Self-hosted Remote Cache with `ducktape` or `turborepo-remote-cache`:**
+
+```bash
+# Self-host with the community turborepo-remote-cache server
+# (Docker image: ducktape-run/turborepo-remote-cache)
+docker run -p 3000:3000 \
+  -e TURBO_TOKEN=your-secret-token \
+  -e STORAGE_PROVIDER=local \
+  -e STORAGE_PATH=/cache \
+  -v /data/turbo-cache:/cache \
+  ghcr.io/ducktape-run/turborepo-remote-cache
+```
+
+```bash
+# Point Turborepo at the self-hosted cache server
+TURBO_API="http://cache.internal:3000" \
+TURBO_TOKEN="your-secret-token" \
+TURBO_TEAM="acme" \
+pnpm turbo build
+```
+
+```json
+// turbo.json — alternatively configure the remote cache here
+{
+  "$schema": "https://turbo.build/schema.json",
+  "remoteCache": {
+    "enabled": true,
+    "signature": true // verify cache artifact signatures (tamper detection)
+  }
 }
 ```
+
+---
+
+### Shared Package — Source-First with `transpilePackages`
+
+For internal packages shipping TypeScript source (no separate build step), Next.js must be told to transpile them:
 
 ```json
 // packages/ui/package.json
 {
   "name": "@acme/ui",
-  "version": "0.0.1",
   "private": true,
   "exports": {
-    ".": {
-      "import": "./src/index.ts" // apps import source directly — no build step needed for the UI package
-    }
+    ".": { "import": "./src/index.ts" }
   },
   "peerDependencies": {
-    "react": "^19.0.0"
+    "react": "^19.0.0" // peer dep, not regular dep — avoids duplicate React instances
   }
 }
 ```
 
 ```ts
-// packages/ui/src/index.ts
-export { Button } from "./button";
+// apps/web/next.config.ts
+import type { NextConfig } from "next";
+
+const config: NextConfig = {
+  // Tell Next.js to process TypeScript/JSX in these workspace packages
+  transpilePackages: ["@acme/ui", "@acme/api-client"],
+};
+
+export default config;
 ```
+
+<Callout type="warn">
+  Without `transpilePackages`, Next.js won't process TypeScript or JSX inside
+  `packages/` — you'll get a `SyntaxError` at runtime. Alternatively, pre-build
+  packages with `tsup` or `tsdown` and export compiled JS with declaration
+  files.
+</Callout>
 
 ---
 
-### 4. Consuming the Shared Package in a Next.js App
-
-```json
-// apps/web/package.json
-{
-  "name": "@acme/web",
-  "dependencies": {
-    "@acme/ui": "workspace:*", // "workspace:*" tells pnpm to use the local version
-    "next": "^15.0.0",
-    "react": "^19.0.0"
-  }
-}
-```
-
-```tsx
-// apps/web/app/page.tsx  (Server Component by default)
-import { Button } from "@acme/ui";
-
-export default function HomePage() {
-  return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-4">
-      <h1 className="text-2xl font-bold">Welcome to Acme</h1>
-      <Button variant="primary">Get Started</Button>
-    </main>
-  );
-}
-```
-
----
-
-### 5. Shared TypeScript Config
+### Shared TypeScript and ESLint Configs
 
 ```json
 // packages/config/tsconfig/base.json
@@ -224,89 +356,81 @@ export default function HomePage() {
   "extends": "@acme/config/tsconfig/base.json",
   "compilerOptions": {
     "plugins": [{ "name": "next" }],
-    "paths": {
-      "@/*": ["./src/*"]
-    }
+    "paths": { "@/*": ["./src/*"] }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"]
 }
 ```
 
----
+```js
+// packages/config/eslint/base.js
+import js from "@eslint/js";
+import tseslint from "typescript-eslint";
 
-### 6. Running Tasks
-
-```bash
-# Install all workspace dependencies from repo root
-pnpm install
-
-# Run dev servers for all apps in parallel
-pnpm dev
-
-# Build only the web app and its dependencies
-pnpm turbo build --filter=@acme/web
-
-# Build everything that changed since the last git commit on main
-pnpm turbo build --filter=...[origin/main]
-
-# Run lint across the entire repo, skipping cached results
-pnpm turbo lint
+export default tseslint.config(
+  js.configs.recommended,
+  ...tseslint.configs.recommended,
+  {
+    rules: {
+      "@typescript-eslint/no-unused-vars": "error",
+      "@typescript-eslint/no-explicit-any": "warn",
+    },
+  },
+);
 ```
 
 ---
 
 ## Real-World Use Case
 
-An e-commerce platform has three surfaces: a customer-facing Next.js storefront (`apps/web`), an internal admin dashboard (`apps/admin`), and a React Native app (`apps/mobile`). All three share:
+An e-commerce platform has three surfaces: a customer-facing Next.js storefront (`apps/web`), an internal admin dashboard (`apps/admin`), and a documentation site (`apps/docs`). All three share `@acme/ui` (components), `@acme/api-client` (typed fetch wrapper), and `@acme/config` (ESLint/TS configs).
 
-- `@acme/ui` — a Tailwind-based component library.
-- `@acme/api-client` — a typed fetch wrapper around the backend API.
-- `@acme/config` — shared ESLint and TypeScript configs.
-
-Without a monorepo, keeping these packages in sync across three repos means constant version bumps and publish cycles. With a monorepo, a change to `@acme/ui` is immediately reflected in all three apps during development, and Turborepo ensures only affected packages are rebuilt in CI — cutting build times from 12 minutes to under 2.
+In CI, the PR pipeline runs `turbo build --affected`. A developer changes one component in `@acme/ui`. Turborepo determines the affected graph: `@acme/ui` → `@acme/web`, `@acme/admin`, `@acme/docs`. All three rebuild. `@acme/api-client` is unaffected and hits the remote cache — its build replays in 200ms instead of 45 seconds. Total CI time: 2 minutes instead of 12. With the Vercel remote cache, a build one developer ran on their laptop is replayed in CI without recomputing — the cache hit rate approaches 80–90% on active branches.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Forgetting `^build` in `dependsOn`**
+**1. `dependsOn: ["build"]` vs `dependsOn: ["^build"]`.** Without the caret, `"build"` means "run this package's own `build` script first." With the caret (`"^build"`), it means "run the `build` task of every upstream dependency first." Almost always you want the caret for `build` and `lint` — omitting it causes apps to build before their shared packages, resulting in stale type imports.
 
-`"dependsOn": ["build"]` (no caret) means "run this package's own `build` first." `"dependsOn": ["^build"]` means "run the `build` task of all upstream dependencies first." Almost always you want the caret for build tasks. Omitting it causes apps to be built before their shared packages, resulting in stale imports or missing types.
+**2. Caching `dev` tasks.** Dev servers are long-running and non-deterministic. Failing to set `"cache": false` and `"persistent": true` causes Turborepo to attempt caching a task that never exits — confusing behavior in the task UI and potentially blocking other tasks.
 
-**2. Caching `dev` tasks**
+**3. Installing dependencies in the wrong place.** Runtime dependencies of a specific app (`next`, `react`) belong in that app's `package.json`. Repo-level tooling (`turbo`, `prettier`) belongs in the root. Putting app dependencies in the root inflates the dep tree and prevents per-app version flexibility.
 
-Dev servers are long-running and non-deterministic. If you don't set `"cache": false` and `"persistent": true` on your `dev` task, Turborepo may attempt to cache it or behave unexpectedly when the task never exits.
+**4. Using `"react"` as a regular dependency in shared packages.** Shared packages should list React as a `peerDependency` — consuming apps provide their own React instance. Using a regular `"dependencies"` entry can result in two React instances in the bundle, breaking all hooks.
 
-**3. Installing dependencies in the wrong place**
-
-Run-time dependencies used by a specific app (`next`, `react`) belong in that app's `package.json`. Tooling used at the repo level (`turbo`, `prettier`, `eslint`) belongs in the root. Putting everything in the root inflates the dependency tree and breaks per-package version flexibility.
-
-**4. Not transpiling workspace packages in Next.js**
-
-If your shared package ships TypeScript source (as in the example above), you must tell Next.js to transpile it. Otherwise you'll get a SyntaxError at runtime.
-
-```js
-// apps/web/next.config.ts
-import type { NextConfig } from "next";
-
-const config: NextConfig = {
-  transpilePackages: ["@acme/ui", "@acme/api-client"],
-};
-
-export default config;
-```
-
-<Callout type="warn">
-  Without `transpilePackages`, Next.js will not process TypeScript or JSX inside
-  your `packages/` directory, causing a build or runtime error.
-</Callout>
-
-**5. Mismatched React versions**
-
-If `@acme/ui` lists `react` as a regular dependency instead of a `peerDependency`, you can end up with two copies of React in the bundle — which breaks hooks. Always declare framework packages like `react` and `next` as peer dependencies in shared packages.
+**5. Not using `workspace:*` for internal package references.** Using a hardcoded version like `"@acme/ui": "0.0.1"` means consumers won't automatically pick up local changes — pnpm may resolve to the npm registry version if one exists, or the version pinned in the lockfile. Always use `workspace:*` for internal packages.
 
 ---
 
 ## Summary
 
-A monorepo consolidates multiple apps and packages into one repository, enabling straightforward code sharing and consistent tooling. Workspace support in pnpm, npm, or Yarn handles local package linking, while Turborepo adds task orchestration, dependency-aware ordering, and aggressive caching on top. The `turbo.json` pipeline is the key configuration file — it defines what each task depends on and what outputs to cache. The most common pitfalls involve incorrect `dependsOn` configuration, caching persistent tasks, and forgetting to transpile TypeScript workspace packages in Next.js. Get these right and you have a setup that scales cleanly across teams and CI environments.
+pnpm workspaces link local packages together and enforce strict dependency isolation. The `workspace:*` protocol ensures internal packages always resolve to the local version. pnpm catalogs centralize version management — a single version bump in `pnpm-workspace.yaml` propagates across the entire repo. Turborepo's task graph runs tasks in dependency order, caches outputs by input hash, and parallelizes independent work. `--affected` filtering skips tasks for unchanged packages — the most impactful CI optimization in a large monorepo. Remote caching (Vercel-hosted or self-hosted) shares the cache across the team and CI, turning repeated builds into sub-second cache replays. The most common mistakes involve incorrect `dependsOn` configuration, caching long-running dev tasks, and installing shared framework packages as regular dependencies instead of peer dependencies.
+
+---
+
+## Interview Questions
+
+**Q1. What is the `workspace:*` protocol in pnpm and why should you use it instead of a version number?**
+
+`workspace:*` is a pnpm-specific version specifier that resolves an internal package reference to the local workspace version at whatever version it currently is — bypassing the npm registry. Using a hardcoded version like `"@acme/ui": "1.2.3"` creates a fragile reference: if the local package's version in `package.json` doesn't exactly match, pnpm may fall back to the npm registry or the lockfile's cached resolution, meaning local changes aren't picked up. `workspace:*` always uses the live local code. When running `pnpm publish`, the specifier is automatically replaced with the concrete resolved version in the published artifact — so external consumers see a normal version number while internal packages benefit from the live link during development.
+
+**Q2. What does `^build` in Turborepo's `dependsOn` mean and why is it almost always the right choice for build tasks?**
+
+`"dependsOn": ["^build"]` means: "before running this task, run the `build` task of every workspace package that this package declares as a dependency." The caret (`^`) is the "upstream dependencies" sigil. Without it, `"dependsOn": ["build"]` means "run this package's own `build` task first" — a self-reference that doesn't enforce ordering relative to dependencies. For a monorepo where `apps/web` imports from `packages/ui`, you need `@acme/ui` to be built before `@acme/web` starts building. Without `^build` in `web`'s build task configuration, Turborepo may run both in parallel — `web` builds against stale or missing build artifacts from `ui`, causing import errors or TypeScript failures.
+
+**Q3. What is `pnpm catalog` and what problem does it solve?**
+
+pnpm catalogs (introduced in pnpm 9) let you declare canonical dependency versions in `pnpm-workspace.yaml` once and reference them across all `package.json` files with `"catalog:"`. Without catalogs, the same dependency (e.g., `zod`, `tailwindcss`, `typescript`) is declared with potentially different version ranges in every app and package — drift accumulates as different developers update different entries. With catalogs, there's one authoritative version per dependency. Bumping `zod` from `3.21` to `3.23` means editing one line in `pnpm-workspace.yaml` instead of finding and updating every `package.json` that mentions it. This eliminates version drift and ensures the entire monorepo stays on consistent dependency versions.
+
+**Q4. How does Turborepo's `--affected` flag work and what makes it efficient in CI?**
+
+`--affected` computes which workspace packages have changed since a base reference (typically the target branch in a PR) by diffing the git commit graph. It then walks the dependency graph to find all packages that are downstream consumers of changed packages — because a change to `@acme/ui` could break `@acme/web`, `@acme/admin`, and any other consumer. Only those packages (and their tasks) are executed; unchanged packages with valid cache entries are replayed instantly. In a 20-package monorepo where a PR touches one package, `--affected` might run tasks for 3–4 packages instead of all 20 — a 5–6x reduction in CI work. Combined with the remote cache, even the affected packages often hit cache if another developer or a previous CI run already built the same input hash.
+
+**Q5. What is Turborepo remote caching and what are the tradeoffs between Vercel-hosted and self-hosted?**
+
+Turborepo remote caching stores task output artifacts (build outputs, test results, lint reports) in a central server keyed by the input hash. Any machine — developer laptop, CI runner, teammate's computer — that runs a task with the same inputs retrieves the cached output instead of recomputing. Vercel-hosted cache is zero-config after `turbo login && turbo link`, has global CDN distribution, and is free up to usage limits — the right choice for most teams. Self-hosted (via `turborepo-remote-cache` or `ducktape`) gives full data control (useful for compliance requirements like no external network access in CI), no usage limits, and integrates with existing internal infrastructure. The tradeoff: self-hosted requires you to operate the cache server, handle storage scaling, and manage authentication tokens.
+
+**Q6. Why should shared packages declare React as a `peerDependency` instead of a regular dependency?**
+
+If `@acme/ui` lists `react` in `dependencies`, pnpm installs its own copy of React inside `packages/ui/node_modules`. When `apps/web` imports from `@acme/ui`, the component code runs with `@acme/ui`'s React instance while the app runs with `apps/web`'s React instance. React's internal state (hooks, Context) is stored per-instance — two instances means hooks in `@acme/ui` components can't find the state registered by the app's React reconciler. The result is the "Invalid hook call" error. Declaring `react` as a `peerDependency` says "I need React to be provided by my consumer" — pnpm uses the app's single React instance for everything. The app then lists React in its own `dependencies`, making it the sole provider.

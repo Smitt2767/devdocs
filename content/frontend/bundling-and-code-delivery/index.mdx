@@ -9,16 +9,18 @@ The gap between writing code and users running it is larger than it seems. Bundl
 
 The section is ordered to build understanding progressively: first understand what ships and why, then learn to measure it, then learn to optimize delivery, then tackle scale.
 
-## What's covered
+---
 
-**Tree Shaking Internals** — How bundlers use static analysis of ES module imports to eliminate dead code, what prevents tree shaking (side effects, CommonJS, dynamic imports), and how to verify it's working.
+## What's Covered
 
-**Code Splitting Strategies** — Route-level, component-level, and vendor splitting. How `next/dynamic` and `React.lazy` work, when to use each, and how to avoid splitting too aggressively.
+**Tree Shaking Internals** — How bundlers use static analysis of ES module imports to eliminate dead code. Covers ESM vs CommonJS, the `sideEffects` field in `package.json`, the `/*#__PURE__*/` annotation for factory calls and class expressions, scope hoisting, CSS side-effect allowlists, Rollup's `treeshake` config, Turbopack vs Webpack 5 differences, and how to verify tree shaking on production builds.
 
-**Bundle Analysis & Dependency Auditing** — Using `@next/bundle-analyzer`, `source-map-explorer`, and `depcheck` to find bloat, duplicate dependencies, and unused packages. Measure before you optimize.
+**Code Splitting Strategies** — Route-level, component-level, and vendor splitting. `next/dynamic` with SSR control, `React.lazy` + `Suspense`, webpack magic comments (`webpackChunkName`, `webpackPrefetch`, `webpackPreload`), `loading.tsx` for route-level Suspense in the App Router, explicit vendor chunk configuration, and why over-splitting hurts more than it helps.
 
-**Preload / Prefetch / Preconnect / Priority Hints** — The full set of browser resource hints, what each one does, and how to use them without inadvertently hurting performance by competing with critical resources.
+**Bundle Analysis & Dependency Auditing** — Using `@next/bundle-analyzer` for the interactive treemap, `source-map-explorer` for file-level attribution, `size-limit` to enforce bundle budgets in CI, `npm audit` for security vulnerabilities, `knip` for unused dependencies, and `npm ls` plus `overrides` for duplicate package detection and resolution.
 
-**Module Federation** — Sharing code between independently deployed applications at runtime — the backbone of micro-frontend architectures. Covers Webpack 5 and Vite plugin approaches.
+**Preload, Prefetch & Priority Hints** — The full set of browser resource hints: `preload` with the mandatory `as` attribute, `modulepreload` for ESM, `prefetch` for next-navigation speculation, `preconnect` for connection warming, `dns-prefetch` for low-cost DNS resolution, `fetchpriority` on LCP images, Next.js `<Image priority>` and `<Script>` loading strategies (`afterInteractive`, `lazyOnload`, `worker`), and the Speculation Rules API for full-page pre-rendering.
 
-**Monorepo Tooling** — Structuring a monorepo with pnpm workspaces and Turborepo — task pipelines, remote caching, and the most common configuration mistakes.
+**Module Federation** — Sharing code between independently deployed applications at runtime. Webpack 5 `ModuleFederationPlugin` configuration for remotes and hosts, `remoteEntry.js` mechanics, `shared` singleton configuration to prevent duplicate React instances, TypeScript type contracts via `declare module` and shared types packages, dynamic remote URL resolution at runtime, Vite plugin federation, and error boundaries for isolated remote failures.
+
+**Monorepo Tooling** — pnpm workspaces with the `workspace:*` protocol for internal package linking, pnpm catalogs for centralized dependency version management, Turborepo's task pipeline (`turbo.json`), `^build` vs `build` in `dependsOn`, `--affected` filtering for CI efficiency, task graph visualization, remote cache setup with Vercel and self-hosted options, and the peer dependency rule for shared framework packages.
