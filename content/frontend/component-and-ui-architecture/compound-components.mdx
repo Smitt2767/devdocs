@@ -1,31 +1,33 @@
 ---
 title: Compound Components
-description: How to build flexible, composable component APIs using React Context to share implicit state across a cooperating set of components.
+description: How to build flexible, composable APIs using React Context and implicit state sharing — the pattern behind tabs, accordions, and every serious UI component library.
 ---
 
 ## Overview
 
-The compound component pattern lets you split a single UI concept across multiple cooperating components that share state implicitly — without threading props manually between them.
+The compound component pattern lets you split a single UI concept across multiple cooperating components that share state without the consumer threading props between them.
 
-The browser's own `<select>` and `<option>` are the canonical example. Neither works without the other, and the parent manages all the state. Compound components bring this model to custom React UI: a `<Tabs>` that owns the active state, and `<Tabs.List>`, `<Tabs.Trigger>`, and `<Tabs.Panel>` that read from it without the consumer ever wiring anything up.
+The browser's `<select>` and `<option>` are the canonical example. Neither works without the other. The parent owns the state; the children read from it and communicate back through it. You don't pass `selectedValue` to each `<option>` — the relationship is implicit.
 
-This is the architectural foundation of Radix UI, shadcn/ui, Headless UI, and most serious React component libraries.
+Compound components bring this model to React: a `<Tabs>` component owns the active tab state, and `<Tabs.List>`, `<Tabs.Trigger>`, and `<Tabs.Panel>` read from it without any manual prop wiring. This is the architectural foundation of Radix UI, shadcn/ui, Headless UI, and every serious component library you'll encounter in production.
 
 ---
 
 ## How It Works
 
-The parent component creates a React Context and provides it to its subtree. Each child component calls `useContext` to read whatever slice of state it needs. The consumer composes the children in JSX — the context wiring is invisible to them.
+The parent component creates a React Context and provides it to its subtree. Each child calls `useContext` to read the slice of state it needs. The consumer composes the children in JSX — the context wiring is invisible.
 
-This solves two problems at once. First, it eliminates prop drilling: you don't pass `activeTab` and `setActiveTab` through every intermediate node. Second, it enforces usage constraints: `<Tabs.Trigger>` will throw a clear error if used outside a `<Tabs>` parent, rather than silently failing.
+This solves two problems at once: it eliminates prop drilling through intermediate wrapper elements, and it enforces usage constraints — `<Tabs.Trigger>` can throw a clear error if used outside a `<Tabs>` parent rather than silently failing with undefined values.
 
-The dot-notation API (`Tabs.List`, `Tabs.Trigger`) is a TypeScript convention achieved by attaching subcomponents as static properties on the parent. It signals to the consumer that these components belong together and shouldn't be used independently.
+The dot-notation API (`Tabs.List`, `Tabs.Trigger`, `Tabs.Panel`) is a TypeScript convention achieved by attaching subcomponents as static properties on the parent. It signals that these components belong together and aren't meaningful in isolation.
+
+**Controlled vs uncontrolled** — the same pattern surfaces here that you know from native inputs. An uncontrolled compound component manages its own state internally. A controlled variant accepts `value` and `onValueChange` props, letting the parent own the state. Supporting both is what separates utility-level components from production-grade library components.
 
 ---
 
 ## Code Examples
 
-### 1. Full Tabs implementation
+### Complete Tabs Implementation
 
 ```tsx
 // components/tabs/index.tsx
@@ -36,7 +38,10 @@ import {
   useContext,
   useState,
   useId,
+  useRef,
+  useCallback,
   type ReactNode,
+  type KeyboardEvent,
 } from "react";
 
 // --- Context ---
@@ -45,6 +50,8 @@ interface TabsContextValue {
   activeTab: string;
   setActiveTab: (value: string) => void;
   baseId: string;
+  // Ref to the list element — used for roving tabindex keyboard navigation
+  listRef: React.RefObject<HTMLDivElement | null>;
 }
 
 const TabsContext = createContext<TabsContextValue | null>(null);
@@ -52,8 +59,9 @@ const TabsContext = createContext<TabsContextValue | null>(null);
 function useTabsContext() {
   const ctx = useContext(TabsContext);
   if (!ctx) {
-    // Gives consumers a clear error if they use subcomponents outside <Tabs>
-    throw new Error("Tabs subcomponents must be used inside a <Tabs> parent.");
+    throw new Error(
+      "Tabs subcomponents must be rendered inside a <Tabs> parent.",
+    );
   }
   return ctx;
 }
@@ -61,28 +69,63 @@ function useTabsContext() {
 // --- Root ---
 
 interface TabsProps {
-  defaultValue: string;
+  // Uncontrolled: provide defaultValue and let Tabs manage state internally
+  defaultValue?: string;
+  // Controlled: provide value + onValueChange to manage state externally
+  value?: string;
+  onValueChange?: (value: string) => void;
   children: ReactNode;
   className?: string;
 }
 
-function Tabs({ defaultValue, children, className }: TabsProps) {
-  const [activeTab, setActiveTab] = useState(defaultValue);
-  // useId generates a stable, unique ID for ARIA relationships
+function Tabs({
+  defaultValue,
+  value,
+  onValueChange,
+  children,
+  className,
+}: TabsProps) {
+  // Internal state for the uncontrolled case
+  const [internalActiveTab, setInternalActiveTab] = useState(
+    defaultValue ?? "",
+  );
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // useId generates a stable, unique ID prefix — no hydration mismatch
   const baseId = useId();
 
+  // If value prop is provided, component is controlled — use external state
+  const isControlled = value !== undefined;
+  const activeTab = isControlled ? value : internalActiveTab;
+
+  const setActiveTab = useCallback(
+    (newValue: string) => {
+      if (!isControlled) {
+        setInternalActiveTab(newValue);
+      }
+      onValueChange?.(newValue);
+    },
+    [isControlled, onValueChange],
+  );
+
   return (
-    <TabsContext.Provider value={{ activeTab, setActiveTab, baseId }}>
+    <TabsContext.Provider value={{ activeTab, setActiveTab, baseId, listRef }}>
       <div className={className}>{children}</div>
     </TabsContext.Provider>
   );
 }
 
-// --- List (the tab button container) ---
+// --- List (tab button container) ---
 
 function TabsList({ children }: { children: ReactNode }) {
+  const { listRef } = useTabsContext();
+
   return (
-    <div role="tablist" className="flex gap-2 border-b border-border">
+    <div
+      ref={listRef}
+      role="tablist"
+      className="flex gap-1 border-b border-border"
+    >
       {children}
     </div>
   );
@@ -93,59 +136,97 @@ function TabsList({ children }: { children: ReactNode }) {
 interface TabsTriggerProps {
   value: string;
   children: ReactNode;
+  disabled?: boolean;
 }
 
-function TabsTrigger({ value, children }: TabsTriggerProps) {
-  const { activeTab, setActiveTab, baseId } = useTabsContext();
+function TabsTrigger({ value, children, disabled = false }: TabsTriggerProps) {
+  const { activeTab, setActiveTab, baseId, listRef } = useTabsContext();
   const isActive = activeTab === value;
+
+  function handleKeyDown(e: KeyboardEvent<HTMLButtonElement>) {
+    const list = listRef.current;
+    if (!list) return;
+
+    // Roving tabindex: arrow keys move focus between tabs
+    const triggers = Array.from(
+      list.querySelectorAll<HTMLButtonElement>('[role="tab"]:not([disabled])'),
+    );
+    const currentIndex = triggers.findIndex((el) => el === e.currentTarget);
+
+    let nextIndex = currentIndex;
+    if (e.key === "ArrowRight")
+      nextIndex = (currentIndex + 1) % triggers.length;
+    if (e.key === "ArrowLeft")
+      nextIndex = (currentIndex - 1 + triggers.length) % triggers.length;
+    if (e.key === "Home") nextIndex = 0;
+    if (e.key === "End") nextIndex = triggers.length - 1;
+
+    if (nextIndex !== currentIndex) {
+      e.preventDefault();
+      triggers[nextIndex].focus();
+      // Activate tab on arrow key — ARIA Authoring Practices recommendation
+      setActiveTab(triggers[nextIndex].dataset.value ?? "");
+    }
+  }
 
   return (
     <button
       role="tab"
-      // ARIA: links this button to its panel via matching IDs
+      // ARIA: links trigger to its panel via matching IDs
       id={`${baseId}-tab-${value}`}
       aria-controls={`${baseId}-panel-${value}`}
       aria-selected={isActive}
+      aria-disabled={disabled}
+      disabled={disabled}
+      // Roving tabindex: only the active tab is in the tab order
+      // Arrow keys move focus between tabs (handled by onKeyDown)
       tabIndex={isActive ? 0 : -1}
-      onClick={() => setActiveTab(value)}
-      className={`px-4 py-2 text-sm font-medium transition-colors ${
-        isActive
-          ? "border-b-2 border-primary text-primary"
-          : "text-muted-foreground hover:text-foreground"
-      }`}
+      data-value={value} // used by keyboard handler to identify tab
+      onClick={() => !disabled && setActiveTab(value)}
+      onKeyDown={handleKeyDown}
+      className={`px-4 py-2 text-sm font-medium rounded-t-md transition-colors
+        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
+        disabled:pointer-events-none disabled:opacity-40 ${
+          isActive
+            ? "border-b-2 border-primary text-primary"
+            : "text-muted-foreground hover:text-foreground hover:bg-muted"
+        }`}
     >
       {children}
     </button>
   );
 }
 
-// --- Panel (each tab content area) ---
+// --- Panel (each tab content region) ---
 
 interface TabsPanelProps {
   value: string;
   children: ReactNode;
+  className?: string;
 }
 
-function TabsPanel({ value, children }: TabsPanelProps) {
+function TabsPanel({ value, children, className }: TabsPanelProps) {
   const { activeTab, baseId } = useTabsContext();
-
-  if (activeTab !== value) return null;
+  const isActive = activeTab === value;
 
   return (
     <div
       role="tabpanel"
       id={`${baseId}-panel-${value}`}
       aria-labelledby={`${baseId}-tab-${value}`}
-      className="pt-4"
+      // hidden keeps it in DOM for SEO and fast tab switching,
+      // but out of the accessibility tree when inactive
+      hidden={!isActive}
+      tabIndex={0} // panels should be focusable
+      className={`pt-4 focus-visible:outline-none ${className ?? ""}`}
     >
-      {children}
+      {isActive ? children : null}
     </div>
   );
 }
 
-// --- Attach subcomponents as static properties ---
-// This creates the dot-notation API: <Tabs.List>, <Tabs.Trigger>, etc.
-
+// --- Dot-notation API ---
+// Attach subcomponents as static properties for the import-as-one API
 Tabs.List = TabsList;
 Tabs.Trigger = TabsTrigger;
 Tabs.Panel = TabsPanel;
@@ -154,189 +235,344 @@ export { Tabs };
 ```
 
 ```tsx
-// app/settings/page.tsx — Consumer usage
-import { Tabs } from "@/components/tabs";
+// Usage — uncontrolled: Tabs manages its own state
+<Tabs defaultValue="account" className="w-full max-w-2xl">
+  <Tabs.List>
+    <Tabs.Trigger value="account">Account</Tabs.Trigger>
+    <Tabs.Trigger value="security">Security</Tabs.Trigger>
+    <Tabs.Trigger value="billing">Billing</Tabs.Trigger>
+    <Tabs.Trigger value="notifications" disabled>
+      Notifications
+    </Tabs.Trigger>
+  </Tabs.List>
+  <Tabs.Panel value="account">
+    <AccountSettings />
+  </Tabs.Panel>
+  <Tabs.Panel value="security">
+    <SecuritySettings />
+  </Tabs.Panel>
+  <Tabs.Panel value="billing">
+    <BillingSettings />
+  </Tabs.Panel>
+</Tabs>;
 
-export default function SettingsPage() {
-  return (
-    <Tabs defaultValue="profile">
-      <Tabs.List>
-        <Tabs.Trigger value="profile">Profile</Tabs.Trigger>
-        <Tabs.Trigger value="security">Security</Tabs.Trigger>
-        <Tabs.Trigger value="billing">Billing</Tabs.Trigger>
-      </Tabs.List>
-
-      <Tabs.Panel value="profile">
-        <h2>Profile Settings</h2>
-        {/* profile form */}
-      </Tabs.Panel>
-
-      <Tabs.Panel value="security">
-        <h2>Security Settings</h2>
-        {/* security form */}
-      </Tabs.Panel>
-
-      <Tabs.Panel value="billing">
-        <h2>Billing Settings</h2>
-        {/* billing form */}
-      </Tabs.Panel>
-    </Tabs>
-  );
-}
+// Usage — controlled: parent owns which tab is active (e.g., driven by URL params)
+const [activeTab, setActiveTab] = useState("account");
+<Tabs value={activeTab} onValueChange={setActiveTab}>
+  {/* ... same structure */}
+</Tabs>;
 ```
-
-The consumer composes the UI declaratively. They never touch `activeTab`, `setActiveTab`, or any ARIA wiring — that's all handled inside the compound component.
 
 ---
 
-### 2. Controlled vs Uncontrolled
+### Slot-Based API Pattern (Radix Model)
 
-The implementation above is uncontrolled — `Tabs` owns the state internally. For a controlled version, let the consumer drive state from outside:
+Radix UI popularized a "slot" pattern where you can replace the default rendered element with your own via `asChild`. This decouples behavior from markup entirely — the compound component provides the behavior, your element provides the tag:
 
 ```tsx
-// Extend TabsProps to support controlled mode
-interface TabsProps {
-  defaultValue?: string; // uncontrolled: initial value
-  value?: string; // controlled: external value
-  onValueChange?: (value: string) => void; // controlled: change callback
+// components/slot.tsx — merges props from the Slot component with the child element
+"use client";
+
+import { cloneElement, isValidElement, type ReactNode } from "react";
+
+interface SlotProps {
+  children: ReactNode;
+  [key: string]: unknown;
+}
+
+/**
+ * Slot merges its props onto the single child element.
+ * This lets the compound component pass ARIA, event handlers, and data attributes
+ * to consumer-supplied elements without wrapping them in an extra DOM node.
+ */
+export function Slot({ children, ...slotProps }: SlotProps) {
+  if (!isValidElement(children)) {
+    throw new Error("Slot must receive exactly one React element as children.");
+  }
+
+  // Merge slotProps onto the child element's existing props
+  return cloneElement(children, {
+    ...slotProps,
+    ...children.props,
+    // Merge className from both
+    className:
+      [slotProps.className, children.props.className]
+        .filter(Boolean)
+        .join(" ") || undefined,
+    // Chain event handlers from both sides
+    onClick: composeEventHandlers(
+      slotProps.onClick as (e: React.MouseEvent) => void,
+      children.props.onClick,
+    ),
+  });
+}
+
+function composeEventHandlers<E>(
+  slotHandler?: (e: E) => void,
+  consumerHandler?: (e: E) => void,
+) {
+  return function handler(event: E) {
+    slotHandler?.(event);
+    consumerHandler?.(event);
+  };
+}
+```
+
+```tsx
+// components/tabs/trigger-with-slot.tsx
+// Trigger supports asChild — replace the default <button> with any element
+
+interface TabsTriggerProps {
+  value: string;
+  children: ReactNode;
+  asChild?: boolean;
+}
+
+function TabsTriggerWithSlot({
+  value,
+  children,
+  asChild = false,
+}: TabsTriggerProps) {
+  const { activeTab, setActiveTab, baseId } = useTabsContext();
+  const isActive = activeTab === value;
+
+  const triggerProps = {
+    role: "tab" as const,
+    id: `${baseId}-tab-${value}`,
+    "aria-controls": `${baseId}-panel-${value}`,
+    "aria-selected": isActive,
+    tabIndex: isActive ? 0 : -1,
+    onClick: () => setActiveTab(value),
+  };
+
+  if (asChild) {
+    // Merge trigger behavior onto the consumer's element (e.g., <a>, <Link>)
+    return <Slot {...triggerProps}>{children}</Slot>;
+  }
+
+  return <button {...triggerProps}>{children}</button>;
+}
+```
+
+```tsx
+// Usage: a tab that's also a Next.js Link (for URL-driven tabs)
+<Tabs.Trigger value="security" asChild>
+  <Link href="/settings/security">Security</Link>
+</Tabs.Trigger>
+// Renders: <a href="/settings/security" role="tab" aria-selected={...} ...>Security</a>
+// No extra wrapper element — the Link IS the tab trigger.
+```
+
+---
+
+### Accordion with Controlled Multi-Expand
+
+```tsx
+// components/accordion/index.tsx
+"use client";
+
+import {
+  createContext,
+  useContext,
+  useState,
+  useId,
+  useRef,
+  type ReactNode,
+} from "react";
+
+type AccordionMode = "single" | "multiple";
+
+interface AccordionContextValue {
+  openItems: Set<string>;
+  toggleItem: (value: string) => void;
+  baseId: string;
+}
+
+const AccordionContext = createContext<AccordionContextValue | null>(null);
+
+interface AccordionProps {
+  mode?: AccordionMode; // "single": at most one open; "multiple": many open simultaneously
+  defaultOpen?: string | string[];
   children: ReactNode;
 }
 
-function Tabs({
-  defaultValue = "",
-  value,
-  onValueChange,
-  children,
-}: TabsProps) {
-  const [internalTab, setInternalTab] = useState(defaultValue);
+function Accordion({ mode = "single", defaultOpen, children }: AccordionProps) {
+  const baseId = useId();
+  const initialOpen = new Set(
+    defaultOpen
+      ? Array.isArray(defaultOpen)
+        ? defaultOpen
+        : [defaultOpen]
+      : [],
+  );
+  const [openItems, setOpenItems] = useState<Set<string>>(initialOpen);
 
-  // If `value` is provided, use it (controlled). Otherwise use internal state.
-  const activeTab = value !== undefined ? value : internalTab;
-
-  function setActiveTab(next: string) {
-    if (value === undefined) {
-      // Uncontrolled: manage state internally
-      setInternalTab(next);
-    }
-    // Always notify the consumer, whether controlled or not
-    onValueChange?.(next);
+  function toggleItem(value: string) {
+    setOpenItems((prev) => {
+      const next = new Set(prev);
+      if (next.has(value)) {
+        next.delete(value);
+      } else {
+        if (mode === "single") next.clear(); // close others before opening new one
+        next.add(value);
+      }
+      return next;
+    });
   }
 
-  const baseId = useId();
-
   return (
-    <TabsContext.Provider value={{ activeTab, setActiveTab, baseId }}>
-      <div>{children}</div>
-    </TabsContext.Provider>
+    <AccordionContext.Provider value={{ openItems, toggleItem, baseId }}>
+      <div className="divide-y divide-border rounded-xl border border-border">
+        {children}
+      </div>
+    </AccordionContext.Provider>
   );
 }
+
+interface AccordionItemProps {
+  value: string;
+  trigger: ReactNode; // The header/button content
+  children: ReactNode; // The expandable content
+}
+
+function AccordionItem({ value, trigger, children }: AccordionItemProps) {
+  const { openItems, toggleItem, baseId } = useContext(AccordionContext)!;
+  const isOpen = openItems.has(value);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  const triggerId = `${baseId}-trigger-${value}`;
+  const panelId = `${baseId}-panel-${value}`;
+
+  return (
+    <div>
+      <h3>
+        <button
+          id={triggerId}
+          aria-expanded={isOpen}
+          aria-controls={panelId}
+          onClick={() => toggleItem(value)}
+          className="flex w-full items-center justify-between px-4 py-3 text-left text-sm font-medium hover:bg-muted transition-colors"
+        >
+          {trigger}
+          <span
+            aria-hidden="true"
+            className={`ml-2 transition-transform duration-200 ${isOpen ? "rotate-180" : ""}`}
+          >
+            ▼
+          </span>
+        </button>
+      </h3>
+
+      {/* Panel: use hidden attribute + conditional render for accessibility */}
+      <div
+        id={panelId}
+        role="region"
+        aria-labelledby={triggerId}
+        hidden={!isOpen}
+      >
+        <div
+          ref={panelRef}
+          className="px-4 pb-4 pt-2 text-sm text-muted-foreground"
+        >
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+Accordion.Item = AccordionItem;
+export { Accordion };
 ```
 
 ```tsx
-// Controlled usage — parent drives which tab is active
-"use client";
+// Usage — single mode (default)
+<Accordion defaultOpen="billing">
+  <Accordion.Item value="account" trigger="Account Settings">
+    <AccountForm />
+  </Accordion.Item>
+  <Accordion.Item value="billing" trigger="Billing & Payments">
+    <BillingInfo />
+  </Accordion.Item>
+  <Accordion.Item value="api" trigger="API Keys">
+    <ApiKeyManager />
+  </Accordion.Item>
+</Accordion>
 
-import { useState } from "react";
-import { Tabs } from "@/components/tabs";
-
-export default function WizardPage() {
-  const [step, setStep] = useState("step-1");
-
-  return (
-    <>
-      <Tabs value={step} onValueChange={setStep}>
-        <Tabs.List>
-          <Tabs.Trigger value="step-1">Step 1</Tabs.Trigger>
-          <Tabs.Trigger value="step-2">Step 2</Tabs.Trigger>
-          <Tabs.Trigger value="step-3">Step 3</Tabs.Trigger>
-        </Tabs.List>
-        <Tabs.Panel value="step-1">...</Tabs.Panel>
-        <Tabs.Panel value="step-2">...</Tabs.Panel>
-        <Tabs.Panel value="step-3">...</Tabs.Panel>
-      </Tabs>
-
-      {/* External control — e.g. a "Next" button outside the Tabs tree */}
-      <button onClick={() => setStep("step-2")}>Next</button>
-    </>
-  );
-}
+// Usage — multiple mode (many panels open simultaneously)
+<Accordion mode="multiple" defaultOpen={["account", "api"]}>
+  {/* same children */}
+</Accordion>
 ```
-
----
-
-### 3. Mixing Server Components inside a compound component
-
-The `<Tabs>` root needs `'use client'` because it manages state. But the content inside `<Tabs.Panel>` can still be a Server Component — pass it in as `children`:
-
-```tsx
-// app/dashboard/page.tsx — Server Component
-import { Tabs } from "@/components/tabs";
-import { UserStats } from "@/components/user-stats"; // Server Component
-import { ActivityFeed } from "@/components/activity-feed"; // Server Component
-
-export default async function DashboardPage() {
-  return (
-    // Tabs is 'use client' but its children are Server Components
-    // This works because children are passed as props (already-rendered RSC output)
-    <Tabs defaultValue="stats">
-      <Tabs.List>
-        <Tabs.Trigger value="stats">Stats</Tabs.Trigger>
-        <Tabs.Trigger value="activity">Activity</Tabs.Trigger>
-      </Tabs.List>
-
-      <Tabs.Panel value="stats">
-        <UserStats /> {/* fetches its own data on the server */}
-      </Tabs.Panel>
-
-      <Tabs.Panel value="activity">
-        <ActivityFeed /> {/* fetches its own data on the server */}
-      </Tabs.Panel>
-    </Tabs>
-  );
-}
-```
-
-<Callout type="warn">
-  Don't mark every subcomponent `'use client'` individually. Only the root that
-  holds the Context provider needs `'use client'`. Server Components can be
-  passed as `children` into a client boundary — they remain server-rendered.
-</Callout>
 
 ---
 
 ## Real-World Use Case
 
-You're building a settings page for a SaaS dashboard. The design calls for tabbed navigation between Profile, Security, Billing, and Notifications sections. Each section makes its own data fetch.
+**Settings page with tabbed navigation.** Without compound components: the settings page manages `activeTab` state, passes it to a `<TabList>` component, maps tabs to panels, and threads callbacks through multiple levels. Adding a new settings section means updating three or four different files.
 
-With a compound `<Tabs>`:
+With compound components: `<Tabs>` owns the state. Adding a section means adding one `<Tabs.Trigger>` and one `<Tabs.Panel>` pair. The consumer never touches state management, ARIA attributes, or keyboard navigation — all of that is encapsulated.
 
-- The active tab logic is encapsulated — no `useState` scattered across the page.
-- Each panel's data fetch stays in its own Server Component, co-located with the UI it powers.
-- Keyboard navigation and ARIA roles are handled once inside the compound component, not repeated across every place tabs appear in the app.
-- When the design team asks to add a badge count to the Notifications tab trigger, you extend `<Tabs.Trigger>` with an optional `badge` prop — one change, all instances updated.
+The controlled variant becomes essential when tabs are URL-driven — the active tab is determined by `searchParams` and updated via `router.push`, not internal state:
+
+```tsx
+"use client";
+const router = useRouter();
+const searchParams = useSearchParams();
+const activeTab = searchParams.get("tab") ?? "account";
+
+<Tabs value={activeTab} onValueChange={(tab) => router.push(`/settings?tab=${tab}`)}>
+```
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Forgetting the null check on context**
+**1. Not throwing in the context consumer when context is null.**
+If `useTabsContext()` returns the context value without checking for null, using `<Tabs.Trigger>` outside `<Tabs>` silently fails with cryptic property access errors. Always throw a clear error when context is missing.
 
-`useContext` returns `undefined` if there's no matching provider above it in the tree. Without a null check, the error surfaces as `Cannot read properties of undefined` deep inside your subcomponent — not as "you used this outside a Tabs". Always throw a descriptive error from a `useTabsContext()` wrapper function.
+**2. Using `Math.random()` or `Date.now()` for ARIA IDs.**
+These are not stable across server/client renders — they'll cause a React hydration mismatch error. Use `useId()`, which generates stable, collision-resistant IDs that match between server and client.
 
-**2. Generating IDs with `Math.random()` or a module-level counter**
+**3. Implementing roving tabindex incorrectly.**
+The ARIA tab pattern specifies that only the active tab should be in the natural tab order (`tabIndex={0}`). Inactive tabs must have `tabIndex={-1}` and be navigable via arrow keys. If all tabs have `tabIndex={0}`, keyboard users have to Tab through every trigger to reach the panel content — a significant accessibility problem.
 
-ARIA attributes like `aria-controls` and `id` need to match between server and client renders. `Math.random()` generates different values on each side, causing a hydration mismatch. Use React's `useId()` hook — it produces stable, collision-safe IDs that are consistent across SSR and hydration.
+**4. Not supporting both controlled and uncontrolled modes.**
+A compound component that's only uncontrolled can't be driven by URL state, router state, or a parent form. Supporting both modes (internal `useState` as default, external `value`/`onValueChange` as opt-in) is the difference between a utility and a library-grade component.
 
-**3. Putting all subcomponents in the same file, forever**
-
-Fine to start that way, but as the component grows (keyboard event handling, animation, async content), split each subcomponent into its own file and re-export from an `index.tsx` barrel. The dot-notation API stays identical to consumers.
-
-**4. Controlled and uncontrolled state fighting each other**
-
-If you accept both `value` and `defaultValue`, you need to commit to one source of truth per instance. Switching from uncontrolled to controlled mid-lifecycle (i.e., `value` going from `undefined` to a string after mount) causes React warnings and unpredictable behavior. Follow the same contract React uses: `defaultValue` sets the initial state once; `value` makes the component fully controlled for its lifetime.
+**5. Putting too much into the context.**
+Context re-renders all consumers whenever any value changes. Putting an object with many properties in context means every Tab trigger re-renders when any property changes — even properties that trigger doesn't use. Minimize context to only values that truly need sharing, or split into multiple contexts.
 
 ---
 
 ## Summary
 
-Compound components use React Context to let a parent share state with a set of cooperating children — without the consumer needing to wire anything up manually. The parent owns the state and provides it; subcomponents consume it via a context hook that throws a clear error if used outside the tree. Dot-notation attachment (`Tabs.List`, `Tabs.Trigger`) signals that these components belong together. Supporting both controlled (`value` + `onValueChange`) and uncontrolled (`defaultValue`) modes makes the component usable in a wider range of scenarios. Use `useId()` for any IDs that bridge server and client renders. This pattern is the foundation of every serious React component library — understanding it from the inside makes working with Radix, shadcn/ui, and Headless UI dramatically more productive.
+Compound components share state across cooperating subtree members through React Context, eliminating prop drilling and creating a single-import API with the dot-notation pattern (`Tabs.Trigger`, `Tabs.Panel`). Context consumers throw on missing context for early, clear error messages. `useId()` provides stable ARIA IDs that survive server/client hydration. Supporting both controlled and uncontrolled modes (internal state as default, `value`/`onValueChange` props as opt-in) makes the pattern genuinely reusable. Keyboard navigation following ARIA authoring practices — roving tabindex, arrow key focus movement — is part of the contract, not optional. The slot pattern (`asChild`) decouples behavior from rendered element, letting consumers supply their own DOM elements while the compound component provides the accessibility wiring.
+
+---
+
+## Interview Questions
+
+**Q1. What problem does the compound component pattern solve and how does React Context enable it?**
+
+Prop drilling — threading state and callbacks through intermediate elements that don't need them — becomes untenable in complex widgets like tabs, accordions, or menus. Every intermediate component must accept and forward props it doesn't use. Compound components solve this by creating a Context in the root component and providing it to the subtree. Each child reads exactly the slice it needs directly from context — no intermediate forwarding. React Context is the mechanism: the root provides a value, and all descendants can consume it without any prop passing. The consumer's JSX only composes the child components in order — all state management is invisible.
+
+**Q2. Why should you use `useId()` for generating ARIA IDs in compound components and what problem does it solve?**
+
+ARIA linking attributes (`aria-controls`, `aria-labelledby`, `aria-describedby`) require matching IDs between elements. Those IDs must be unique per page instance (two tab groups can't share IDs) and stable across server and client renders (a hydration mismatch would break the connection). `Math.random()` produces a new value on every render — different on server vs client, breaking hydration. `Date.now()` has the same problem. `useId()` generates an ID that's deterministic based on the component's position in the React tree — identical between server render and client hydration, and unique per instance even with multiple instances of the same compound component on the page.
+
+**Q3. What is the roving tabindex pattern and why does it matter for a Tabs component?**
+
+The roving tabindex pattern manages keyboard navigation in a composite widget. In a tab list, only the active tab is in the natural tab order (`tabIndex={0}`). Inactive tabs have `tabIndex={-1}` — they're focusable programmatically but skipped by the Tab key. Arrow keys move focus between tabs by calling `.focus()` on the adjacent trigger element. This matches the ARIA Authoring Practices Guide for tabs and makes the widget behave like a native control: one Tab press enters the tab list, arrow keys navigate within it, another Tab press exits to the next interactive element. Without roving tabindex, keyboard users must Tab through every trigger in sequence to exit the tab list — potentially many keypresses through a long list.
+
+**Q4. How do you support both controlled and uncontrolled modes in a compound component?**
+
+Controlled mode: the consumer passes `value` and `onValueChange` props. The component reads from `value` (external state) and calls `onValueChange` on updates — it doesn't maintain its own state for this dimension. Uncontrolled mode: the consumer passes `defaultValue`. The component initializes internal `useState` with `defaultValue` and manages state independently. The component detects which mode it's in by checking whether `value` is `undefined`. If `value` is provided, it's controlled — if not, it uses internal state. This mirrors how native inputs work (`value` vs `defaultValue`). The pattern is essential when tabs are URL-driven, synced to a router, or coordinated with a parent form — all cases where the consumer must own the state.
+
+**Q5. What is the slot pattern (`asChild`) and when should you use it?**
+
+The slot pattern lets a compound component merge its behavioral props (ARIA attributes, event handlers, tabIndex) onto a consumer-supplied element instead of its own default rendered element. Without it, a compound component always renders its own wrapper element — a `<button>` for a trigger, a `<div>` for a panel. This can create extra DOM nodes and makes it impossible to use the compound component's behavior on a specific element type, like using a Next.js `<Link>` as a tab trigger. With `asChild`, the consumer passes their element as children and the compound component uses `cloneElement` (or a `Slot` utility) to merge its props onto that element. This is how Radix UI works — every component renders a default element but accepts `asChild` to merge behavior onto any consumer-provided element instead.
+
+**Q6. How does context performance affect compound components with many children?**
+
+Every component that calls `useContext` re-renders when the context value changes. If the context value is a plain object created during render (`value={{ activeTab, setActiveTab, baseId }}`), a new object reference is created on every render — even if the actual values didn't change. This triggers re-renders in all consumers. Mitigate with `useMemo` on the context value: `const ctx = useMemo(() => ({ activeTab, setActiveTab, baseId }), [activeTab, setActiveTab, baseId])`. For large compound components with dozens of children, split the context: separate the rarely-changing parts (IDs, mode) from frequently-changing parts (active value) into different contexts — consumers subscribe only to what they read.

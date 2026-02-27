@@ -1,278 +1,454 @@
 ---
 title: Shadow DOM
-description: A guide to the Shadow DOM API — what it is, how encapsulation works, and how to use it in modern web components.
+description: How Shadow DOM encapsulates styles and DOM structure at the browser level, how Declarative Shadow DOM enables SSR, how adoptedStyleSheets share styles efficiently, and when to use it versus CSS Modules or scoped CSS.
 ---
 
 ## Overview
 
-The Shadow DOM is a browser-native API that lets you attach an isolated, encapsulated DOM tree to any HTML element. Styles and scripts inside a shadow tree don't leak out, and styles from the main document don't bleed in — by default.
+Shadow DOM is the browser's native encapsulation primitive. It lets you attach a separate, isolated DOM tree — the "shadow tree" — to any HTML element. Styles defined inside a shadow tree don't leak out to the document, and document styles don't leak in. The host element's children in the main DOM are slotted into the shadow tree via `<slot>` elements.
 
-This is the foundation of **Web Components**. It solves a real problem: when you're building a reusable UI widget (a date picker, a tooltip, a video player), you don't want the host page's CSS to accidentally break your component's layout — and you don't want your component's styles to trash the rest of the page.
+This is the technology behind native browser components like `<video>`, `<input type="range">`, and `<details>` — their internal DOM is a shadow tree you can partially inspect in DevTools. It's also the foundation of Web Components.
 
-Browsers use Shadow DOM internally all the time. The controls on a `<video>` element, the internal structure of `<input type="range">` — those are all shadow trees you can't normally inspect or override.
+For most React applications, CSS Modules or Tailwind provide sufficient style scoping at lower complexity. Shadow DOM becomes the right choice when: you need true platform-level encapsulation (not naming conventions), you're building distributable Web Components that work across frameworks, or you need to embed a styled UI into a third-party host page without style interference in either direction.
 
 ---
 
 ## How It Works
 
-Every standard DOM element lives in the **light DOM** — the regular document tree. When you call `element.attachShadow({ mode: 'open' })`, the browser creates a parallel **shadow root** hanging off that element. That shadow root is a separate document fragment with its own scope.
+### Attaching a Shadow Root
 
-Think of it like a iframe that shares the same JS process but has its own style scope — except it's much lighter and composable.
+Any element can host a shadow tree. You call `element.attachShadow({ mode: "open" })` to create the shadow root, then add children to it:
 
-### Key concepts
+```js
+const host = document.querySelector(".card");
+const shadow = host.attachShadow({ mode: "open" });
 
-- **Shadow host** — the regular DOM element that the shadow tree is attached to.
-- **Shadow root** — the root node of the shadow tree (returned by `attachShadow`).
-- **Shadow boundary** — the invisible wall between the shadow tree and the light DOM.
-- **Slots** — named or default `<slot>` elements that let light DOM children project _into_ the shadow tree, enabling composition.
+shadow.innerHTML = `
+  <style>
+    /* Only applies inside this shadow tree */
+    :host { display: block; border-radius: 8px; padding: 1rem; }
+    h2 { font-size: 1.25rem; }
+  </style>
+  <h2>Card Title</h2>
+  <slot></slot>
+`;
+```
 
-### `mode: 'open'` vs `mode: 'closed'`
+`mode: "open"` means the shadow root is accessible via `element.shadowRoot` from JavaScript outside the shadow tree. `mode: "closed"` makes it inaccessible — used in native browser elements to prevent external manipulation.
 
-With `open` mode, `element.shadowRoot` returns the shadow root from outside. With `closed`, it returns `null` — the shadow tree is completely inaccessible via JS from the outside. Most userland components use `open` for debuggability. `closed` is mainly used by browser internals.
+### Style Encapsulation Rules
+
+**Inside → outside:** Styles defined inside a shadow tree don't affect the document. A `.card { background: red }` inside the shadow has no effect on `.card` elements in the document.
+
+**Outside → inside:** Document styles don't apply inside the shadow tree. A global `h2 { color: blue }` in your app's CSS doesn't affect `h2` elements inside a shadow tree.
+
+**Exceptions:**
+
+- **CSS custom properties (`--var`)** inherit _through_ the shadow boundary. This is the intended theming API: you set `--color-primary` on the host, the shadow tree's styles read it.
+- **Inherited properties** (`color`, `font-family`, `line-height`) inherit from the host element into the shadow tree's `:host` context.
+- **`::part()` pseudo-element** allows external styles to target specific parts of a shadow tree that the component author has explicitly exposed.
+
+### `<slot>` — Content Projection
+
+Slots are placeholders in the shadow tree for content provided by the host's light DOM children:
+
+```html
+<!-- Shadow template -->
+<div class="card">
+  <div class="card-header">
+    <slot name="title"></slot>
+    <!-- named slot -->
+  </div>
+  <div class="card-body">
+    <slot></slot>
+    <!-- default slot: all unassigned children -->
+  </div>
+</div>
+```
+
+```html
+<!-- Consumer -->
+<my-card>
+  <h2 slot="title">Product Name</h2>
+  <!-- assigned to [name="title"] slot -->
+  <p>Description goes here.</p>
+  <!-- assigned to the default slot -->
+</my-card>
+```
+
+Slotted content remains in the light DOM (it's part of the document's DOM tree) and is visually projected into the shadow tree's slot positions. CSS styles on slotted elements come from the document, not the shadow — the component author can target them with `::slotted()` but only at one level of depth.
 
 ---
 
 ## Code Examples
 
-### Basic shadow root with scoped styles
+### Web Component with Shadow DOM
 
 ```ts
-// vanilla-tooltip.ts
-class VanillaTooltip extends HTMLElement {
+// components/ProductCard.ts — Web Component (no framework required)
+
+class ProductCard extends HTMLElement {
+  // Declare observed attributes — attributeChangedCallback fires for these
+  static get observedAttributes() {
+    return ["product-name", "price", "image-url"];
+  }
+
+  private shadow: ShadowRoot;
+
   constructor() {
     super();
+    // Attach shadow root immediately in constructor
+    this.shadow = this.attachShadow({ mode: "open" });
+  }
 
-    // Attach shadow root in open mode so devtools can inspect it
-    const shadow = this.attachShadow({ mode: "open" });
+  // Called when the element is added to the document
+  connectedCallback() {
+    this.render();
+  }
 
-    // Scoped styles — these will NOT leak to the outer document
-    const style = document.createElement("style");
-    style.textContent = `
-      :host {
-        display: inline-block;
-        position: relative;
-      }
-      .tooltip {
-        background: #1a1a1a;
-        color: #fff;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 12px;
-        white-space: nowrap;
-      }
+  // Called when an observed attribute changes
+  attributeChangedCallback() {
+    this.render();
+  }
+
+  private render() {
+    const name = this.getAttribute("product-name") ?? "";
+    const price = this.getAttribute("price") ?? "";
+    const imageUrl = this.getAttribute("image-url") ?? "";
+
+    this.shadow.innerHTML = `
+      <style>
+        :host {
+          display: block;
+          border-radius: 0.5rem;
+          overflow: hidden;
+          box-shadow: 0 1px 3px rgb(0 0 0 / 0.1);
+          /* Read CSS custom properties set by the host document for theming */
+          background: var(--card-bg, #ffffff);
+          color: var(--card-text, #0f172a);
+          font-family: var(--font-sans, system-ui, sans-serif);
+        }
+
+        :host(:hover) {
+          box-shadow: 0 4px 6px rgb(0 0 0 / 0.1);
+        }
+
+        img {
+          width: 100%;
+          aspect-ratio: 4 / 3;
+          object-fit: cover;
+        }
+
+        .content { padding: 1rem; }
+        .name    { font-size: 1rem; font-weight: 600; margin: 0 0 0.25rem; }
+        .price   { font-size: 1.25rem; font-weight: 700; color: var(--color-primary, #3b82f6); }
+
+        /* ::slotted targets direct children in the default slot */
+        ::slotted(p) { font-size: 0.875rem; color: #64748b; margin: 0.5rem 0 0; }
+      </style>
+
+      <img src="${imageUrl}" alt="${name}" />
+      <div class="content">
+        <h2 class="name" part="name">${name}</h2>
+        <p class="price" part="price">$${price}</p>
+        <slot></slot>
+      </div>
     `;
-
-    const tooltip = document.createElement("div");
-    tooltip.className = "tooltip";
-    // Read the label from a host attribute
-    tooltip.textContent = this.getAttribute("label") ?? "";
-
-    shadow.appendChild(style);
-    shadow.appendChild(tooltip);
   }
 }
 
-customElements.define("vanilla-tooltip", VanillaTooltip);
+// Register with the custom elements registry
+customElements.define("product-card", ProductCard);
 ```
 
 ```html
-<!-- index.html -->
-<vanilla-tooltip label="Saved successfully!"></vanilla-tooltip>
-```
+<!-- Usage — works in any HTML, any framework -->
+<product-card
+  product-name="Wireless Headphones"
+  price="129.99"
+  image-url="/images/headphones.jpg"
+>
+  <p>Noise-cancelling, 30-hour battery life.</p>
+</product-card>
 
-The `.tooltip` style defined inside the shadow root has zero effect on any `.tooltip` class that exists in the outer document.
+<style>
+  /* Theme via CSS custom properties — the intended external API */
+  :root {
+    --color-primary: #8b5cf6; /* purple brand */
+    --card-bg: #f8fafc;
+  }
+
+  /* ::part() — target exposed parts directly from the outside */
+  product-card::part(price) {
+    font-size: 1.5rem; /* override price typography externally */
+  }
+</style>
+```
 
 ---
 
-### Slots — projecting light DOM content
+### `adoptedStyleSheets` — Shared Stylesheets Without Duplication
 
-Slots let consumers of your component pass in their own markup, which gets rendered at the slot's position inside the shadow tree.
+When multiple shadow roots need the same styles (design tokens, base reset), `adoptedStyleSheets` shares a single `CSSStyleSheet` object across multiple shadow roots without duplicating the CSS text:
 
 ```ts
-// icon-button.ts
-class IconButton extends HTMLElement {
+// lib/shared-styles.ts — single stylesheet instance shared across components
+
+// CSSStyleSheet is the CSS Object Model representation of a stylesheet
+const sharedSheet = new CSSStyleSheet();
+
+// replaceSync populates the stylesheet synchronously
+sharedSheet.replaceSync(`
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
+
+  :host {
+    /* Inherit design tokens from the document */
+    --color-primary:    var(--ds-color-primary, #3b82f6);
+    --color-text:       var(--ds-color-text, #0f172a);
+    --radius-md:        var(--ds-radius-md, 0.5rem);
+    --font-sans:        var(--ds-font-sans, system-ui, sans-serif);
+  }
+`);
+
+export { sharedSheet };
+```
+
+```ts
+// components/BaseComponent.ts — adopts the shared stylesheet
+import { sharedSheet } from "@/lib/shared-styles";
+
+class BaseButton extends HTMLElement {
+  private shadow: ShadowRoot;
+
   constructor() {
     super();
-    const shadow = this.attachShadow({ mode: "open" });
+    this.shadow = this.attachShadow({ mode: "open" });
 
-    shadow.innerHTML = `
-      <style>
-        button {
-          display: inline-flex;
-          align-items: center;
-          gap: 8px;
-          padding: 8px 16px;
-          border: none;
-          border-radius: 6px;
-          background: #0070f3;
-          color: white;
-          cursor: pointer;
-          font-size: 14px;
-        }
-        /* ::slotted targets the projected light DOM children */
-        ::slotted(svg) {
-          width: 16px;
-          height: 16px;
-        }
-      </style>
-      <button>
-        <slot name="icon"></slot>  <!-- named slot for an icon -->
-        <slot></slot>              <!-- default slot for button text -->
+    // adoptedStyleSheets: the shadow root shares the CSSStyleSheet object.
+    // No CSS duplication — all shadow roots referencing the same sheet
+    // use one in-memory stylesheet, not copies.
+    this.shadow.adoptedStyleSheets = [sharedSheet];
+  }
+
+  connectedCallback() {
+    this.shadow.innerHTML = `
+      <button part="button">
+        <slot></slot>
       </button>
     `;
+
+    // Additional component-specific styles (separate from shared)
+    const componentSheet = new CSSStyleSheet();
+    componentSheet.replaceSync(`
+      button {
+        background: var(--color-primary);
+        color: white;
+        border: none;
+        border-radius: var(--radius-md);
+        padding: 0.5rem 1rem;
+        font-family: var(--font-sans);
+        cursor: pointer;
+        font-size: 0.875rem;
+        font-weight: 500;
+      }
+      button:hover { filter: brightness(1.1); }
+      button:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+    `);
+
+    // Combine shared + component-specific stylesheets
+    this.shadow.adoptedStyleSheets = [sharedSheet, componentSheet];
   }
 }
 
-customElements.define("icon-button", IconButton);
+customElements.define("ds-button", BaseButton);
 ```
+
+---
+
+### Declarative Shadow DOM — SSR-Compatible
+
+Imperative Shadow DOM (`attachShadow()`) only works in the browser — it requires JavaScript to run. **Declarative Shadow DOM** uses a `<template shadowrootmode>` attribute to declare the shadow root in HTML itself, making it SSR-compatible:
 
 ```html
-<icon-button>
-  <!-- This SVG is projected into the "icon" named slot -->
-  <svg slot="icon" viewBox="0 0 24 24">...</svg>
-  Save Changes
-</icon-button>
+<!-- Server renders this HTML — no JavaScript required for the shadow root -->
+<product-card>
+  <template shadowrootmode="open">
+    <style>
+      :host {
+        display: block;
+        padding: 1rem;
+        background: var(--card-bg, white);
+      }
+      h2 {
+        font-size: 1.125rem;
+        font-weight: 600;
+      }
+    </style>
+    <h2 part="title">
+      <slot name="title"></slot>
+    </h2>
+    <div class="body">
+      <slot></slot>
+    </div>
+  </template>
+
+  <!-- Light DOM children — slotted into the shadow tree -->
+  <span slot="title">Wireless Headphones</span>
+  <p>Noise-cancelling, 30-hour battery life.</p>
+</product-card>
 ```
 
-The light DOM children stay in the light DOM — they're only _visually_ projected into the shadow tree. This distinction matters for styling and event handling.
+```tsx
+// app/products/page.tsx — Next.js Server Component generating DSD
+// Declarative Shadow DOM in JSX (requires suppressHydrationWarning on the template)
+export async function ProductCard({ product }: { product: Product }) {
+  return (
+    <product-card>
+      {/* @ts-expect-error — shadowrootmode is not in React's JSX types yet */}
+      <template shadowrootmode="open" suppressHydrationWarning>
+        <style>{`
+          :host {
+            display: block;
+            border-radius: 0.5rem;
+            background: var(--card-bg, white);
+            box-shadow: 0 1px 3px rgb(0 0 0 / 0.1);
+          }
+          ::slotted(img) { width: 100%; aspect-ratio: 4/3; object-fit: cover; }
+          .content { padding: 1rem; }
+        `}</style>
+        <slot name="image"></slot>
+        <div className="content">
+          <slot name="title"></slot>
+          <slot name="price"></slot>
+          <slot></slot>
+        </div>
+      </template>
+
+      <img slot="image" src={product.imageUrl} alt={product.name} />
+      <h2 slot="title">{product.name}</h2>
+      <span slot="price">${product.price}</span>
+    </product-card>
+  );
+}
+```
 
 ---
 
-### Styling the host element with `:host`
+### `::part()` — Exposing Shadow Internals for External Styling
 
-```css
-/* Inside a shadow root's <style> block */
+`::part()` lets external CSS style specific elements inside a shadow tree that the component author has explicitly exposed via the `part` attribute:
 
-/* Style the host element itself */
-:host {
-  display: block;
-}
-
-/* Conditional styles based on a host attribute */
-:host([disabled]) {
-  opacity: 0.5;
-  pointer-events: none;
-}
-
-/* Style based on a class applied to the host from outside */
-:host(.compact) {
-  padding: 4px;
-}
-```
-
-<Callout type="info">
-  `:host` only works inside a shadow root. It selects the shadow host element —
-  the custom element itself — from within its own shadow tree.
-</Callout>
-
----
-
-### CSS custom properties pierce the shadow boundary
-
-One intentional escape hatch: CSS custom properties (variables) defined on the host or any ancestor _do_ inherit into the shadow tree.
-
-```css
-/* outer document */
-icon-button {
-  --button-bg: #e00;
-}
+```ts
+// Shadow DOM — exposes internal elements via part attributes
+this.shadow.innerHTML = `
+  <style>
+    /* Default internal styles */
+    .container { display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem; }
+    .icon { width: 1.5rem; height: 1.5rem; }
+    .label { font-weight: 500; }
+    .badge { background: #dbeafe; color: #1e40af; padding: 2px 8px; border-radius: 9999px; font-size: 0.75rem; }
+  </style>
+  <div class="container">
+    <span class="icon" part="icon">⚡</span>
+    <span class="label" part="label"><slot></slot></span>
+    <span class="badge" part="badge"></span>
+  </div>
+`;
 ```
 
 ```css
-/* inside the shadow root */
-button {
-  background: var(--button-bg, #0070f3); /* falls back to blue if not set */
+/* External CSS — styling the exposed parts */
+
+/* Default appearance */
+status-indicator::part(icon) {
+  font-size: 1.25rem;
+}
+status-indicator::part(label) {
+  font-family: var(--font-mono);
+}
+
+/* State-based styling of parts */
+status-indicator[data-status="error"]::part(icon) {
+  color: #dc2626;
+}
+status-indicator[data-status="success"]::part(icon) {
+  color: #16a34a;
+}
+status-indicator[data-status="error"]::part(badge) {
+  background: #fee2e2;
+  color: #991b1b;
 }
 ```
-
-This is the idiomatic way to let consumers theme your Web Component without breaking encapsulation.
 
 ---
 
 ## Real-World Use Case
 
-You're building a **design system** distributed as an npm package. Your `<ds-modal>` component has specific layout, z-index, and animation styles. Without Shadow DOM, shipping this component means either asking consumers to import a global CSS file (conflict-prone) or using deeply-scoped class names (`.ds-modal__overlay--active` — not fun).
+**Embedded third-party widget.** A SaaS company ships a customer feedback widget that's embedded on customer sites via a `<script>` tag. The widget renders inside a shadow root — the host site's CSS resets, font declarations, and layout rules have no effect on the widget, and the widget's CSS has no effect on the host site. This bidirectional isolation is impossible with CSS Modules or Tailwind (which only prevent the component's styles from leaking out, but don't prevent external styles from leaking in). The component publishes its theming surface via `::part()` and CSS custom properties — host sites can brand the widget without needing to know its internal structure.
 
-With Shadow DOM, you ship the component as a self-contained custom element. The modal's styles are fully encapsulated. Consumers only need to:
-
-1. Import the JS module that registers the custom element.
-2. Drop `<ds-modal>` into their HTML.
-3. Optionally customize via CSS custom properties you've exposed as a public API.
-
-No stylesheet imports. No class-name conflicts. No specificity wars.
+**Design system published as Web Components.** A large organization has teams using React, Angular, Vue, and plain HTML. A Web Components-based design system works in all four without framework adapters. Styles are encapsulated natively. `adoptedStyleSheets` shares design token stylesheets across all component instances without duplication. `::part()` exposes a controlled styling API so teams can apply their brand overrides without breaking encapsulation.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-### 1. Forgetting that `::slotted()` has limited depth
-
-`::slotted()` only matches direct slotted children — it doesn't let you style deeper descendants.
-
-```css
-/* ✅ Works — targets direct slot child */
-::slotted(p) {
-  color: red;
-}
-
-/* ❌ Does NOT work — can't target nested elements */
-::slotted(p span) {
-  color: red;
-}
-```
-
-If you need to style deeper descendants of slotted content, use CSS custom properties or accept that the consumer controls those styles.
-
----
-
-### 2. Event retargeting surprises
-
-Events that originate inside a shadow tree are **retargeted** when they cross the shadow boundary. From the outside, `event.target` will be the shadow host, not the actual element that fired the event.
+**1. Setting `innerHTML` with unescaped user data.**
+Shadow DOM doesn't protect against XSS. If you render user-provided strings via `innerHTML`, you have an XSS vulnerability — shadow root or not. Always use `textContent` for user data:
 
 ```ts
-document.querySelector("icon-button")?.addEventListener("click", (e) => {
-  // e.target is <icon-button>, not the internal <button>
-  console.log(e.target);
-});
-```
-
-Use `event.composedPath()` to see the full path including shadow internals.
-
----
-
-### 3. `innerHTML` for styling is fine, but watch XSS
-
-Many developers use `shadow.innerHTML = \`<style>...</style><div>...</div>\`` for convenience. This is fine when content is static. If you're interpolating user-provided data into that string, you have an XSS vulnerability — shadow DOM provides style encapsulation, not security sandboxing.
-
-```ts
-// ❌ Never do this with user data
+// ❌ XSS vulnerability
 shadow.innerHTML = `<div>${userInput}</div>`;
 
-// ✅ Use DOM APIs for dynamic content
+// ✅ Safe — textContent escapes HTML
 const div = document.createElement("div");
-div.textContent = userInput; // textContent escapes HTML
+div.textContent = userInput;
 shadow.appendChild(div);
 ```
 
----
+**2. Expecting `::slotted()` to work on nested elements.**
+`::slotted(p)` targets direct slotted children. `::slotted(p span)` does not work — `::slotted()` only matches the top-level slotted element, not its descendants. For deeper styling, use CSS custom properties passed from outside, or accept that consumers style their slotted content with their own CSS.
 
-### 4. Global styles like CSS resets won't apply
+**3. CSS resets and global fonts not applying inside shadow roots.**
+Tailwind's `preflight`, `normalize.css`, `box-sizing: border-box` resets, and `font-family` set on `body` — none of these apply inside shadow trees. You must re-declare base styles inside each shadow root, or use `adoptedStyleSheets` to share them efficiently.
 
-If your app uses a global `box-sizing: border-box` reset or a font-family set on `body`, those won't inherit into your shadow trees by default. You'll need to either re-declare them inside each shadow root or use `@import` / `adoptedStyleSheets`.
+**4. `position: fixed` inside a shadow root is relative to the viewport — but transforms break it.**
+`position: fixed` elements are positioned relative to the viewport, even inside a shadow root. However, if any ancestor of the shadow host has a `transform`, `filter`, or `will-change: transform`, the fixed-position element is positioned relative to that ancestor instead — the same behavior as in the light DOM.
 
-<Callout type="warn">
-  CSS resets, normalize.css, and Tailwind's preflight do **not** apply inside
-  shadow trees. Always test your components in isolation.
-</Callout>
-
----
-
-### 5. Server-side rendering is still awkward
-
-Shadow DOM is a client-side browser API. Declarative Shadow DOM (using `<template shadowrootmode="open">`) is the emerging SSR solution and is now supported in all major browsers, but framework support varies. For fully SSR-rendered Web Components, verify your framework or bundler explicitly supports Declarative Shadow DOM before shipping.
+**5. Declarative Shadow DOM requires a polyfill for older browsers.**
+Declarative Shadow DOM (`<template shadowrootmode>`) is supported in Chrome 111+, Safari 16.4+, and Firefox 123+. For older browsers, a small JavaScript polyfill processes the templates imperatively after load. Always verify browser support requirements before using DSD in production SSR.
 
 ---
 
 ## Summary
 
-Shadow DOM gives you true style and DOM encapsulation at the browser level — no build tools or naming conventions required. You attach a shadow root to a host element, define your internal structure and styles inside it, and use slots to let consumers compose content into your component. CSS custom properties are the intended API for external theming. The main gotchas are `::slotted()` depth limits, event retargeting across the boundary, and the fact that global stylesheets don't apply inside shadow trees. For building reusable, distributable UI components — especially in design systems — Shadow DOM is the native platform answer to scoped styles.
+Shadow DOM provides native browser-level style and DOM encapsulation. Styles inside a shadow tree don't leak out, and document styles don't leak in — making it the right choice for distributable Web Components and third-party embeds where bidirectional isolation is required. CSS custom properties and `::part()` are the intended external theming API. `adoptedStyleSheets` shares a single `CSSStyleSheet` object across multiple shadow roots without CSS duplication. Declarative Shadow DOM (`<template shadowrootmode="open">`) enables shadow roots in server-rendered HTML without JavaScript. For standard React applications, CSS Modules or Tailwind provide sufficient scoping at lower complexity — reach for Shadow DOM when you need true platform-level isolation or cross-framework compatibility.
+
+---
+
+## Interview Questions
+
+**Q1. How does Shadow DOM style encapsulation work and what are its limits?**
+
+Shadow DOM creates a style boundary at the shadow root. CSS rules defined inside the shadow tree (in `<style>` tags or `adoptedStyleSheets`) only match elements inside that same shadow root — they never match document elements. Document CSS rules only match document elements — they never match elements inside a shadow root. The limits: CSS custom properties (variables) inherit through the shadow boundary (intentionally — this is the theming API). Inherited CSS properties like `color`, `font-family`, and `line-height` also inherit from the host element into the shadow `:host`. And `::part()` pseudo-elements allow external CSS to explicitly target shadow internals that the component author exposes. Shadow DOM is not a security boundary — it prevents _accidental_ style collision, not _intentional_ CSS injection.
+
+**Q2. What is `::part()` and why does it exist?**
+
+`::part()` is a CSS pseudo-element that lets external stylesheets target specific elements inside a shadow tree that the component author has marked with a `part` attribute. Without `::part()`, the shadow boundary would make the component completely unstyable from outside — which would make it impossible to brand or theme. `::part()` solves this by giving component authors a controlled API: only elements explicitly marked with `part="name"` can be styled externally. Consumers style them with `my-component::part(name) { ... }`. This is a deliberate contract: the component exposes a surface area for external styling without exposing its full internal structure.
+
+**Q3. What is Declarative Shadow DOM and why is it needed for SSR?**
+
+Standard Shadow DOM is created imperatively via `element.attachShadow()` — a JavaScript API. This means shadow roots don't exist in the initial HTML sent by the server; they're created when JS runs on the client, causing content shifts and delayed rendering. Declarative Shadow DOM uses `<template shadowrootmode="open">` directly in HTML. When the browser's HTML parser encounters this, it creates the shadow root immediately during parsing — before any JavaScript runs. This makes shadow trees available in the initial paint, compatible with server-side rendering. It's now supported in all major modern browsers (Chrome 111+, Safari 16.4+, Firefox 123+).
+
+**Q4. What is `adoptedStyleSheets` and what problem does it solve?**
+
+Without `adoptedStyleSheets`, each shadow root that needs common styles (like a shared design token CSS file) must contain its own `<style>` block with a copy of those styles. With 50 component instances, you have 50 copies of the same CSS in memory and in the DOM. `adoptedStyleSheets` lets shadow roots (and the document) share a reference to a single `CSSStyleSheet` object. The stylesheet exists once in memory; all shadow roots using it share that single instance. This is both more memory-efficient and enables live updates — calling `sheet.replace()` immediately updates all adopting shadow roots and documents.
+
+**Q5. When should you use Shadow DOM vs CSS Modules vs Tailwind for style scoping?**
+
+CSS Modules and Tailwind handle _leaking out_: they scope your component's class names so they don't collide with other components' classes. They don't handle _leaking in_: document-level styles (CSS resets, global typography, third-party styles) can still affect your component's elements. Shadow DOM handles both directions: bidirectional encapsulation. Use Shadow DOM when: you're building a Web Component distributed to third-party sites (you have no control over the host page's CSS), you need cross-framework compatibility without framework adapters, or the component embeds in hostile styling environments. Use CSS Modules or Tailwind when: you're building within a single React application where you control the global CSS, need SSR-friendliness without polyfills, or want lower-complexity tooling.
+
+**Q6. How do CSS custom properties work across the shadow boundary and why is this useful?**
+
+CSS custom properties (variables) inherit through the shadow boundary just like other inherited CSS properties. If you set `--color-primary: #8b5cf6` on the `<body>` or a shadow host element, a `var(--color-primary)` inside the shadow tree resolves to that value. This is by design — it's the primary theming mechanism for Web Components. The component defines its internal styles using `var(--card-bg, white)` (with a fallback), and consumers theme the component by setting the custom property on the host: `product-card { --card-bg: #f8fafc; }`. This gives external code a clean, explicit API for theming (custom properties they set) while keeping internal implementation details (the actual class names and structure) fully encapsulated.

@@ -1,30 +1,30 @@
 ---
 title: Overview
-description: Patterns and mechanisms for structuring the UI layer — from component boundaries and server/client composition to micro-frontends and isolation primitives.
+description: Patterns and mechanisms for structuring the UI layer — from RSC composition and Suspense to compound components, headless patterns, portal layering, Shadow DOM, edge rendering, and micro-frontend orchestration.
 ---
 
 ## Component & UI Architecture
 
-This section covers how to structure the UI layer at a system level. Individual components are the unit of composition, but the decisions that matter most are about boundaries — where server work ends, where client interactivity begins, how errors are contained, and how large teams own independent UI surfaces.
+This section covers how to structure the UI layer at a system level. Individual components are the unit of composition, but the decisions that matter most are about boundaries — where server work ends and client interactivity begins, how errors are isolated, how behavior is decoupled from markup, how floating layers are coordinated, and how large teams own independent UI surfaces.
 
-The section is ordered from the most foundational model (Server Components, the default in modern React) through progressively more advanced composition patterns, ending with large-scale orchestration concerns.
+The section moves from the most foundational model (React Server Components) through progressively more advanced patterns, ending with large-scale orchestration concerns.
 
-## What's covered
+## What's Covered
 
-**Server Components** — React's model for components that run only on the server, with no JavaScript sent to the client. Covers the server/client boundary, composition patterns, and when to reach for `'use client'`.
+**Server Components** — React's model for server-only components that ship zero JavaScript to the client. Covers the server/client boundary, the `cache()` deduplication function, the `server-only` package, the `taint` API for preventing sensitive data leaks, parallel vs sequential fetch patterns, and the children composition pattern for mixing Server and Client Components.
 
-**Suspense Boundaries** — How to declaratively handle async rendering with loading states, and how boundaries interact with streaming SSR and data fetching.
+**Suspense Boundaries** — How components suspend via thrown Promises, how streaming SSR uses boundaries as progressive rendering slots, how `use()` suspends Client Components from Server-passed Promises, and how `startTransition` prevents fallback re-triggering on state updates that cause re-suspension.
 
-**Error Boundaries** — Isolating runtime errors so a single component failure doesn't crash the entire UI tree.
+**Error Boundaries** — How `getDerivedStateFromError` (render-phase, pure) and `componentDidCatch` (commit-phase, side effects) work together. What errors boundaries catch and what they don't. Next.js `error.tsx` and `global-error.tsx` file-based boundaries. Handling async and event handler errors that boundaries miss. React 19 `useActionState` for form errors.
 
-**Compound Components** — How to build flexible, composable APIs using React Context to share implicit state across a cooperating set of components — the pattern behind tabs, accordions, and every serious UI library.
+**Compound Components** — Sharing implicit state across cooperating subcomponents via React Context. The controlled/uncontrolled pattern. `useId` for hydration-safe ARIA IDs. ARIA roving tabindex for keyboard navigation. The polymorphic `as` prop. Passing Server Component children into Client Component compound roots.
 
-**Headless UI Pattern** — How to separate component logic, keyboard navigation, and accessibility from markup entirely — building reusable behavior that any consumer can render however they need.
+**Headless UI Pattern** — Separating interaction logic, keyboard navigation, accessibility, and positioning entirely from markup. The prop getter pattern. Building a fully accessible combobox with complete keyboard interaction model. Floating UI for viewport-aware popup positioning. When to choose headless over compound components.
 
-**Portal & Layering Architecture** — How to build a robust layering system for tooltips, modals, toasts, and dropdowns using React portals, stacking contexts, and a coordinated z-index scale.
+**Portal & Layering Architecture** — How `createPortal` escapes DOM containment while preserving the React tree. Stacking contexts and why `z-index: 9999` fails. A named z-index CSS custom property scale. `isolation: isolate` for self-contained component layering. Focus trap implementation. The `inert` attribute for modal backgrounds. Backdrop-click detection.
 
-**Shadow DOM** — The browser's native encapsulation primitive, how it isolates styles and DOM, and when to use it versus CSS Modules or other scoping approaches.
+**Shadow DOM** — Native browser-level style and DOM encapsulation. `<slot>` for content projection. `::part()` for exposing internal elements to external CSS. `adoptedStyleSheets` for efficient shared stylesheets. Declarative Shadow DOM for SSR-compatible shadow roots. CSS custom properties as the theming API across the boundary.
 
-**Edge Rendering** — Running server logic at the CDN edge for lower latency, and what constraints that introduces.
+**Edge Rendering** — The WinterCG runtime API surface, what's available and what isn't. Next.js middleware (always edge) vs edge route handlers (`export const runtime = 'edge'`). Streaming from the edge. `stale-while-revalidate` for ISR-style freshness. JWT verification with Web Crypto. When edge rendering beats static generation or Node.js SSR.
 
-**Micro-frontend Orchestration** — How independently deployed frontend applications compose into a single UI — routing, shared state, and dependency isolation.
+**Micro-frontend Orchestration** — Build-time vs server-side vs client-side (Module Federation) composition. The `remoteEntry.js` manifest and runtime module resolution. Singleton shared dependencies and the multiple-React-instances problem. Cross-remote communication via custom event bus (not shared stores). TypeScript remote module declarations. Platform contracts for version coordination. Integration testing across team boundaries.
