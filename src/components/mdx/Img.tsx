@@ -2,7 +2,9 @@
 
 import NextImage from "next/image";
 import { useState } from "react";
-import { getImage } from "./images";
+
+const BLUR_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mMYOtn8DwABJAGV46v98AAAAABJRU5ErkJggg==";
 
 type ImgProps = {
   src: string;
@@ -11,20 +13,20 @@ type ImgProps = {
 };
 
 export function Img({ src, alt, caption }: ImgProps) {
-  const image = getImage(src);
   const [loaded, setLoaded] = useState(false);
 
   return (
     <figure className="my-6 overflow-hidden rounded-lg">
       <NextImage
-        src={image ?? src}
+        src={src}
         alt={alt}
-        width={image ? undefined : 1200}
-        height={image ? undefined : 630}
+        width={1200}
+        height={630}
         className={`w-full rounded-lg border border-border transition-all duration-300 ease-in ${
           loaded ? "blur-none" : "blur-2xl"
         }`}
-        placeholder={image ? "blur" : "empty"}
+        placeholder="blur"
+        blurDataURL={BLUR_DATA_URL}
         onLoad={() => setLoaded(true)}
       />
       {caption && (

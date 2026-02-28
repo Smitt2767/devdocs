@@ -12,19 +12,16 @@ import {
   useAudioPlayer,
 } from "@/components/ui/audio-player";
 import { useDocsNavigation } from "@/components/contexts/docs-navigation";
-import { getAudio } from "./audios";
-
 type AudioProps = {
   src: string;
   title?: string;
 };
 
 export function Audio({ src, title }: AudioProps) {
-  const resolvedSrc = getAudio(src) ?? src;
 
   return (
     <AudioPlayerProvider>
-      <AudioPlayerUI src={resolvedSrc} title={title} />
+      <AudioPlayerUI src={src} title={title} />
     </AudioPlayerProvider>
   );
 }
