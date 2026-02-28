@@ -1,24 +1,26 @@
 ---
 title: Overview
-description: The attack vectors and mitigations most relevant to frontend engineers — from active exploits to supply chain risks.
+description: The attack vectors and mitigations most relevant to frontend engineers — from active exploits and browser-enforced policy headers, through code-level injection defences, to secrets hygiene and supply chain integrity.
 ---
 
 ## Security
 
-Frontend security is not just about libraries and headers — it's about understanding how attacks work at the browser level and building defenses that address the root cause rather than the symptom.
+Frontend security is not just headers and libraries — it's understanding how attacks work at the browser level and building defences that address root causes rather than symptoms. A misconfigured cookie, a missing sanitisation step, a leaked API key, or a single compromised transitive dependency can all result in production incidents.
 
-The section moves from the most common active attacks, through browser-enforced defenses, to the code-level and dependency-level risks that are easier to overlook.
+The section progresses from active attack vectors, through browser-enforced policy mechanisms, to code-level runtime defences, and finally to the infrastructure layer of secrets and dependencies.
 
-## What's covered
+---
 
-**CSRF vs XSS Mitigation** — The two most common web attacks, how they work mechanically, and the specific mitigations for each — `SameSite` cookies for CSRF, output encoding and CSP for XSS.
+## What's Covered
 
-**Content Security Policy** — Browser-enforced allowlists that restrict which scripts, styles, and resources can load on your page. The most effective defense against XSS after it's bypassed your input validation.
+**CSRF vs XSS Mitigation** — The mechanics of all three XSS variants: stored (persists in database, affects all users), reflected (URL-embedded, requires phishing), and DOM-based (entirely client-side, invisible to WAFs). Mutation XSS (mXSS) and why DOMPurify version matters. React JSX's default string encoding as the first layer. Server-side `sanitize-html` before persistence, client-side DOMPurify before `dangerouslySetInnerHTML`. CSRF mechanics: how a cross-site form or `<img>` carries the session cookie. `SameSite=Lax` as the primary CSRF defence. Custom request header (`X-Requested-With`) for JSON APIs. HMAC-signed double-submit token pattern for cross-origin form scenarios.
 
-**Trusted Types** — A browser API that enforces safe DOM manipulation by preventing raw string injection into dangerous sinks like `innerHTML` and `document.write`.
+**Content Security Policy** — Per-request nonce generation in Next.js middleware — nonces passed to Server Components via custom header. Nonce vs hash CSP: when each is appropriate (dynamic values vs static scripts). `strict-dynamic` for trust propagation to dynamically inserted scripts. `frame-ancestors 'none'` for clickjacking prevention and why it supersedes `X-Frame-Options`. `base-uri 'self'` blocking base-tag injection. `form-action 'self'` restricting form submission targets. `upgrade-insecure-requests` for HTTP→HTTPS subresource promotion. SRI `integrity=` hashes for CDN-loaded scripts and stylesheets. Trusted Types integration (`require-trusted-types-for 'script'`). Report-Only migration workflow: monitor 48–72 hours before enforcing.
 
-**Secrets Management** — Keeping API keys, tokens, and credentials out of the client bundle — where they belong in the server environment, how to validate them at startup, and how to audit for accidental exposure.
+**Trusted Types** — The three sink categories: `createHTML` for `innerHTML`/`outerHTML`, `createScript` for `eval()`/`new Function()`, `createScriptURL` for `script.src`/`new Worker()`/`import()`. DOMPurify integration in `createHTML`. `createScriptURL` origin allowlist. Browser support caveat (Chromium-only). The `nextjs` policy name required for Next.js framework compatibility. The `default` policy anti-pattern. `@types/trusted-types` for TypeScript. `isTrustedTypesSupported()` guard for cross-browser code. Report-Only migration phase: find all sink violations without breaking production.
 
-**Prototype Pollution** — A JavaScript vulnerability where user-controlled input can inject properties into `Object.prototype`, silently affecting all objects in the runtime. Common in data-merging utilities processing untrusted JSON.
+**Secrets Management** — `NEXT_PUBLIC_` boundary: the build-time rule that keeps server variables out of the client bundle. `import "server-only"` as a hard module boundary with build-time enforcement. `t3-env` with Zod for startup validation — misconfiguration fails on deploy, not at runtime. `gitleaks` pre-commit hook scanning staged files. Post-build bundle leak detection with `grep` and `trufflehog`. Doppler vault integration for team environments. Zero-downtime JWT key rotation with current + previous key support. Documenting the five failure modes: accidental prefix, logging secrets, committing `.env.local`, URL leakage, missing `server-only`.
 
-**Dependency & Supply Chain Risks** — The attack surface introduced by third-party packages — malicious packages, compromised maintainers, typosquatting, and the tooling that helps you audit and lock your dependency tree.
+**Prototype Pollution** — The prototype chain walk and why `__proto__` assignment is the attack vector. Real CVEs: lodash (< 4.17.12), jQuery (< 3.4.0), minimist (< 0.2.1), immer (< 8.0.1). Naive recursive merge as the most common source. Guarded merge with `DANGEROUS_KEYS` denylist and depth limit. `structuredClone()` as a safe deep copy alternative. JSON.parse `reviver` for key filtering at parse time. Zod `.strict()` as the most ergonomic protection. `qs` query string parser fix (`allowPrototypes: false`, upgrade to ≥ 6.7.3). `Object.hasOwn()` vs `hasOwnProperty` shadowing risk. `Object.create(null)` for prototype-free data containers. `Object.freeze(Object.prototype)` in high-security worker contexts.
+
+**Dependency & Supply Chain Risks** — Attack taxonomy: typosquatting, dependency confusion, compromised maintainers, malicious install scripts, protestware. The lockfile as security infrastructure — `npm ci` vs `npm install` enforcement. `npm audit --audit-level=high` for known CVEs. Socket CLI for proactive behavioural detection before CVEs exist. SRI for CDN scripts and stylesheets. `package.json` `overrides` for patching transitive vulnerabilities with CVE documentation. GitHub Dependabot configuration with dependency grouping. `ignore-scripts=true` with selective rebuild for trusted packages. Private registry scoping in `.npmrc` to prevent dependency confusion. npm provenance attestations and `npm audit signatures`. SBOM generation with `cdxgen` in CycloneDX/SPDX format.
