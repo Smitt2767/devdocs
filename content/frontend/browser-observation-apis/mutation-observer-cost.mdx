@@ -1,19 +1,19 @@
 ---
 title: MutationObserver Cost
-description: A practical guide to understanding the performance cost of MutationObserver and how to use it efficiently in modern web applications.
+description: How MutationObserver works as a microtask, its performance cost at different observation scopes, characterData and attribute tracking, attributeFilter for targeted observation, takeRecords() for synchronous flushing, MutationObserver vs ResizeObserver, and patterns for React integration.
 ---
 
 ## Overview
 
-`MutationObserver` lets you watch for changes to the DOM — added nodes, removed nodes, attribute changes, and text content updates. It's the modern replacement for the deprecated `MutationEvents` API and is widely used in frameworks, third-party scripts, analytics tools, and custom component libraries.
+`MutationObserver` lets you watch for changes to the DOM — added nodes, removed nodes, attribute changes, and text content updates. It's the modern replacement for the deprecated `MutationEvents` API and is widely used in frameworks, analytics tools, and custom component libraries.
 
-The problem is that **it's easy to misuse**. Observing too broadly, reacting too eagerly, or forgetting to disconnect observers can quietly drain rendering performance — especially in large, dynamic UIs.
+The problem is that it's easy to misuse. Observing too broadly, reacting too eagerly, or forgetting to disconnect observers quietly drains rendering performance in large, dynamic UIs.
 
 ---
 
 ## How It Works
 
-When you create a `MutationObserver`, you provide a callback and a configuration object that describes what to watch. The browser queues mutation records during a DOM operation and flushes them to your callback asynchronously — after the current task completes, as a microtask.
+When you create a `MutationObserver`, you provide a callback and configuration describing what to watch. The browser queues `MutationRecord` objects during DOM operations and flushes them to your callback **as a microtask** — after the current task completes but before the next macrotask (like `setTimeout`).
 
 ```
 DOM mutation happens
@@ -22,16 +22,30 @@ Browser batches MutationRecords
         ↓
 Current task finishes
         ↓
-Your callback is called (microtask)
+Microtask queue drains → your callback fires
+        ↓
+Paint / next macrotask
 ```
 
-The callback receives a list of `MutationRecord` objects, each describing a single observed change. Because this runs on the main thread, a slow or overly triggered callback will block rendering.
+The callback runs on the main thread. A slow or overly triggered callback blocks rendering.
 
-The cost comes from three places:
+### Configuration Options
 
-1. **Observation scope** — watching `subtree: true` on a high-level node means every DOM change in the entire subtree triggers evaluation.
-2. **Callback complexity** — looping over hundreds of mutation records per frame is expensive.
-3. **Observer leaks** — failing to call `.disconnect()` keeps the observer alive and watching indefinitely.
+| Option                  | Type     | What it observes                          |
+| ----------------------- | -------- | ----------------------------------------- |
+| `childList`             | boolean  | Added/removed child nodes                 |
+| `attributes`            | boolean  | Attribute changes on the target           |
+| `characterData`         | boolean  | Text node content changes                 |
+| `subtree`               | boolean  | All descendants, not just direct children |
+| `attributeOldValue`     | boolean  | Record the previous attribute value       |
+| `characterDataOldValue` | boolean  | Record the previous text content          |
+| `attributeFilter`       | string[] | Only observe specific named attributes    |
+
+The cost scales with how broadly you observe:
+
+1. **Observation scope** — `subtree: true` on a high-level node means every descendant change triggers evaluation.
+2. **Callback complexity** — iterating hundreds of records per frame is expensive.
+3. **Observer leaks** — failing to call `.disconnect()` keeps the observer alive indefinitely.
 
 ---
 
@@ -40,18 +54,15 @@ The cost comes from three places:
 ### Basic Observer — Scoped and Intentional
 
 ```ts
-// Observe only a specific container, not the entire document
 const container = document.getElementById("comments-feed");
-
 if (!container) throw new Error("Target element not found");
 
 const observer = new MutationObserver((records) => {
   for (const record of records) {
     if (record.type === "childList") {
-      // React only to added nodes, not every mutation
       for (const node of record.addedNodes) {
         if (node instanceof HTMLElement && node.matches(".comment-item")) {
-          console.log("New comment added:", node.textContent?.slice(0, 50));
+          console.log("New comment:", node.textContent?.slice(0, 50));
         }
       }
     }
@@ -60,63 +71,173 @@ const observer = new MutationObserver((records) => {
 
 observer.observe(container, {
   childList: true, // watch for added/removed children
-  subtree: false, // do NOT watch the entire subtree — keep it shallow
-  attributes: false, // we don't care about attribute changes here
+  subtree: false, // only direct children — not the full subtree
+  attributes: false, // we don't care about attribute changes
 });
 
-// Always disconnect when done — e.g., on component unmount or page navigation
+// Always disconnect when done
 function cleanup() {
   observer.disconnect();
 }
 ```
 
-### Expensive Pattern vs. Efficient Pattern
+---
+
+### Tracking Attribute Changes with `attributeFilter`
+
+Without `attributeFilter`, any attribute change on any observed node fires the callback. Filter to only the attributes you care about:
 
 ```ts
-// ❌ BAD: Watching the entire document body with subtree
+const button = document.getElementById("submit-btn");
+
+const observer = new MutationObserver((records) => {
+  for (const record of records) {
+    if (record.type === "attributes") {
+      const el = record.target as HTMLButtonElement;
+
+      // record.attributeName tells you WHICH attribute changed
+      console.log(`Attribute changed: ${record.attributeName}`);
+
+      // record.oldValue gives the previous value (requires attributeOldValue: true)
+      console.log(`Previous value: ${record.oldValue}`);
+      console.log(`New value: ${el.getAttribute(record.attributeName!)}`);
+    }
+  }
+});
+
+button?.observe &&
+  observer.observe(button, {
+    attributes: true,
+    // Only fire when 'disabled' or 'aria-pressed' change — ignore class, style, data-*
+    attributeFilter: ["disabled", "aria-pressed"],
+    attributeOldValue: true, // capture previous value for diffing
+  });
+```
+
+---
+
+### Tracking Text Content Changes with `characterData`
+
+```ts
+const editableDiv = document.getElementById("rich-editor");
+
+const observer = new MutationObserver((records) => {
+  for (const record of records) {
+    if (record.type === "characterData") {
+      const textNode = record.target as Text;
+
+      // record.oldValue requires characterDataOldValue: true
+      console.log("Text changed from:", record.oldValue);
+      console.log("Text changed to:", textNode.data);
+    }
+  }
+});
+
+editableDiv?.childNodes.forEach((node) => {
+  if (node.nodeType === Node.TEXT_NODE) {
+    observer.observe(node, {
+      characterData: true,
+      characterDataOldValue: true,
+    });
+  }
+});
+```
+
+<Callout type="info">
+  `characterData` observes `Text` nodes directly — not element nodes. To observe
+  text changes across an editable element's entire subtree, combine
+  `characterData: true` with `subtree: true`. This fires on every keystroke in a
+  `contenteditable` element, so debounce the callback.
+</Callout>
+
+---
+
+### `takeRecords()` — Synchronous Flush
+
+`takeRecords()` synchronously extracts any queued records from the observer's internal buffer and returns them — clearing the queue. The callback will not fire for those records.
+
+```ts
+// Use case: you need to process pending mutations synchronously
+// before performing a DOM operation that depends on their result
+
+const observer = new MutationObserver((records) => {
+  processRecords(records);
+});
+
+observer.observe(target, { childList: true });
+
+// Later — you need to process mutations NOW, not in the next microtask
+function doSomethingThatRequiresPendingMutations() {
+  // Pull any not-yet-delivered records synchronously
+  const pending = observer.takeRecords();
+
+  if (pending.length > 0) {
+    // Process immediately — callback will NOT fire for these records
+    processRecords(pending);
+  }
+
+  // Now safe to proceed knowing the state is consistent
+  updateDerivedState();
+}
+
+function processRecords(records: MutationRecord[]) {
+  for (const record of records) {
+    console.log("Processing:", record.type, record.addedNodes.length);
+  }
+}
+```
+
+---
+
+### Expensive vs Efficient Pattern
+
+```ts
+// ❌ BAD — watches the entire document with all mutation types
 const badObserver = new MutationObserver(() => {
-  // This fires for every single DOM change site-wide
+  // Fires for every DOM change site-wide — extremely expensive
   document.querySelectorAll(".highlight").forEach((el) => {
-    el.style.background = "yellow"; // Triggers MORE mutations — feedback loop risk
+    el.style.background = "yellow"; // modifying observed nodes → feedback loop risk
   });
 });
 
 badObserver.observe(document.body, {
   subtree: true,
   childList: true,
-  attributes: true,
+  attributes: true, // all attributes, all descendants
 });
 
-// ✅ GOOD: Scoped target, specific config, debounced callback
-const targetList = document.getElementById("notification-list");
+// ✅ GOOD — scoped target, specific config, debounced callback
+const notifList = document.getElementById("notification-list");
 
 let debounceTimer: ReturnType<typeof setTimeout>;
 
 const goodObserver = new MutationObserver(() => {
-  // Debounce to avoid handling a burst of mutations one-by-one
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
-    console.log("Notification list settled, processing...");
-    // Safe to do heavier work here after the burst completes
+    // Only runs after the burst settles — much cheaper
+    console.log("Notification list updated");
   }, 50);
 });
 
-if (targetList) {
-  goodObserver.observe(targetList, {
+notifList &&
+  goodObserver.observe(notifList, {
     childList: true,
-    subtree: false,
+    subtree: false, // direct children only
+    attributes: false, // no attribute watching
   });
-}
 ```
 
-### React — Connecting to Component Lifecycle
+---
+
+### React Integration
 
 ```tsx
+// components/CommentFeed.tsx
 "use client";
 
 import { useEffect, useRef } from "react";
 
-export function CommentTracker() {
+export function CommentFeed() {
   const feedRef = useRef<HTMLUListElement>(null);
 
   useEffect(() => {
@@ -131,13 +252,13 @@ export function CommentTracker() {
       );
 
       if (newComments.length > 0) {
-        console.log(`${newComments.length} new comment(s) detected`);
+        console.log(`${newComments.length} new comment(s) appended`);
       }
     });
 
     observer.observe(el, { childList: true, subtree: false });
 
-    // Cleanup on unmount — critical to avoid memory leaks
+    // Cleanup on unmount — critical to prevent memory leaks across route transitions
     return () => observer.disconnect();
   }, []);
 
@@ -146,71 +267,128 @@ export function CommentTracker() {
 ```
 
 <Callout type="warn">
-  Never observe `document.body` or `document.documentElement` with `subtree:
-  true` and `attributes: true` simultaneously. This is one of the most expensive
-  observer configurations possible and will fire constantly in any active UI.
+  In React, prefer managing state reactively over using `MutationObserver` to
+  watch your own component's DOM. `MutationObserver` is best suited for
+  observing DOM changes from third-party code, native browser behaviour, or
+  elements outside your component's control. Watching your own React-rendered
+  DOM with `MutationObserver` is a sign of a state management problem.
 </Callout>
+
+---
+
+### MutationObserver vs ResizeObserver
+
+A common mistake is using `MutationObserver` to detect when an element's size changes. Use `ResizeObserver` instead:
+
+```ts
+// ❌ MutationObserver does NOT detect size changes
+// It only detects DOM structure and attribute mutations
+const mo = new MutationObserver(() => {
+  const size = element.getBoundingClientRect(); // forced layout read
+  console.log("Maybe the size changed?"); // unreliable — fires on unrelated mutations
+});
+
+mo.observe(element, { attributes: true, subtree: true }); // wrong tool
+
+// ✅ ResizeObserver — fires specifically when layout size changes
+const ro = new ResizeObserver((entries) => {
+  for (const entry of entries) {
+    const { width, height } = entry.contentRect;
+    console.log(`New dimensions: ${width}×${height}`);
+
+    // entry.borderBoxSize and entry.contentBoxSize are also available
+    // for more precise measurements
+  }
+});
+
+ro.observe(element);
+
+// Cleanup
+ro.disconnect();
+```
+
+| Need to detect            | Use                                      |
+| ------------------------- | ---------------------------------------- |
+| Child nodes added/removed | `MutationObserver` with `childList`      |
+| Attribute changes         | `MutationObserver` with `attributes`     |
+| Text content changes      | `MutationObserver` with `characterData`  |
+| Element resizing          | `ResizeObserver`                         |
+| Element visibility        | `IntersectionObserver`                   |
+| Scroll position           | `IntersectionObserver` with `rootMargin` |
 
 ---
 
 ## Real-World Use Case
 
-In a **live chat application**, new messages arrive via WebSocket and are injected into the DOM by a third-party widget you don't control. You want to detect new messages to trigger a notification badge update without polling.
+In a **live chat application**, new messages arrive via WebSocket and are injected into the DOM by a third-party widget you don't control. You need to detect new messages to update a notification badge — without polling and without modifying the widget's source.
 
-Using `MutationObserver`, you scope the observer to the chat widget's scroll container, watch only `childList`, and debounce the callback to batch rapid message bursts. This lets you react to DOM changes from external code without modifying the widget itself — and without the cost of a polling interval.
+Use `MutationObserver` scoped to the chat container, `childList: true` only (no attribute watching, no subtree), and debounce the callback to batch rapid message bursts:
+
+```ts
+const chatContainer = document.querySelector(".chat-messages");
+
+let badge = 0;
+let timer: ReturnType<typeof setTimeout>;
+
+const observer = new MutationObserver(() => {
+  clearTimeout(timer);
+  timer = setTimeout(() => {
+    badge++;
+    updateBadge(badge);
+  }, 50);
+});
+
+chatContainer &&
+  observer.observe(chatContainer, {
+    childList: true,
+    subtree: false, // the widget adds messages as direct children
+  });
+```
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Forgetting to disconnect**
+**1. Forgetting to disconnect.** Observers run for the page's lifetime. In SPAs with route transitions, disconnected-but-alive observers accumulate across page navigations. Always disconnect in `useEffect` return or equivalent teardown.
 
-Every observer that isn't disconnected continues to run for the lifetime of the page. In single-page apps with many route transitions, this stacks up. Always call `observer.disconnect()` in cleanup functions — `useEffect` returns, `AbortController` patterns, `beforeunload` handlers, etc.
+**2. Mutating observed nodes inside the callback.** Adding a class, attribute, or child to a node that's being observed re-fires the callback. This creates infinite loops or microtask storms. Guard with a processing flag or scope observations to exclude the nodes you modify.
 
-**2. Triggering mutations inside the callback**
+**3. Using `subtree: true` as a default.** On large component trees, every DOM change in the entire subtree generates records. Start with `subtree: false`; opt into subtree observation only when you have a specific reason and understand the cost.
 
-If your callback modifies the DOM in a way that's also being observed, you risk an infinite loop or a burst of microtasks. For example, adding a class to every observed node will trigger another mutation record. Guard against this with flags or by scoping the observation tightly enough to exclude the elements you modify.
+**4. Not batching callback work.** `MutationObserver` callbacks can fire dozens of times during a bulk DOM update (a virtual list rendering 200 items). If each callback triggers a layout read (`getBoundingClientRect`), you're causing layout thrashing. Debounce with `setTimeout` or batch using `requestAnimationFrame`.
 
-```ts
-// ❌ Dangerous: modifying observed nodes inside the callback
-observer.observe(container, {
-  childList: true,
-  subtree: true,
-  attributes: true,
-});
-
-const observer = new MutationObserver((records) => {
-  records.forEach(
-    (r) => (r.target as HTMLElement).setAttribute("data-seen", "true"), // re-triggers observer
-  );
-});
-```
-
-**3. Using `subtree: true` as a default**
-
-Developers often add `subtree: true` "just to be safe." On large component trees, this multiplies the number of records your callback receives dramatically. Always start with `subtree: false` and only opt into subtree observation when you have a specific reason.
-
-**4. Not batching work triggered by the callback**
-
-`MutationObserver` callbacks can fire many times in rapid succession during bulk DOM updates (e.g., a virtual list rendering 200 items). If each callback triggers a layout read (like `getBoundingClientRect`), you'll cause repeated layout thrashing. Debounce or batch using `requestAnimationFrame` when the work is non-urgent.
-
-```ts
-const observer = new MutationObserver(() => {
-  // Schedule non-urgent work outside the microtask
-  requestAnimationFrame(() => {
-    recalculateLayout();
-  });
-});
-```
-
-<Callout type="info">
-  Use the browser's Performance panel to record a trace while your observer is
-  active. Look for long microtask blocks following DOM mutations — that's your
-  callback cost made visible.
-</Callout>
+**5. Using `MutationObserver` to detect element size changes.** It doesn't observe layout dimensions. Use `ResizeObserver` for that.
 
 ---
 
 ## Summary
 
-`MutationObserver` is a powerful tool for reacting to DOM changes without polling, but its performance cost scales directly with how broadly and carelessly it's configured. Scope your observers to the smallest meaningful target, opt into only the mutation types you actually need, and always disconnect when the observation is no longer required. Debounce callbacks that trigger heavy work, and never modify observed nodes from inside the callback without guarding against re-entry. Used correctly, `MutationObserver` has minimal overhead; used carelessly, it becomes one of the harder-to-diagnose sources of main-thread jank.
+`MutationObserver` fires asynchronously as a microtask after DOM mutations — never synchronously. Performance cost scales with observation scope: `subtree: true` on a top-level element is dramatically more expensive than a scoped shallow observer. Always disconnect in cleanup functions. Use `attributeFilter` to restrict attribute observation to only the attributes you need; use `characterData` with `characterDataOldValue` for text-tracking use cases. Call `takeRecords()` to synchronously flush pending records before operations that depend on current mutation state. Use `ResizeObserver` for size changes and `IntersectionObserver` for visibility — `MutationObserver` is for DOM structural and attribute mutations only. In React, prefer state-driven approaches over observing your own component's DOM.
+
+---
+
+## Interview Questions
+
+**Q1. How does `MutationObserver` deliver its callbacks relative to the JavaScript task queue?**
+
+`MutationObserver` callbacks are delivered as microtasks — they run after the current JavaScript task completes but before the next macrotask (like `setTimeout`, `setInterval`, or a new event). When DOM mutations occur during a task, the browser batches all resulting `MutationRecord` objects. Once the current task finishes, the microtask queue drains — and that's when your callback fires with the accumulated records. This means mutations from a single synchronous operation (e.g., appending 100 items in a loop) are all delivered in one callback invocation, not one per mutation. This is more efficient than `MutationEvents` which fired synchronously on every mutation, causing re-entrancy problems and synchronous layout recalculations.
+
+**Q2. What does `observer.takeRecords()` do and when would you use it?**
+
+`takeRecords()` synchronously extracts all pending `MutationRecord` objects that have been queued but not yet delivered to the callback. The internal buffer is cleared — the callback will not fire for those records. It's used when you need to process pending mutations synchronously before performing a DOM operation that depends on the current mutation state, rather than waiting for the microtask queue to drain. For example, before disconnecting an observer during a cleanup phase, you might call `takeRecords()` to ensure you haven't missed any records that accumulated between the last callback invocation and the disconnect call.
+
+**Q3. What is `attributeFilter` and why is it important for performance?**
+
+`attributeFilter` is an array of attribute names. When provided, `MutationObserver` only generates `MutationRecord` entries for changes to those specific attributes, ignoring all others. Without it, every attribute change on every observed node fires the callback — in a React app, this includes `class`, `style`, `data-*`, `aria-*`, and any dynamically set attributes from third-party scripts. On a node with `subtree: true`, this can generate thousands of records per second. `attributeFilter: ["disabled", "aria-expanded"]` limits observation to exactly those two attributes, reducing callback frequency dramatically and making the observer's purpose explicit to future readers.
+
+**Q4. When should you use `MutationObserver` versus `ResizeObserver` versus `IntersectionObserver`?**
+
+Each solves a different problem. `MutationObserver` detects structural DOM changes — nodes added or removed, attribute values changed, text content changed. It tells you _what_ changed in the DOM tree. `ResizeObserver` detects when an element's layout dimensions change — width, height, border-box, content-box. It fires when CSS changes, parent container resizes, or content reflows change an element's rendered size. `IntersectionObserver` detects when an element crosses a visibility threshold relative to the viewport or a scrollable ancestor. The classic mistake is using `MutationObserver` with `subtree: true` and `attributes: true` to detect size changes — it doesn't work. `MutationObserver` has no visibility into layout dimensions; only `ResizeObserver` does.
+
+**Q5. How do you prevent an infinite feedback loop when modifying observed nodes inside a `MutationObserver` callback?**
+
+The loop occurs when your callback modifies a node that's being observed, which queues another mutation, which calls the callback again. Three approaches: first, scope the observation tightly enough to exclude the nodes you modify — if you observe `container` for `childList` but modify attributes inside it, there's no conflict. Second, use a boolean guard: `let processing = false; if (processing) return; processing = true; /* work */ processing = false;`. Third, call `observer.disconnect()` before modifying, then reconnect after. Each approach has trade-offs: scoping is cleanest but not always possible; the flag approach has edge cases with async code; disconnect/reconnect misses mutations during the gap. Tight scoping with `attributeFilter` to exclude the attributes you set is usually the most robust.
+
+**Q6. In a React application, when is `MutationObserver` the right tool versus React state management?**
+
+`MutationObserver` is appropriate in React when you need to react to DOM changes from code outside your control: a third-party widget injecting content, native browser behaviour (browser extensions modifying the DOM), or a `contenteditable` element where text changes come from user input to native DOM APIs rather than React state. It's also appropriate when integrating with non-React libraries that manipulate DOM directly. It is NOT the right tool for observing changes to your own React-rendered components — if you find yourself using `MutationObserver` to detect when your own component's DOM updates, you're working around React's state and rendering model rather than with it. The correct approach is to drive changes through state (`useState`, `useReducer`, Zustand, etc.) and derive what you need from that state. Using `MutationObserver` on React-managed DOM creates fragile coupling between the observer's timing and React's rendering schedule.

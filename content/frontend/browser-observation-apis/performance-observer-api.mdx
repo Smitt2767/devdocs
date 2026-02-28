@@ -1,158 +1,271 @@
 ---
 title: PerformanceObserver API
-description: A guide to using the PerformanceObserver API to asynchronously monitor and react to browser performance metrics in modern web applications.
+description: The unified API for subscribing to browser performance entries — navigation timing, resource timing, paint timing, long tasks, layout shift, LCP, and Core Web Vitals. buffered flag, takeRecords(), entry type reference, and reporting patterns.
 ---
 
 ## Overview
 
-The `PerformanceObserver` API lets you listen for performance-related events in the browser asynchronously — without having to poll the `performance` timeline manually. It gives you access to metrics like Largest Contentful Paint (LCP), First Input Delay (FID), Cumulative Layout Shift (CLS), resource timing, long tasks, and more.
+`PerformanceObserver` lets you subscribe to browser performance entries asynchronously — without polling the `performance` timeline. It's the foundation of how `web-vitals`, Lighthouse, and every real-user monitoring tool collects metrics.
 
-Instead of querying `performance.getEntriesByType()` on a timer, you register an observer and get notified automatically when new entries are recorded. This is the foundation of how tools like web-vitals and Lighthouse collect real-user metrics.
+Instead of calling `performance.getEntriesByType("resource")` on a timer, you register an observer with the types you care about and receive entries as a push notification when the browser records them.
 
 ---
 
 ## How It Works
 
-The browser continuously records performance entries into a timeline buffer. `PerformanceObserver` taps into that stream by registering a callback tied to one or more entry types (e.g., `"largest-contentful-paint"`, `"longtask"`, `"resource"`).
+The browser continuously records performance entries into a timeline buffer. `PerformanceObserver` taps into that stream by registering a callback tied to one or more entry types.
 
-When a new entry matching your observed type is recorded, your callback fires with a `PerformanceObserverEntryList` — a batch of one or more entries you can iterate over.
-
-Think of it like a `MutationObserver`, but for the browser's performance timeline instead of the DOM.
+When a new entry matching your observed type is recorded, your callback fires with a `PerformanceObserverEntryList` — a batch of one or more entries to iterate.
 
 ```
-Browser records entry → PerformanceObserver callback fires → You inspect the entry
+Browser records entry → PerformanceObserver callback fires → You inspect entries
 ```
 
-Each entry has a `name`, `entryType`, `startTime`, and `duration` at minimum. Specific entry types add extra properties (e.g., `element` on LCP entries, `processingStart` on event timing entries).
+Each entry has at minimum: `name`, `entryType`, `startTime`, `duration`. Specific entry types add extra properties.
+
+### Entry Type Reference
+
+| Entry Type                   | What it records                 | Key extra properties                                                                    |
+| ---------------------------- | ------------------------------- | --------------------------------------------------------------------------------------- |
+| `"navigation"`               | Page navigation timing          | `domContentLoadedEventEnd`, `loadEventEnd`, `type` ("navigate"/"reload"/"back_forward") |
+| `"resource"`                 | Each network request            | `transferSize`, `encodedBodySize`, `initiatorType`, `nextHopProtocol`                   |
+| `"paint"`                    | FCP and FP timestamps           | —                                                                                       |
+| `"largest-contentful-paint"` | LCP candidate updates           | `element`, `size`, `url`                                                                |
+| `"layout-shift"`             | CLS shift events                | `value`, `hadRecentInput`, `sources`                                                    |
+| `"longtask"`                 | Tasks >50ms                     | `attribution` (TaskAttributionTiming[])                                                 |
+| `"event"`                    | Input event timing              | `processingStart`, `processingEnd`, `interactionId`                                     |
+| `"first-input"`              | First user interaction          | `processingStart`, `startTime` (FID)                                                    |
+| `"mark"`                     | `performance.mark()` entries    | —                                                                                       |
+| `"measure"`                  | `performance.measure()` entries | `duration` between marks                                                                |
+
+### `buffered: true`
+
+By default, a new `PerformanceObserver` only receives entries recorded _after_ it's registered. Pass `{ buffered: true }` to also receive entries that occurred before the observer was attached. This is essential for `"largest-contentful-paint"` and `"layout-shift"` — the browser may have already recorded candidates before your JavaScript bootstraps.
+
+**Important caveat:** `buffered: true` is only supported when observing a single entry type. When observing multiple types simultaneously via `{ entryTypes: ["longtask", "resource"] }`, `buffered: true` is silently ignored.
 
 ---
 
 ## Code Examples
 
-### Basic Observer — Long Tasks
+### Observing Core Web Vitals Manually
 
 ```ts
-// Detect any task that blocks the main thread for >50ms
-const observer = new PerformanceObserver((entryList) => {
-  for (const entry of entryList.getEntries()) {
-    console.warn(`Long task detected: ${entry.duration.toFixed(1)}ms`, entry);
+// Observe LCP — get all candidates including those already recorded
+const lcpObserver = new PerformanceObserver((list) => {
+  const entries = list.getEntries();
+  // The last entry is always the most recent (and largest) LCP candidate
+  const lcpEntry = entries[
+    entries.length - 1
+  ] as PerformanceLargestContentfulPaintEntry;
+
+  console.log("LCP candidate:", {
+    time: lcpEntry.startTime,
+    element: lcpEntry.element?.tagName, // e.g. "IMG", "H1", "DIV"
+    size: lcpEntry.size,
+    url: lcpEntry.url, // set for images/videos
+  });
+});
+
+// Use single-type observe + buffered to capture early candidates
+lcpObserver.observe({ type: "largest-contentful-paint", buffered: true });
+
+// Stop on first user interaction — LCP is no longer tracked after that
+document.addEventListener("click", () => lcpObserver.disconnect(), {
+  once: true,
+});
+document.addEventListener("keydown", () => lcpObserver.disconnect(), {
+  once: true,
+});
+```
+
+```ts
+// Observe CLS — accumulate layout shift score
+let cumulativeScore = 0;
+
+const clsObserver = new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    const shift = entry as PerformanceEntry & {
+      value: number;
+      hadRecentInput: boolean;
+      sources: Array<{
+        node: Element | null;
+        previousRect: DOMRectReadOnly;
+        currentRect: DOMRectReadOnly;
+      }>;
+    };
+
+    // Exclude shifts caused by user interaction (not penalised by CLS)
+    if (!shift.hadRecentInput) {
+      cumulativeScore += shift.value;
+      console.log("Layout shift:", {
+        value: shift.value,
+        total: cumulativeScore,
+        source: shift.sources?.[0]?.node?.tagName,
+      });
+    }
   }
 });
 
-observer.observe({ type: "longtask", buffered: true });
-// buffered: true captures entries that occurred before the observer was registered
+clsObserver.observe({ type: "layout-shift", buffered: true });
 ```
 
-### Collecting Core Web Vitals
+---
+
+### Observing Resource Timing
 
 ```ts
-import { onLCP, onCLS, onINP } from "web-vitals"; // wraps PerformanceObserver internally
-
-onLCP((metric) => {
-  // metric.value is in milliseconds
-  sendToAnalytics({ name: "LCP", value: metric.value, id: metric.id });
-});
-
-onCLS((metric) => {
-  // metric.value is a unitless score (lower is better)
-  sendToAnalytics({ name: "CLS", value: metric.value, id: metric.id });
-});
-
-onINP((metric) => {
-  sendToAnalytics({ name: "INP", value: metric.value, id: metric.id });
-});
-
-function sendToAnalytics(payload: { name: string; value: number; id: string }) {
-  // Use sendBeacon so it fires even when the page is unloading
-  navigator.sendBeacon("/api/vitals", JSON.stringify(payload));
-}
-```
-
-### Manual LCP Observer
-
-```ts
-let lcpValue = 0;
-
-const lcpObserver = new PerformanceObserver((entryList) => {
-  const entries = entryList.getEntries();
-
-  // LCP can update multiple times — always take the last entry
-  const lastEntry = entries[entries.length - 1] as LargestContentfulPaint;
-  lcpValue = lastEntry.startTime;
-});
-
-lcpObserver.observe({ type: "largest-contentful-paint", buffered: true });
-
-// Stop observing on user interaction (LCP is finalized at this point)
-["keydown", "pointerdown"].forEach((event) => {
-  window.addEventListener(
-    event,
-    () => {
-      lcpObserver.disconnect();
-      console.log(`Final LCP: ${lcpValue.toFixed(1)}ms`);
-    },
-    { once: true },
-  );
-});
-```
-
-### Resource Timing — Detect Slow Third-Party Scripts
-
-```ts
-const resourceObserver = new PerformanceObserver((entryList) => {
-  for (const entry of entryList.getEntries()) {
+// Audit all network requests for slow or large resources
+const resourceObserver = new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
     const resource = entry as PerformanceResourceTiming;
 
-    // Flag any resource taking longer than 500ms to load
-    if (resource.duration > 500) {
-      console.warn(
-        `Slow resource: ${resource.name} — ${resource.duration.toFixed(0)}ms`,
+    const duration = resource.responseEnd - resource.startTime;
+    const transferKB = (resource.transferSize / 1024).toFixed(1);
+
+    if (duration > 500 || resource.transferSize > 100_000) {
+      console.warn("Slow or large resource:", {
+        url: resource.name,
+        duration: `${duration.toFixed(0)}ms`,
+        transferSize: `${transferKB}KB`,
+        initiatorType: resource.initiatorType, // "fetch", "img", "script", "css", etc.
+        protocol: resource.nextHopProtocol, // "h2", "h3", "http/1.1"
+      });
+    }
+  }
+});
+
+// No buffered: true when observing multiple types — it's silently ignored
+// Observe resources from this point forward only
+resourceObserver.observe({ type: "resource" });
+```
+
+---
+
+### Custom Timing with `performance.mark()` and `performance.measure()`
+
+User Timing marks let you instrument your own code and receive the measurements through `PerformanceObserver`:
+
+```ts
+// Mark the start of a data fetch
+performance.mark("dashboard:data-fetch:start");
+
+const data = await fetch("/api/dashboard").then((r) => r.json());
+
+// Mark the end
+performance.mark("dashboard:data-fetch:end");
+
+// Create a named measurement between the two marks
+performance.measure(
+  "dashboard:data-fetch", // measure name
+  "dashboard:data-fetch:start", // start mark
+  "dashboard:data-fetch:end", // end mark
+);
+```
+
+```ts
+// Observe your custom measures in a centralised reporting utility
+const measureObserver = new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    if (entry.entryType === "measure" && entry.name.startsWith("dashboard:")) {
+      console.log(`[Timing] ${entry.name}: ${entry.duration.toFixed(1)}ms`);
+
+      navigator.sendBeacon(
+        "/api/metrics",
+        JSON.stringify({
+          name: entry.name,
+          duration: entry.duration,
+          start: entry.startTime,
+        }),
       );
     }
   }
 });
 
-resourceObserver.observe({ type: "resource", buffered: true });
+measureObserver.observe({ type: "measure", buffered: true });
 ```
 
-### Using in a Next.js App Router Component
+---
+
+### `takeRecords()` — Synchronous Flush
+
+`takeRecords()` synchronously extracts and clears any pending entries from the observer's buffer that haven't been delivered to the callback yet:
+
+```ts
+const observer = new PerformanceObserver((list) => {
+  processEntries(list.getEntries());
+});
+
+observer.observe({ type: "resource" });
+
+// Later — before disconnecting, flush any pending entries
+function shutdown() {
+  const pending = observer.takeRecords();
+  if (pending.length > 0) {
+    // These won't fire via callback — process them synchronously now
+    processEntries(pending);
+  }
+  observer.disconnect();
+}
+
+function processEntries(entries: PerformanceEntry[]) {
+  for (const entry of entries) {
+    console.log(entry.name, entry.duration);
+  }
+}
+```
+
+---
+
+### Complete Web Vitals Reporting with `web-vitals`
+
+For production RUM, use the `web-vitals` library — it wraps `PerformanceObserver` with correct handling for LCP finalization, CLS session windows, and INP outlier removal:
+
+```ts
+// lib/vitals.ts
+import { onCLS, onINP, onLCP, onFCP, onTTFB } from "web-vitals";
+
+function sendVital(name: string, value: number, rating: string, id: string) {
+  // sendBeacon: non-blocking, survives page unload
+  navigator.sendBeacon(
+    "/api/vitals",
+    JSON.stringify({
+      name,
+      value,
+      rating,
+      id,
+      url: window.location.href,
+      timestamp: Date.now(),
+    }),
+  );
+}
+
+export function initRUM() {
+  onLCP((m) => sendVital(m.name, m.value, m.rating, m.id));
+  onCLS((m) => sendVital(m.name, m.value, m.rating, m.id));
+  onINP((m) => sendVital(m.name, m.value, m.rating, m.id));
+  onFCP((m) => sendVital(m.name, m.value, m.rating, m.id));
+  onTTFB((m) => sendVital(m.name, m.value, m.rating, m.id));
+}
+```
 
 ```tsx
-// app/_components/vitals-tracker.tsx
+// app/_components/VitalsReporter.tsx
 "use client";
-
 import { useEffect } from "react";
+import { initRUM } from "@/lib/vitals";
 
-export function VitalsTracker() {
+export function VitalsReporter() {
   useEffect(() => {
-    if (typeof PerformanceObserver === "undefined") return;
-
-    const observer = new PerformanceObserver((list) => {
-      for (const entry of list.getEntries()) {
-        if (entry.entryType === "largest-contentful-paint") {
-          const lcp = entry as LargestContentfulPaint;
-          navigator.sendBeacon(
-            "/api/vitals",
-            JSON.stringify({ metric: "LCP", value: lcp.startTime }),
-          );
-        }
-      }
-    });
-
-    observer.observe({ type: "largest-contentful-paint", buffered: true });
-
-    // Clean up when the component unmounts
-    return () => observer.disconnect();
+    initRUM();
   }, []);
-
-  // This component renders nothing — it's a side-effect-only tracker
   return null;
 }
 ```
 
 ```tsx
 // app/layout.tsx
-import { VitalsTracker } from "./_components/vitals-tracker";
+import { VitalsReporter } from "./_components/VitalsReporter";
 
 export default function RootLayout({
   children,
@@ -163,71 +276,110 @@ export default function RootLayout({
     <html lang="en">
       <body>
         {children}
-        <VitalsTracker />
+        <VitalsReporter />
       </body>
     </html>
   );
 }
 ```
 
-<Callout type="info">
-  `VitalsTracker` must be a Client Component (`"use client"`) because
-  `useEffect` and browser APIs like `PerformanceObserver` are not available in
-  Server Components.
-</Callout>
+---
+
+### Observing Navigation Timing
+
+```ts
+// Capture Time to First Byte and other navigation metrics
+const navObserver = new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    const nav = entry as PerformanceNavigationTiming;
+
+    const ttfb = nav.responseStart - nav.requestStart;
+    const dnsLookup = nav.domainLookupEnd - nav.domainLookupStart;
+    const tcpSetup = nav.connectEnd - nav.connectStart;
+    const totalLoad = nav.loadEventEnd - nav.startTime;
+
+    console.log("Navigation timing:", {
+      type: nav.type, // "navigate" | "reload" | "back_forward" | "prerender"
+      ttfb: `${ttfb.toFixed(0)}ms`,
+      dns: `${dnsLookup.toFixed(0)}ms`,
+      tcp: `${tcpSetup.toFixed(0)}ms`,
+      totalLoad: `${totalLoad.toFixed(0)}ms`,
+      protocol: nav.nextHopProtocol, // "h2", "h3"
+    });
+  }
+});
+
+navObserver.observe({ type: "navigation", buffered: true });
+```
 
 ---
 
 ## Real-World Use Case
 
-In a SaaS dashboard with complex data tables, you notice users complain the page feels sluggish after filtering. You set up a `longtask` observer in development and find a 300ms task firing every time a filter is applied — traced to a synchronous array sort on 10,000 rows. You also attach an LCP observer to your `/dashboard` route via `VitalsTracker` and pipe the data to your analytics backend. This gives you a real-user performance baseline before and after you move the sort to a Web Worker.
+**SaaS dashboard with custom performance budgets.** You want to alert when any individual API call takes more than 1 second or when any script exceeds 200KB. Using `PerformanceObserver` with type `"resource"`, you observe all network requests and send budget violations to Datadog:
+
+```ts
+const budgetObserver = new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    const r = entry as PerformanceResourceTiming;
+    const duration = r.responseEnd - r.startTime;
+
+    if (r.initiatorType === "fetch" && duration > 1000) {
+      logBudgetViolation("api-latency", r.name, duration);
+    }
+    if (r.initiatorType === "script" && r.transferSize > 200_000) {
+      logBudgetViolation("script-weight", r.name, r.transferSize);
+    }
+  }
+});
+
+budgetObserver.observe({ type: "resource" });
+```
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Forgetting `buffered: true`**
+**1. Forgetting `buffered: true` for metrics that may have fired before your observer.** LCP and CLS candidates are often recorded during the initial parse and paint — before any JavaScript runs. Without `buffered: true`, your observer misses them entirely.
 
-If you register an observer after page load, metrics like LCP and FCP have already been recorded. Without `buffered: true`, you miss those early entries entirely. Always pass `buffered: true` unless you have a specific reason not to.
+**2. Using `buffered: true` with `entryTypes` (multiple types).** `buffered: true` only works with the single-type `observe({ type: "...", buffered: true })` API. The multi-type `observe({ entryTypes: ["longtask", "resource"] })` API silently ignores `buffered: true`. Use separate observers for entry types that need buffering.
 
-```ts
-// ❌ Will miss LCP if registered after the paint
-observer.observe({ type: "largest-contentful-paint" });
+**3. Using the deprecated `performance.timing` API.** `window.performance.timing` (Navigation Timing Level 1) is deprecated. Use `PerformanceNavigationTiming` (Level 2) via `observe({ type: "navigation" })` or `performance.getEntriesByType("navigation")[0]`.
 
-// ✅ Catches entries that already occurred
-observer.observe({ type: "largest-contentful-paint", buffered: true });
-```
+**4. Not using `sendBeacon` for reporting.** Using `fetch` to report metrics can be cancelled when the page unloads. `navigator.sendBeacon` is guaranteed to complete even during page close or navigation.
 
-**2. Not calling `disconnect()` on cleanup**
-
-`PerformanceObserver` holds a reference to your callback. In a React component, if you don't call `observer.disconnect()` in the `useEffect` cleanup, you leak the observer across re-renders and navigations.
-
-**3. Assuming `PerformanceObserver` is always available**
-
-It's widely supported but not available in some server-side rendering contexts (Node.js, edge runtimes) or older browsers. Always guard with:
-
-```ts
-if (typeof PerformanceObserver !== "undefined") {
-  // safe to use
-}
-```
-
-<Callout type="warn">
-  In Next.js App Router, any code that references `PerformanceObserver` must run
-  inside a Client Component's `useEffect`. Importing it at the module level in a
-  Server Component will throw a runtime error.
-</Callout>
-
-**4. Treating LCP as a single event**
-
-The browser can emit multiple LCP candidates as the page loads (first a small image, then a larger hero image). The final LCP value is the _last_ entry before the user first interacts. Always store and overwrite, never just take the first entry.
-
-**5. Confusing `startTime` and `duration`**
-
-For paint metrics (LCP, FCP), the meaningful value is `startTime` — the time from navigation start to when the element painted. `duration` is `0` for these entry types. For `longtask` and `resource`, `duration` is the relevant measurement.
+**5. Reporting LCP before the user interacts.** LCP is updated until the user first interacts — new, larger elements may qualify after initial paint. The final value should be reported only after the first interaction or page unload, which is what `web-vitals`'s `onLCP` handles correctly.
 
 ---
 
 ## Summary
 
-`PerformanceObserver` is the standard browser API for monitoring real-user performance metrics asynchronously. It replaces manual polling of the performance timeline and powers tools like Lighthouse, web-vitals, and RUM platforms. Use `buffered: true` when observing paint and layout metrics so you don't miss early entries. Always disconnect the observer on cleanup to avoid memory leaks. In Next.js App Router, wrap all observer logic in a `"use client"` component inside `useEffect`. For production use, the `web-vitals` package is a thin, well-maintained abstraction that handles edge cases like LCP finalization automatically.
+`PerformanceObserver` is the unified API for subscribing to browser performance entries — from network timing and paint metrics to layout shifts and long tasks. Use `observe({ type: "...", buffered: true })` for each entry type that may have fired before your observer; note that `buffered` is silently ignored with the multi-type `entryTypes` form. Call `takeRecords()` before `disconnect()` to flush pending entries synchronously. For Core Web Vitals, prefer the `web-vitals` library over manual observers — it handles LCP finalization, CLS session windowing, and INP outlier logic correctly. Always report via `navigator.sendBeacon` so metrics survive page unload. Use `performance.mark()` and `performance.measure()` with a `"measure"` observer to instrument your own code.
+
+---
+
+## Interview Questions
+
+**Q1. What is the difference between `observe({ type: "..." })` and `observe({ entryTypes: [...] })` in `PerformanceObserver`?**
+
+The single-type form `observe({ type: "largest-contentful-paint", buffered: true })` observes one entry type and supports the `buffered` flag. The multi-type form `observe({ entryTypes: ["longtask", "resource"] })` observes multiple types in one call but does not support `buffered` — the flag is silently ignored. This is the most important practical difference: if you need buffered delivery for `"largest-contentful-paint"` or `"layout-shift"` entries that fired before your observer registered, you must use the single-type form. For entry types where buffering doesn't matter (like `"resource"`, which you only care about going forward), multi-type observation is fine.
+
+**Q2. Why is `buffered: true` critical for `"largest-contentful-paint"` and `"layout-shift"` observers?**
+
+LCP candidates and CLS shift events are recorded by the browser during the initial parse and paint phase — before any JavaScript on the page has had a chance to run. If you register a `PerformanceObserver` in a `useEffect` (after React renders and hydrates), several LCP candidates and layout shifts may already be in the performance timeline buffer. Without `buffered: true`, your observer receives only entries recorded after it was created — potentially missing the true LCP value entirely. `buffered: true` tells the browser to replay all existing entries of that type from the buffer immediately when the observer registers, ensuring you capture the full picture regardless of when your JavaScript bootstraps.
+
+**Q3. What does `takeRecords()` do on a `PerformanceObserver` and when is it useful?**
+
+`takeRecords()` synchronously extracts all pending performance entries that have been queued in the observer's internal buffer but not yet delivered to the callback. The buffer is cleared — the callback will not fire for those records. It's useful in two scenarios: before calling `disconnect()` to ensure you don't miss entries that accumulated between the last callback invocation and the teardown; and in critical code paths where you need the current state of accumulated entries synchronously rather than waiting for the microtask-queue delivery. For example, before a page visibility change event, you might `takeRecords()` to ensure all pending layout-shift entries are flushed and included in your final CLS calculation.
+
+**Q4. What is `PerformanceResourceTiming.nextHopProtocol` and how is it useful?**
+
+`nextHopProtocol` returns the network protocol used for the resource fetch — typically `"h2"` (HTTP/2), `"h3"` (HTTP/3 over QUIC), or `"http/1.1"`. It's useful for diagnosing whether your CDN or origin is actually serving HTTP/3 as expected, or whether certain resource types are falling back to older protocols. In a RUM system, logging `nextHopProtocol` per resource type (scripts, images, API calls) helps you correlate protocol version with resource load time — HTTP/3's elimination of head-of-line blocking typically improves load times for parallel requests over lossy connections. An empty string means the resource was served from cache (no network hop).
+
+**Q5. What is the `"event"` entry type and how does it relate to INP measurement?**
+
+The `"event"` entry type (part of the Event Timing API) records timing data for discrete user interactions: `pointerdown`, `keydown`, `click`, etc. Each entry exposes `startTime` (when the event was dispatched), `processingStart` (when the handler started), `processingEnd` (when the handler finished), and `duration` (total time to next paint). The gap between `startTime` and `processingStart` is input delay — the main thread was busy. The gap between `processingStart` and `processingEnd` is processing time. The remaining time to `startTime + duration` is presentation delay. INP (Interaction to Next Paint) is calculated from `"event"` entries by the `web-vitals` library — it aggregates all interactions and reports the worst-case `duration` (with a small outlier allowance). Observing `"event"` entries directly lets you attribute high INP to specific event types and handlers.
+
+**Q6. Why should you use `navigator.sendBeacon` instead of `fetch` for reporting performance metrics?**
+
+`fetch` requests can be cancelled when the browser navigates away from the page. If a user closes a tab or navigates to another page while a `fetch` is in flight, the browser cancels the request and your metrics are lost. `navigator.sendBeacon` sends data asynchronously and is guaranteed to complete even if the page is unloading — the browser ensures delivery before the process terminates. It uses HTTP POST and accepts a `Blob`, `FormData`, `URLSearchParams`, or `string` body. For performance metric reporting, where you often report final LCP/CLS values on page unload or visibility change, `sendBeacon` is the correct choice. The limitation: `sendBeacon` requests cannot read the server's response and have a payload size limit (typically 64KB). For payloads larger than that, use `fetch` with `keepalive: true` instead.
