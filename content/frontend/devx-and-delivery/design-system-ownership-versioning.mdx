@@ -1,13 +1,13 @@
 ---
 title: Design System Ownership & Versioning
-description: How to structure ownership, governance, and semantic versioning for a shared design system across teams.
+description: How to publish and version a shared component library — semver discipline, Changesets for automated versioning, package.json exports map to enforce a public API, peerDependencies, deprecation-before-removal lifecycle, codemods for breaking changes, visual regression testing with Chromatic, and the three ownership models.
 ---
 
 ## Overview
 
 A design system is a shared set of components, tokens, guidelines, and patterns used across one or more products. As soon as more than one team consumes it, two problems emerge: **who owns it**, and **how do changes reach consumers safely**.
 
-Without clear ownership and versioning, teams either fear touching the system (it becomes stale) or change it freely (consumers break unpredictably). This doc covers how to structure governance and version your design system like a proper package — because it should be one.
+Without clear ownership and versioning discipline, teams either fear touching the system (it becomes stale) or change it freely (consumers break unpredictably). This doc covers how to structure governance and version your design system like a proper package — because that's what it is.
 
 ---
 
@@ -15,37 +15,31 @@ Without clear ownership and versioning, teams either fear touching the system (i
 
 ### Ownership Models
 
-There are three common models. Each has trade-offs:
+**Centralized (Single Team):** One dedicated team owns everything. Consumers open requests. Safe but can become a bottleneck. Common in mid-size orgs.
 
-**Federated (Shared Ownership)**
-Multiple product teams contribute to the system. A small "core" group reviews and merges. Works well at scale. Requires strong contribution guidelines and RFC processes.
+**Federated (Shared Ownership):** Multiple product teams contribute. A small core group reviews and merges. Works at scale but requires strong contribution guidelines and RFC processes.
 
-**Centralized (Single Team)**
-One dedicated team owns and ships everything. Consumers open requests. Safe but can become a bottleneck. Common in mid-size orgs.
+**Steward Model:** Anyone can contribute; named stewards approve changes per domain (forms, typography, motion). Blends speed with stability.
 
-**Open Contribution with Stewards**
-Anyone can contribute. Named stewards approve changes per domain (e.g., forms, typography, motion). Blends speed with stability.
-
-<Callout type="info">
-  Most teams start centralized and migrate toward federated as the system
-  matures and more teams depend on it.
-</Callout>
+Most teams start centralized and migrate toward federated as the system matures.
 
 ### Versioning Strategy
 
-A design system should be versioned as an npm package using **Semantic Versioning (semver)**:
+Version as an npm package using **Semantic Versioning (semver)**:
 
-- `MAJOR` — Breaking changes (removed component, renamed prop, changed token value)
-- `MINOR` — New components or non-breaking additions
-- `PATCH` — Bug fixes, accessibility improvements, internal refactors
+| Version bump | When to use                                                                                |
+| ------------ | ------------------------------------------------------------------------------------------ |
+| `MAJOR`      | Breaking changes — removed component, renamed prop, changed token value, new required prop |
+| `MINOR`      | New components or non-breaking additions                                                   |
+| `PATCH`      | Bug fixes, accessibility improvements, internal refactors                                  |
 
 Consumers pin to a version and upgrade on their own schedule. This is the only way to let 10 teams move at different speeds without constant breakage.
 
 ---
 
-## Code Example(s)
+## Code Examples
 
-### Package Structure
+### 1. Package Structure
 
 ```
 packages/
@@ -57,15 +51,23 @@ packages/
           Button.stories.tsx
           Button.test.tsx
           index.ts
+        DataTable/
+          DataTable.tsx
+          DataTable.stories.tsx
+          index.ts
       tokens/
         colors.ts
         spacing.ts
+        typography.ts
       index.ts
     package.json
+    tsup.config.ts
     CHANGELOG.md
 ```
 
-### `package.json` for the Design System Package
+---
+
+### 2. `package.json` — Exports Map, Peer Dependencies, tsup
 
 ```json
 {
@@ -74,6 +76,7 @@ packages/
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+
   "exports": {
     ".": {
       "import": "./dist/index.mjs",
@@ -84,65 +87,68 @@ packages/
       "import": "./dist/tokens/index.mjs",
       "types": "./dist/tokens/index.d.ts"
     }
+    // Only these paths are part of the public API.
+    // Anything not listed (e.g. ./src/utils/cn) is not importable.
+    // An internal refactor of utils/cn cannot break consumers.
   },
+
   "peerDependencies": {
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0"
   },
+  // peerDependencies means consumers install React once in their project.
+  // Bundling React causes duplicate React instances → broken hooks and context.
+
+  "devDependencies": {
+    "@changesets/cli": "^2.27.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "build": "tsup src/index.ts src/tokens/index.ts --format esm,cjs --dts",
     "release": "changeset publish"
   }
 }
 ```
 
-### Automating Versioning with Changesets
+---
 
-[Changesets](https://github.com/changesets/changesets) is the standard tool for managing versions in monorepos.
+### 3. Automating Versioning with Changesets
 
-**Step 1 — Install**
+Changesets manages versioning and changelog generation in monorepos.
 
 ```bash
+# Install
 npm install --save-dev @changesets/cli
 npx changeset init
-```
 
-**Step 2 — A contributor opens a PR and creates a changeset**
-
-```bash
+# A contributor opens a PR and creates a changeset describing the change
 npx changeset
+# → prompts: select package, select bump type (major/minor/patch), write summary
+# → creates .changeset/random-words.md
 ```
-
-This prompts them to select the bump type and write a summary. It creates a markdown file in `.changeset/`:
 
 ```md
----
-"@acme/design-system": minor
----
+## <!-- .changeset/silver-ravens-fly.md — committed with the PR -->
 
-Added `IconButton` component with full keyboard and ARIA support.
+## "@acme/design-system": minor
+
+Added `DataTable` component with sorting, pagination, and full keyboard navigation.
 ```
 
-**Step 3 — On merge to main, CI runs the version command**
-
 ```bash
+# On merge to main, CI runs:
 npx changeset version
-```
+# → bumps package.json version, writes CHANGELOG.md entry, deletes the .changeset file
 
-This bumps `package.json` and writes the entry to `CHANGELOG.md` automatically.
-
-**Step 4 — Publish**
-
-```bash
+# Then publishes to npm:
 npx changeset publish
 ```
 
-<Callout type="info">
-  Combine this with a GitHub Actions workflow so versioning and publishing
-  happen automatically on every merge to `main`.
-</Callout>
+---
 
-### GitHub Actions Release Workflow
+### 4. GitHub Actions Release Workflow
 
 ```yaml
 # .github/workflows/release.yml
@@ -150,8 +156,7 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
 
 jobs:
   release:
@@ -164,26 +169,156 @@ jobs:
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
+          cache: "npm"
 
       - run: npm ci
 
-      - name: Create Release PR or Publish
+      - run: npm run build
+
+      - name: Create Release PR or Publish to npm
         uses: changesets/action@v1
         with:
           publish: npm run release
+          # If changesets are pending: opens/updates a "Version Packages" PR
+          # If the Version PR is merged: publishes to npm automatically
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 ```
 
-This workflow either opens a "Version Packages" PR (if changesets are pending) or publishes to npm (if the version PR is merged).
+---
 
-### Consuming the Package in a Next.js App
+### 5. Deprecating a Prop — Warning in Development
+
+Deprecate before removing. Give consumers at least one major version to migrate:
 
 ```tsx
-// app/components/SubmitButton.tsx
-// No 'use client' needed if Button handles its own interactivity boundary
+// src/components/Button/Button.tsx
 
+interface ButtonProps {
+  variant: "primary" | "secondary" | "ghost";
+  /** @deprecated Use `variant="ghost"` instead. Will be removed in v5. */
+  isGhost?: boolean;
+  children: React.ReactNode;
+}
+
+export function Button({ variant, isGhost, children }: ButtonProps) {
+  // Support old prop during deprecation window
+  const resolvedVariant = isGhost ? "ghost" : variant;
+
+  if (process.env.NODE_ENV === "development" && isGhost !== undefined) {
+    console.warn(
+      "[design-system] <Button>: `isGhost` is deprecated. " +
+        'Use `variant="ghost"` instead. Removal planned for v5.0.0.',
+    );
+  }
+
+  return <button className={styles[resolvedVariant]}>{children}</button>;
+}
+```
+
+---
+
+### 6. Codemod for Breaking Changes
+
+For large consumer codebases, provide a codemod to automate migration:
+
+```ts
+// codemods/v5-button-variant.ts
+// Run with: npx jscodeshift -t codemods/v5-button-variant.ts src/
+
+import type { Transform } from "jscodeshift";
+
+const transform: Transform = (file, api) => {
+  const j = api.jscodeshift;
+  const root = j(file.source);
+
+  // Find <Button isGhost> and replace with <Button variant="ghost">
+  root
+    .find(j.JSXOpeningElement, { name: { name: "Button" } })
+    .forEach((path) => {
+      const attrs = path.node.attributes;
+
+      const isGhostIdx = attrs.findIndex(
+        (attr) =>
+          attr.type === "JSXAttribute" && (attr.name as any).name === "isGhost",
+      );
+
+      if (isGhostIdx !== -1) {
+        // Remove isGhost attribute
+        attrs.splice(isGhostIdx, 1);
+
+        // Add variant="ghost" if not already present
+        const hasVariant = attrs.some(
+          (attr) =>
+            attr.type === "JSXAttribute" &&
+            (attr.name as any).name === "variant",
+        );
+
+        if (!hasVariant) {
+          attrs.push(
+            j.jsxAttribute(
+              j.jsxIdentifier("variant"),
+              j.stringLiteral("ghost"),
+            ),
+          );
+        }
+      }
+    });
+
+  return root.toSource();
+};
+
+export default transform;
+```
+
+Document the codemod in `CHANGELOG.md` alongside the breaking change entry.
+
+---
+
+### 7. Visual Regression Testing with Chromatic
+
+```yaml
+# .github/workflows/chromatic.yml
+name: Chromatic
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  chromatic:
+    name: Visual Regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # required for Chromatic to compare against baseline
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Run Chromatic
+        uses: chromaui/action@v11
+        with:
+          projectToken: ${{ secrets.CHROMATIC_PROJECT_TOKEN }}
+          exitZeroOnChanges: true # don't fail CI — open a Chromatic review instead
+```
+
+Chromatic captures screenshots of every Storybook story and diffs them against the baseline. Visual changes block merge until a designer or engineer reviews and approves them.
+
+---
+
+### 8. Consuming the Package
+
+```tsx
+// app/components/SubmitButton.tsx — in a consuming app
 import { Button } from "@acme/design-system";
 
 interface SubmitButtonProps {
@@ -193,96 +328,63 @@ interface SubmitButtonProps {
 
 export function SubmitButton({ label, isLoading = false }: SubmitButtonProps) {
   return (
-    <Button
-      variant="primary"
-      size="md"
-      disabled={isLoading}
-      aria-busy={isLoading}
-    >
+    <Button variant="primary" disabled={isLoading} aria-busy={isLoading}>
       {isLoading ? "Submitting…" : label}
     </Button>
   );
 }
 ```
 
-### Deprecating a Prop Gracefully
-
-Instead of making a breaking change immediately, deprecate first:
-
-```tsx
-// src/components/Button/Button.tsx
-interface ButtonProps {
-  variant: "primary" | "secondary" | "ghost";
-  /** @deprecated Use `variant="ghost"` instead. Will be removed in v4. */
-  isGhost?: boolean;
-  children: React.ReactNode;
-}
-
-export function Button({ variant, isGhost, children }: ButtonProps) {
-  // Support old prop during deprecation window
-  const resolvedVariant = isGhost ? "ghost" : variant;
-
-  if (isGhost && process.env.NODE_ENV === "development") {
-    console.warn(
-      '[design-system] Button: `isGhost` is deprecated. Use `variant="ghost"` instead.',
-    );
-  }
-
-  return <button className={styles[resolvedVariant]}>{children}</button>;
-}
-```
-
-<Callout type="warn">
-  Never silently remove props in a patch or minor release. Always deprecate
-  first, warn in dev, then remove in the next major version.
-</Callout>
-
 ---
 
 ## Real-World Use Case
 
-An e-commerce company has four product teams: Storefront, Checkout, Admin, and Mobile Web. All four consume `@acme/design-system`.
-
-The Admin team needs a new `DataTable` component. Under a **federated model**:
-
-1. Admin team opens an RFC issue describing the API surface.
-2. Core stewards review and approve the design.
-3. Admin team builds it, opens a PR with a changeset marked `minor`.
-4. Core stewards review implementation and accessibility.
-5. Changeset CI merges, bumps to `3.3.0`, and publishes.
-6. Each team upgrades at their own pace — Storefront stays on `3.2.1` until their sprint allows.
-
-This is how shared infrastructure scales without constant firefighting.
+An e-commerce company has four product teams (Storefront, Checkout, Admin, Mobile Web) all consuming `@acme/design-system`. The Admin team needs a new `DataTable` component. Under the federated model: Admin opens an RFC; stewards review the API surface; Admin builds it with a Storybook story and keyboard tests; opens a PR with a `minor` changeset; stewards review implementation and Chromatic approves visual output; Changeset CI merges, bumps to `3.3.0`, publishes to npm. Each team upgrades at their own pace — Storefront stays on `3.2.1` until their sprint allows. The `exports` map ensures Admin's internal table utilities can't accidentally be imported by Storefront.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Releasing breaking changes as patches**
-Renaming a prop, changing a token value, or removing a component in a `patch` or `minor` version will silently break consumers. Every breaking change is a `major` bump, no exceptions. If you're afraid of `v4`, you're shipping too many breaking changes — fix the root problem.
+**1. Releasing breaking changes as patches.** Renaming a prop, changing a token value, or removing a component in a `patch` or `minor` bump silently breaks consumers who auto-upgrade. Every breaking change is a `major` bump — no exceptions.
 
-**2. No deprecation window**
-Removing something without warning leaves consumers scrambling. A good deprecation cycle is: warn in dev for one major version → remove in the next. Document it in `CHANGELOG.md`.
+**2. No deprecation window.** Removing without warning forces consumers to scramble. Deprecate in one major, emit a dev warning, remove in the next major. Document in `CHANGELOG.md`.
 
-**3. Letting consumers import internal paths**
-If `@acme/design-system/src/utils/cn` is imported directly in a product codebase, any internal refactor becomes a breaking change. Enforce your public API via `package.json` `exports`. Anything not listed is not part of the contract.
+**3. Letting consumers import internal paths.** If `@acme/design-system/src/utils/cn` is imported in consumer code, any internal refactor becomes a breaking change. Enforce your public API with a strict `exports` map — unlisted paths throw an error at import time.
 
-```json
-// This blocks all unlisted subpath imports
-"exports": {
-  ".": "./dist/index.mjs",
-  "./tokens": "./dist/tokens/index.mjs"
-}
-```
+**4. No CHANGELOG.** Consumers need to know what changed. Changesets generates it automatically. A version bump with no notes forces consumers to diff commits, which they will not do.
 
-**4. No CHANGELOG**
-Consumers need to know what changed. Changesets generates `CHANGELOG.md` automatically — use it. A version bump with no notes forces consumers to diff commits, which they will not do.
-
-**5. Skipping peer dependencies**
-Bundling React into your design system package instead of declaring it as a peer dependency leads to duplicate React instances, broken hooks, and context failures. Always declare `react` and `react-dom` as `peerDependencies`.
+**5. Bundling React instead of declaring it as a peer dependency.** Bundling React causes duplicate React instances in consumer apps — broken hooks, stale context, and subtle render failures. Always declare `react` and `react-dom` as `peerDependencies`.
 
 ---
 
 ## Summary
 
-A design system without clear ownership becomes either a bottleneck or a free-for-all. Choose an ownership model (centralized, federated, or steward-based) that matches your org's size and maturity. Version your system as a proper npm package using semver — major for breaking changes, minor for additions, patch for fixes. Use Changesets to automate versioning and changelog generation in a monorepo. Deprecate before removing, expose a strict public API via `package.json` exports, and always declare React as a peer dependency. These practices let multiple teams share infrastructure without blocking each other.
+A design system requires both an ownership model and versioning discipline to scale. Use Semantic Versioning: major for breaking changes, minor for additions, patch for fixes — with no exceptions. Automate versioning and changelog generation with Changesets. Enforce a strict public API with the `package.json` `exports` map. Deprecate before removing, provide codemods for breaking changes, and declare React as a peer dependency. Add Chromatic visual regression testing to prevent unintentional UI changes from reaching consumers without review. These practices let multiple teams share infrastructure while each moving at their own pace.
+
+---
+
+## Interview Questions
+
+**Q1. What is the `package.json` `exports` map and why is it critical for a shared component library?**
+
+The `exports` map defines the exact set of entry points a package exposes to consumers. When a consumer does `import { cn } from "@acme/design-system/src/utils/cn"`, Node.js (and bundlers) check the `exports` map. If `"./src/utils/cn"` is not listed, the import throws a resolution error — even if the file exists on disk. This makes your public API explicit and enforceable: only the paths you list in `exports` are part of the contract. Internal utilities, test helpers, and implementation details are unreachable. The critical consequence: an internal refactor that moves or renames `src/utils/cn` cannot break consumer code, because consumers were never allowed to import it in the first place. Without `exports`, consumers can import any file in your package, making every internal reorganisation a potentially breaking change.
+
+**Q2. Why must React be declared as a `peerDependency` rather than a `dependency` in a component library?**
+
+If React is listed as a `dependencies` (not `peerDependencies`), npm installs a separate copy of React inside `node_modules/@acme/design-system/node_modules/react`. The consuming application also has its own React in `node_modules/react`. The application now has two distinct React module instances. React's hook rules (and Context) depend on there being exactly one React instance in the module graph — hooks use a module-level global to track the current component. With two React instances, a component from the design system that calls `useState` uses a different React global than the consuming app, causing "hooks can only be called inside a React component" errors, stale Context values, and subtle render failures. `peerDependencies` declares "I need React ≥ 18, but the consuming application should provide it" — npm installs only one shared copy.
+
+**Q3. What is the Changesets workflow and how does it automate versioning and changelog generation in a monorepo?**
+
+Changesets is a tool that decouples the act of deciding a version bump from the act of releasing. A contributor who makes a change runs `npx changeset`, selects the affected packages, chooses the bump type (major/minor/patch), and writes a human-readable summary. This creates a small markdown file in `.changeset/` that is committed alongside the PR. On merge to `main`, CI runs `npx changeset version`: it reads all pending changeset files, aggregates the highest bump type per package, applies it to `package.json`, writes the summaries to `CHANGELOG.md`, and deletes the `.changeset` files. Then `npx changeset publish` publishes the new version to npm. The GitHub Actions `changesets/action` workflow automates this: it either opens/updates a "Version Packages" PR when changesets are pending, or publishes automatically when that PR is merged.
+
+**Q4. What is the correct deprecation lifecycle for a component or prop, and why does it span multiple major versions?**
+
+The lifecycle is: (1) in the current major, mark the prop or component `@deprecated` in JSDoc, emit a `console.warn` in development mode explaining the replacement, and document the deprecation in `CHANGELOG.md`; (2) give consumers at least one full major version cycle to migrate — typically 6–12 months; (3) in the next major, remove the deprecated code and update `CHANGELOG.md` to document the removal. This matters because consuming teams have their own sprint cycles, code freeze periods, and upgrade budgets. A deprecation in `v3` gives them until `v4` — which may be 6 months — to run the migration or apply the codemod. A removal in the same major or the immediately following minor leaves them no runway. The dev-mode warning is critical because it makes the deprecation actionable on every render, not just when an engineer reads the changelog.
+
+**Q5. What is a codemod and when should a design system provide one alongside a breaking change?**
+
+A codemod is a programmatic code transformation — typically written using `jscodeshift` — that automatically migrates consumer code from the old API to the new one. A design system should provide one whenever a breaking change involves a mechanical, automatable transformation: renaming a prop (`isGhost` → `variant="ghost"`), changing a token name (`color.blue` → `color.primary-500`), moving a component to a different import path, or adding a now-required prop with a sensible default. Without a codemod, migrating a large codebase with 200 `<Button isGhost>` usages is a manual search-and-replace across dozens of files — tedious and error-prone. With a codemod, it's `npx jscodeshift -t codemods/v5-button.ts src/` — 30 seconds. Document the codemod in `CHANGELOG.md` under the breaking change entry so engineers find it immediately when upgrading.
+
+**Q6. What is visual regression testing and why does a design system particularly benefit from it?**
+
+Visual regression testing captures pixel-level screenshots of UI components (via Storybook stories) and diffs them against a baseline. Tools like Chromatic render every story in a cloud browser, detect pixel differences, and block merge until a human reviews and approves the changes. A design system particularly benefits because it is shared infrastructure — an unintentional visual change to `Button` (a spacing regression, a color change from a token update, a line-height shift) affects every consuming team simultaneously. Without visual regression testing, these changes are caught only if a reviewer happens to notice the visual diff in a screenshot in the PR description. With Chromatic, the diff is automatically computed for every story, and reviewers see exactly what changed — the old and new rendering side by side. Design-reviewed approvals in Chromatic also provide an audit trail of intentional visual changes.

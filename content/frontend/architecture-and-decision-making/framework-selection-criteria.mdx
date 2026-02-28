@@ -1,42 +1,41 @@
 ---
 title: Framework Selection
-description: A practical guide to evaluating and choosing the right web framework for your project based on technical and organizational criteria.
+description: Evaluating frontend frameworks systematically — weighted scoring across rendering model, ecosystem maturity, team familiarity, deployment target, bundle size baseline, migration cost, and lock-in risk. Includes a runnable TypeScript scoring matrix and decision heuristics for Next.js, Remix, Astro, and SvelteKit.
 ---
 
 ## Overview
 
-Picking a framework is one of the highest-leverage decisions on a project. Get it right and the framework fades into the background, accelerating your team. Get it wrong and you spend months fighting abstractions that don't fit your problem.
+Framework selection is one of the highest-leverage — and hardest to reverse — decisions on a project. Get it right and the framework fades into the background, accelerating your team. Get it wrong and you spend months fighting abstractions that don't fit your problem.
 
-This guide gives you a concrete set of criteria to evaluate frameworks systematically — covering rendering strategies, ecosystem maturity, team fit, scalability, and long-term maintenance cost.
+The goal is to rule out poor fits early using explicit criteria, not to find a "perfect" framework. There isn't one. The right framework is the one with the best fit across your specific constraints.
 
 ---
 
 ## How It Works
 
-Framework selection is a multi-axis decision. No single criterion wins — you're looking for the best fit across several dimensions simultaneously:
+Framework selection is a multi-axis decision. Evaluate systematically across these dimensions:
 
-| Criterion                 | What to Ask                                                            |
-| ------------------------- | ---------------------------------------------------------------------- |
-| **Rendering model**       | Do you need SSR, SSG, CSR, or a hybrid?                                |
-| **Data fetching**         | Is server-side async data fetching first-class?                        |
-| **Ecosystem**             | Are the libraries you depend on well-supported?                        |
-| **Team familiarity**      | How steep is the learning curve?                                       |
-| **Performance baseline**  | What does the framework ship by default (bundle size, TTFB)?           |
-| **Deployment target**     | Edge, serverless, Node.js, static CDN?                                 |
-| **Community & longevity** | Is the project actively maintained? Who is behind it?                  |
-| **Scalability**           | Can it grow with your app (monorepo support, module federation, etc.)? |
-
-The goal is to rule out poor fits early, not to find a "perfect" framework — one doesn't exist.
+| Criterion                 | What to assess                                                                |
+| ------------------------- | ----------------------------------------------------------------------------- |
+| **Rendering model**       | SSR, SSG, CSR, hybrid (ISR, PPR)? Does it match your data freshness needs?    |
+| **Data fetching**         | Is server-side async data fetching first-class, or bolted on?                 |
+| **Ecosystem**             | Are your critical dependencies (auth, forms, tables) well-supported?          |
+| **Team familiarity**      | What is the realistic learning curve? What can you ship in week 1 vs month 3? |
+| **Bundle size baseline**  | What does the framework ship to clients by default?                           |
+| **Deployment target**     | Edge, serverless, Node.js long-running, or static CDN?                        |
+| **Community & longevity** | Who maintains it? Is it backed by a company or a solo contributor?            |
+| **Migration cost**        | If you need to switch in 18 months, how expensive is it?                      |
+| **Lock-in risk**          | How much of your code is framework-specific vs portable?                      |
 
 ---
 
-## Code Example: Automated Scoring Matrix
+## Code Examples
 
-Use this TypeScript utility to score framework candidates against your project's weighted priorities. Run it in any Node.js 18+ environment.
+### Runnable Weighted Scoring Matrix
 
 ```ts
 // framework-scorer.ts
-// Run with: npx tsx framework-scorer.ts
+// Run: npx tsx framework-scorer.ts
 
 type Criterion =
   | "ssrSupport"
@@ -44,22 +43,25 @@ type Criterion =
   | "teamFamiliarity"
   | "bundleSize"
   | "edgeCompatibility"
-  | "communityHealth";
+  | "communityHealth"
+  | "migrationCost" // 10 = cheap to migrate away from
+  | "lockInRisk"; // 10 = low lock-in / portable code
 
-type FrameworkScore = Record<Criterion, number>; // scores 1–10
+type Score = Record<Criterion, number>; // 1 (poor) – 10 (excellent)
 
-interface ProjectWeights extends Record<Criterion, number> {} // weights must sum to 1
-
-const weights: ProjectWeights = {
-  ssrSupport: 0.25,
-  ecosystemSize: 0.2,
+// Adjust weights to reflect YOUR project's priorities — they must sum to 1.0
+const weights: Record<Criterion, number> = {
+  ssrSupport: 0.2,
+  ecosystemSize: 0.15,
   teamFamiliarity: 0.2,
   bundleSize: 0.1,
-  edgeCompatibility: 0.15,
+  edgeCompatibility: 0.1,
   communityHealth: 0.1,
+  migrationCost: 0.1,
+  lockInRisk: 0.05,
 };
 
-const frameworks: Record<string, FrameworkScore> = {
+const frameworks: Record<string, Score> = {
   "Next.js": {
     ssrSupport: 10,
     ecosystemSize: 10,
@@ -67,6 +69,8 @@ const frameworks: Record<string, FrameworkScore> = {
     bundleSize: 7,
     edgeCompatibility: 9,
     communityHealth: 10,
+    migrationCost: 5, // App Router conventions are framework-specific
+    lockInRisk: 5, // RSC patterns are Next.js-specific
   },
   Remix: {
     ssrSupport: 10,
@@ -74,7 +78,9 @@ const frameworks: Record<string, FrameworkScore> = {
     teamFamiliarity: 6,
     bundleSize: 8,
     edgeCompatibility: 8,
-    communityHealth: 8,
+    communityHealth: 7,
+    migrationCost: 7, // closer to web platform standards
+    lockInRisk: 7,
   },
   Astro: {
     ssrSupport: 7,
@@ -83,6 +89,8 @@ const frameworks: Record<string, FrameworkScore> = {
     bundleSize: 10, // ships zero JS by default
     edgeCompatibility: 9,
     communityHealth: 8,
+    migrationCost: 8,
+    lockInRisk: 6, // .astro syntax is Astro-specific
   },
   SvelteKit: {
     ssrSupport: 9,
@@ -91,91 +99,158 @@ const frameworks: Record<string, FrameworkScore> = {
     bundleSize: 9,
     edgeCompatibility: 8,
     communityHealth: 8,
+    migrationCost: 9, // Svelte is close to web platform
+    lockInRisk: 7,
   },
 };
 
-function scoreFramework(
-  scores: FrameworkScore,
-  weights: ProjectWeights,
-): number {
-  return (Object.keys(scores) as Criterion[]).reduce((total, criterion) => {
-    return total + scores[criterion] * weights[criterion];
-  }, 0);
+function scoreFramework(scores: Score): number {
+  return (Object.keys(scores) as Criterion[]).reduce(
+    (total, criterion) => total + scores[criterion] * weights[criterion],
+    0,
+  );
 }
 
 const results = Object.entries(frameworks)
-  .map(([name, scores]) => ({
-    name,
-    score: scoreFramework(scores, weights).toFixed(2),
-  }))
+  .map(([name, scores]) => ({ name, score: scoreFramework(scores).toFixed(2) }))
   .sort((a, b) => parseFloat(b.score) - parseFloat(a.score));
 
 console.table(results);
-// ┌─────────┬────────────┬────────┐
-// │ (index) │    name    │ score  │
-// ├─────────┼────────────┼────────┤
-// │    0    │  'Next.js' │ '9.10' │
-// │    1    │   'Remix'  │ '8.25' │
-// ...
+// With default weights:
+// ┌────────────┬────────┐
+// │  Next.js   │  8.85  │
+// │  Astro     │  7.92  │
+// │  Remix     │  7.77  │
+// │ SvelteKit  │  7.57  │
+// └────────────┴────────┘
 ```
 
-Adjust `weights` to match your project's actual priorities before running.
+---
+
+### Heuristic Decision Tree
+
+When scores are close, apply project-context heuristics:
+
+```ts
+// framework-heuristics.ts
+
+interface ProjectContext {
+  needsSSR: boolean;
+  isContentHeavy: boolean; // docs, blogs, marketing pages
+  isSPA: boolean; // single-page app, no public routes needing SEO
+  teamKnowsReact: boolean;
+  deployTarget: "edge" | "serverless" | "node" | "static";
+  hasPublicRoutes: boolean; // SEO-critical public pages
+}
+
+function recommend(ctx: ProjectContext): string {
+  if (ctx.isContentHeavy && !ctx.needsSSR) return "Astro";
+  if (ctx.isSPA && !ctx.hasPublicRoutes)
+    return "Vite + React (no full framework)";
+  if (
+    ctx.teamKnowsReact &&
+    (ctx.deployTarget === "edge" || ctx.deployTarget === "serverless")
+  ) {
+    return "Next.js (App Router)";
+  }
+  if (ctx.teamKnowsReact) return "Remix";
+  return "SvelteKit";
+}
+
+const myProject: ProjectContext = {
+  needsSSR: true,
+  isContentHeavy: false,
+  isSPA: false,
+  teamKnowsReact: true,
+  deployTarget: "serverless",
+  hasPublicRoutes: true,
+};
+
+console.log(recommend(myProject)); // "Next.js (App Router)"
+```
+
+---
+
+### Assessing Lock-In Risk
+
+Categorise your codebase by portability before committing:
+
+```ts
+// ✅ Portable across any React framework — survives a switch
+export const useProductStore = create<ProductState>(...);    // Zustand — no framework coupling
+export function ProductCard({ product }: Props) { ... }      // pure React component
+export async function fetchProduct(id: string) { ... }        // plain async function — no imports
+
+// ⚠️ Framework-coupled — must rewrite if switching
+import { useRouter }    from "next/navigation";    // Next.js App Router only
+import { cookies }      from "next/headers";       // Next.js server-only
+import { useLoaderData } from "@remix-run/react";  // Remix only
+```
+
+When evaluating, estimate the proportion of your eventual codebase that will be in the second category. A high proportion increases migration cost if the framework choice turns out to be wrong.
+
+---
+
+### Framework Comparison Reference
+
+|                  | Next.js                      | Remix                    | Astro               | SvelteKit                |
+| ---------------- | ---------------------------- | ------------------------ | ------------------- | ------------------------ |
+| **Language**     | React                        | React                    | Multi-framework     | Svelte                   |
+| **Rendering**    | SSR, SSG, ISR, PPR           | SSR-first                | SSG + opt. SSR      | SSR, SSG                 |
+| **JS baseline**  | ~70–100 kB                   | ~40–60 kB                | 0 kB                | ~10–30 kB                |
+| **Edge support** | ✅ (Vercel)                  | ✅ (CF Workers)          | ✅                  | ✅                       |
+| **Best for**     | Full-stack apps, large teams | Form-heavy, web-standard | Content sites, docs | Non-React, perf-critical |
 
 ---
 
 ## Real-World Use Case
 
-**Scenario:** A fintech startup is building a customer-facing dashboard showing real-time account balances, transaction history, and a public-facing marketing site — all in one product.
-
-Their decision process:
-
-- **SSR is required** for the marketing pages (SEO matters for acquisition).
-- **Dynamic, personalized data** means SSG alone won't work for the dashboard.
-- **The team knows React** well — Angular or Svelte would mean a slow ramp.
-- **Edge rendering** is preferred to minimize latency for users across regions.
-- **Auth and session handling** must be server-side (security requirement).
-
-Running the scoring matrix above with those priorities heavily weighted toward `ssrSupport`, `edgeCompatibility`, and `teamFamiliarity` points clearly to **Next.js App Router** — which supports React Server Components, edge middleware, and has first-class Vercel/Cloudflare deployment support.
-
-If the product were documentation-heavy with minimal interactivity, **Astro** would score higher due to its zero-JS-by-default model and MDX support.
+A fintech startup builds a customer-facing dashboard (real-time personalised data, authenticated routes) plus a public marketing site. Analysis: SSR is required for both SEO and personalisation; the team of 6 are all experienced React developers; deployment is on Vercel. Scoring with `teamFamiliarity` and `ssrSupport` heavily weighted produces Next.js at 8.85. The heuristic confirms it. The decision is documented in an ADR with the scoring, the rejected alternatives (Remix scored 7.77 — close, but team familiarity tipped it), and the rationale.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-### 1. Choosing based on hype, not requirements
+**1. Choosing based on what's trending.** "Everyone is using Next.js" is not a technical criterion. Apply your weighted criteria; the popular choice may not be the right fit.
 
-Frameworks trend on social media. A framework being popular on Twitter or topping GitHub stars does not mean it's right for your use case. Always start with your rendering and data requirements — not what's trending.
+**2. Underweighting team familiarity.** A theoretically optimal framework that the team doesn't know costs months of productivity — often more than the technical advantage is worth.
 
-<Callout type="warn">
-  SPA frameworks like plain Vite + React are a poor default for content-heavy or
-  SEO-sensitive apps. They ship zero server rendering out of the box.
-</Callout>
+**3. Ignoring migration cost and lock-in.** Favour frameworks that keep business logic and components portable. Penalise heavy reliance on framework-specific primitives.
 
-### 2. Underweighting team familiarity
+**4. Not considering deployment constraints first.** If you must deploy to a specific platform, some frameworks are a poor fit regardless of other scores. Deployment target is often a hard filter.
 
-A technically superior framework your team doesn't know costs weeks of productivity. Unless you have a long runway and time to learn, weight familiarity heavily. A team that knows Next.js well will outship a team struggling with a new framework's mental model every time.
-
-### 3. Ignoring deployment constraints too late
-
-Some frameworks are optimized for specific runtimes. Remix and Next.js both support edge and Node.js targets, but the configuration differs significantly. If your infrastructure is locked to bare Node.js VMs or a specific cloud provider, validate deployment compatibility **before** committing.
-
-<Callout type="info">
-  Next.js `output: 'export'` generates a fully static build but disables all
-  server features. Don't choose Next.js for its SSR capabilities and then
-  static-export it — use Astro instead.
-</Callout>
-
-### 4. Treating the decision as permanent
-
-Most modern frameworks share similar primitives (JSX, file-based routing, async data fetching). If your codebase is well-structured with clean separation of concerns, migrating between frameworks — while painful — is not catastrophic. Don't let fear of the wrong choice lead to paralysis.
-
-### 5. Skipping the "escape hatch" test
-
-Before committing, identify your three most complex requirements and verify the framework handles them. If you can't find clear documentation or working examples for your hardest cases, that's a signal.
+**5. Deciding by committee without weighted criteria.** Group discussions without structured criteria devolve into preference wars. The scoring matrix externalises the decision.
 
 ---
 
 ## Summary
 
-Framework selection is a structured trade-off process, not a matter of preference. Identify your project's rendering requirements, deployment target, team skills, and performance constraints first. Score candidates against weighted criteria rather than relying on gut feel or community popularity. The best framework is the one that solves your actual constraints with the least friction for your specific team. Revisit the decision matrix if your requirements change significantly — and don't over-engineer the choice early in a project when requirements are still uncertain.
+Framework selection is a multi-axis decision requiring structured criteria and explicit weights. Use a scoring matrix to compare frameworks — adjust weights to reflect your project's actual priorities, not industry defaults. Apply heuristics to break ties: Astro for content-heavy sites, Remix for web-standard SSR, Next.js for full-stack React on serverless/edge, SvelteKit for non-React teams prioritising bundle size. Assess lock-in risk by estimating what percentage of your code would require rewriting in a migration. Document the decision in an ADR with the scoring, rejected alternatives, and context so the reasoning survives team turnover.
+
+---
+
+## Interview Questions
+
+**Q1. How do you structure a framework selection process to avoid it becoming a preference war?**
+
+Make the criteria explicit and weighted before any discussion of specific frameworks. Define the criteria that matter for the project — rendering model, deployment target, team familiarity, ecosystem, bundle size, migration cost — and assign numeric weights that sum to 1.0, reflecting the project's actual priorities. Then score each framework candidate against each criterion (1–10) independently. A weighted sum produces a comparable score. This approach externalises disagreement: teams argue about which weight to assign or which score a framework deserves, both of which are productive debates about actual requirements. They stop arguing about personal preferences. After the scoring, apply heuristic filters (deployment target hard constraints, team familiarity thresholds) and document the decision in an ADR with the context, the scoring matrix, and the rejected alternatives.
+
+**Q2. What is framework lock-in and how do you reduce it?**
+
+Framework lock-in is the proportion of your codebase that would require rewriting (not modifying) if you switched frameworks. Lock-in accumulates in routing (`useRouter` from `next/navigation`), data loading (`cookies()`, `headers()` from `next/headers`, Remix `loader` functions), authentication patterns, and framework-specific file conventions (App Router layouts, loading.tsx, error.tsx). It does not accumulate in pure React components, business logic in plain async functions, or portable state management (Zustand, Jotai). To reduce lock-in: keep framework-specific code at the thin edges of your application (data loading entry points, routing layer) and keep the majority of your code as plain TypeScript and React with no framework imports. A good test: could this component, hook, or utility be imported into a Remix app without modification? If yes, it's portable.
+
+**Q3. What are the rendering model differences between Next.js, Remix, and Astro, and how do they affect which framework to choose?**
+
+Next.js App Router uses React Server Components by default — every component renders on the server with direct async/await access to data, and only `'use client'` components send JavaScript to the browser. It supports SSR, SSG, ISR (stale-while-revalidate at the route level), and Partial Prerendering (static shell with dynamic Suspense boundaries). Remix is SSR-first: every route has a `loader` function that runs per request on the server; there is no static generation built in. Remix closely follows web platform standards. Astro is SSG-first: pages are built to static HTML at build time; client JavaScript ships zero bytes unless a component is explicitly hydrated with a `client:` directive. Selection implication: Next.js for mixed static/dynamic full-stack apps with personalised routes; Remix for server-rendered form-heavy apps where web platform alignment is valued; Astro for content sites where JavaScript is the exception rather than the rule.
+
+**Q4. Why might Astro score better than Next.js for a documentation site despite Next.js being more popular?**
+
+For a documentation site, the primary requirements are: fast page loads (content served as static HTML with minimal JavaScript), excellent SSG support, easy Markdown/MDX integration, and low JavaScript payload. Astro's zero-JS-by-default model scores 10 on bundle size; for a docs site with hundreds of pages and almost no interactive components, this is a decisive advantage. Next.js's bundle baseline (~70–100 kB) serves no functional purpose on a documentation page that has no interactivity — it's pure overhead. Astro also has first-class MDX and Content Collections support. If the weights are adjusted to heavily favour bundle size and content-site ergonomics (as they should be for a docs project), Astro's weighted score exceeds Next.js's. The scoring matrix produces the correct answer when the weights reflect the actual requirements — documentation sites and e-commerce platforms have fundamentally different priority profiles.
+
+**Q5. When should you choose Remix over Next.js despite Next.js being the more popular choice?**
+
+Remix is a better fit than Next.js when: (1) your application is form-heavy and benefits from Remix's progressive enhancement model — forms work without JavaScript by default because Remix `action` functions handle POST requests natively; (2) the team values web platform alignment and wants routing, data loading, and mutations to closely mirror browser standards (Request/Response, FormData); (3) migration cost and lock-in are high-weight criteria — Remix's patterns are closer to the web platform, making migration away easier; (4) deployment on Cloudflare Workers is preferred — Remix has excellent Cloudflare support and Next.js has historically had more friction there. If your team is strongly React-trained, already on Vercel, and building a complex full-stack app with mixed rendering needs, Next.js's advantage in ecosystem size and tooling usually outweighs Remix's web-platform alignment benefit.
+
+**Q6. How should deployment target constraints factor into framework selection, and what are examples of poor-fit combinations?**
+
+Deployment target is often a hard filter that should be applied before scoring. Poor-fit combinations: Next.js App Router on GitHub Pages or plain S3 — these platforms only serve static files; App Router's SSR, Route Handlers, and Server Actions require a server runtime; you can only use `next export` output, losing most of the framework's value. Remix on a static file host (Netlify without serverless, plain S3) — Remix is SSR-first by design with no static export; it requires a server to run. Next.js on Cloudflare Workers — Next.js has partial edge runtime support but historically has had more friction on Cloudflare than on Vercel; some Next.js features are Vercel-specific. Strong-fit combinations: Next.js on Vercel (native integration, automatic ISR, Image Optimization, Edge Functions); Remix on Cloudflare Workers (excellent edge runtime support, web-standard APIs align with the Workers runtime); Astro on any CDN (Netlify, Vercel, S3, Cloudflare Pages) since the output is static HTML and assets.
