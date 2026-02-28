@@ -1,49 +1,47 @@
 ---
 title: API Contract Design
-description: How to define, enforce, and maintain reliable API contracts between frontend and backend to eliminate integration bugs and enable parallel development.
+description: Designing explicit, evolvable API contracts between frontend and backend — tRPC for zero-codegen TypeScript contracts, Zod schemas shared as a single source of truth, standardised error envelopes, runtime response validation, contract-first parallel development, and breaking change strategy.
 ---
 
 ## Overview
 
-An API contract is a formal agreement between a frontend and backend about how they communicate — what endpoints exist, what data shapes are sent and received, what errors look like, and what authentication is required.
+An API contract is a formal agreement between frontend and backend about how they communicate — what endpoints exist, what data shapes are sent and received, what errors look like, and what auth is required.
 
-Without a contract, frontend and backend teams make assumptions about each other. Those assumptions drift. You get runtime errors in production, broken UIs, and debugging sessions that waste hours tracing a mismatched field name.
+Without a contract, teams make assumptions about each other. Those assumptions drift. You get runtime errors in production, broken UIs, and debugging sessions tracing a mismatched field name.
 
-A well-designed contract lets both sides develop in parallel, generates types automatically, and makes breaking changes visible before they ship.
+A well-designed contract lets both sides develop in parallel, generates TypeScript types automatically, and makes breaking changes visible before they ship.
+
+---
 
 ## How It Works
 
 Think of an API contract like a legal document between two services. Both sides sign it. If one side changes the agreement, the other side gets notified — or the build fails.
 
-In practice, contracts are expressed as a schema (OpenAPI, GraphQL SDL, tRPC router, or Zod schema). From that schema:
+In practice, contracts are expressed as a schema (tRPC router, Zod schema, OpenAPI spec, GraphQL SDL). From that schema:
 
-- The backend validates incoming requests and outgoing responses against it.
-- The frontend gets generated TypeScript types so it never has to guess the shape of a response.
-- Both sides can be tested in isolation using mocks derived from the contract.
+- The backend validates all incoming requests and outgoing responses at runtime.
+- The frontend gets TypeScript types derived from the same schema — no manual duplication.
+- Both sides can be developed in parallel using mocks generated from the contract.
 
-The three most common approaches in modern TypeScript stacks are:
+The three most common approaches in modern TypeScript stacks:
 
-**1. OpenAPI (REST)** — Write or generate a YAML/JSON spec. Use codegen to produce types for both sides.
+**tRPC** — Define procedures in TypeScript on the server. The client infers types directly from the router type. No codegen step, no schema drift.
 
-**2. tRPC** — Define procedures in TypeScript on the server. The client infers types directly from the router. No codegen step needed.
+**Shared Zod schemas** — Define schemas in a shared module. Both sides import from it. The backend validates input; the frontend generates types with `z.infer<>`. Export OpenAPI specs from the same schemas.
 
-**3. GraphQL** — Define a schema with SDL. Generate types for both client and server from that single source of truth.
+**OpenAPI** — Write or generate a YAML/JSON spec. Generate TypeScript types for both sides with codegen. Standard for public or polyglot APIs.
+
+---
 
 ## Code Examples
 
-### Approach 1: tRPC with Next.js App Router
+### 1. tRPC — Zero-Codegen TypeScript Contract
 
-tRPC is the tightest frontend-backend contract possible in a TypeScript monorepo. The server router _is_ the contract.
-
-```bash
-npm install @trpc/server @trpc/client @trpc/react-query @tanstack/react-query zod
-```
-
-**`src/server/trpc.ts`** — Initialize tRPC:
+tRPC is the tightest possible contract in a TypeScript monorepo. The server router type IS the contract — it flows to the client without any codegen step.
 
 ```ts
+// src/server/trpc.ts
 import { initTRPC } from "@trpc/server";
-import { z } from "zod";
 
 const t = initTRPC.create();
 
@@ -51,18 +49,18 @@ export const router = t.router;
 export const publicProcedure = t.procedure;
 ```
 
-**`src/server/routers/orders.ts`** — Define the contract:
-
 ```ts
+// src/server/routers/orders.ts
 import { z } from "zod";
 import { router, publicProcedure } from "../trpc";
 import { db } from "@/lib/db";
 
-// This Zod schema IS the contract for what a caller must send.
-const createOrderSchema = z.object({
+// The Zod schema IS the contract for what a caller must send.
+// TypeScript infers the type — no manual interface needed.
+const createOrderInput = z.object({
   productId: z.string().uuid(),
   quantity: z.number().int().min(1).max(100),
-  shippingAddress: z.object({
+  address: z.object({
     street: z.string().min(1),
     city: z.string().min(1),
     postalCode: z.string().regex(/^\d{5}$/),
@@ -71,16 +69,16 @@ const createOrderSchema = z.object({
 
 export const ordersRouter = router({
   create: publicProcedure
-    .input(createOrderSchema)
+    .input(createOrderInput) // runtime validation — malformed input throws before the resolver
     .mutation(async ({ input }) => {
-      // input is fully typed — no casting needed
+      // input is fully typed — ProductId is string, quantity is number, etc.
       const order = await db.order.create({
         data: {
           productId: input.productId,
           quantity: input.quantity,
-          street: input.shippingAddress.street,
-          city: input.shippingAddress.city,
-          postalCode: input.shippingAddress.postalCode,
+          street: input.address.street,
+          city: input.address.city,
+          postalCode: input.address.postalCode,
         },
       });
       return { orderId: order.id, status: "created" as const };
@@ -89,33 +87,28 @@ export const ordersRouter = router({
   list: publicProcedure
     .input(z.object({ page: z.number().int().min(1).default(1) }))
     .query(async ({ input }) => {
-      const orders = await db.order.findMany({
+      return db.order.findMany({
         skip: (input.page - 1) * 20,
         take: 20,
         orderBy: { createdAt: "desc" },
       });
-      return orders;
     }),
 });
 ```
 
-**`src/server/root.ts`** — Merge routers:
-
 ```ts
+// src/server/root.ts
 import { router } from "./trpc";
 import { ordersRouter } from "./routers/orders";
 
-export const appRouter = router({
-  orders: ordersRouter,
-});
+export const appRouter = router({ orders: ordersRouter });
 
-// Export the type — this is what the client imports for full type inference
+// Export the router type — this is the contract the client imports
 export type AppRouter = typeof appRouter;
 ```
 
-**`src/app/api/trpc/[trpc]/route.ts`** — Expose via Next.js App Router:
-
 ```ts
+// src/app/api/trpc/[trpc]/route.ts
 import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
 import { appRouter } from "@/server/root";
 
@@ -130,19 +123,17 @@ const handler = (req: Request) =>
 export { handler as GET, handler as POST };
 ```
 
-**`src/lib/trpc-client.ts`** — Client setup:
-
 ```ts
+// src/lib/trpc-client.ts
 import { createTRPCReact } from "@trpc/react-query";
 import type { AppRouter } from "@/server/root";
 
-// AppRouter type flows from server to client — no manual type duplication
+// AppRouter type flows from server to client — no duplication, no codegen
 export const trpc = createTRPCReact<AppRouter>();
 ```
 
-**`src/app/orders/page.tsx`** — Server Component calling tRPC directly:
-
 ```tsx
+// src/app/orders/page.tsx — Server Component calling tRPC directly
 import { appRouter } from "@/server/root";
 
 export default async function OrdersPage() {
@@ -163,28 +154,25 @@ export default async function OrdersPage() {
 ```
 
 <Callout type="info">
-  In Server Components, call tRPC procedures directly via `createCaller`. Only
-  use the HTTP client (`trpc.orders.list.useQuery()`) inside Client Components
-  that need reactivity.
+  In Server Components, call tRPC procedures via `createCaller` — no HTTP round
+  trip. Only use the HTTP client (`trpc.orders.list.useQuery()`) inside Client
+  Components that need reactive re-fetching.
 </Callout>
 
 ---
 
-### Approach 2: OpenAPI with Zod + next-zod-openapi
-
-Use this when you need to expose a public API or work with non-TypeScript consumers.
-
-**`src/lib/openapi.ts`** — Define a shared response schema:
+### 2. Shared Zod Schemas — Single Source of Truth for REST APIs
 
 ```ts
+// src/lib/schemas/product.ts — shared by frontend and backend
 import { z } from "zod";
 
-// Define once, reuse on both sides
 export const ProductSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
   priceInCents: z.number().int().positive(),
   inStock: z.boolean(),
+  category: z.enum(["electronics", "clothing", "food"]),
 });
 
 export const ProductListResponseSchema = z.object({
@@ -193,102 +181,94 @@ export const ProductListResponseSchema = z.object({
   page: z.number().int(),
 });
 
-// Export the inferred type for use in frontend code
+// Derive TypeScript type — the schema IS the source of truth
+export type Product = z.infer<typeof ProductSchema>;
 export type ProductListResponse = z.infer<typeof ProductListResponseSchema>;
 ```
 
-**`src/app/api/products/route.ts`** — Validate the response before sending:
-
 ```ts
-import { NextResponse } from "next/server";
-import { ProductListResponseSchema } from "@/lib/openapi";
+// src/app/api/products/route.ts — backend validates response before sending
+import { ProductListResponseSchema } from "@/lib/schemas/product";
 import { db } from "@/lib/db";
 
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const page = Number(searchParams.get("page") ?? "1");
+  const page = Number(new URL(request.url).searchParams.get("page") ?? "1");
 
   const [products, total] = await Promise.all([
     db.product.findMany({ skip: (page - 1) * 20, take: 20 }),
     db.product.count(),
   ]);
 
-  // Parse validates the shape — throws if the DB model drifts from the contract
-  const response = ProductListResponseSchema.parse({
+  // .parse() validates the DB response against the contract at runtime.
+  // If your DB model drifts (e.g., priceInCents removed), this throws
+  // during development — not silently in the browser.
+  const validated = ProductListResponseSchema.parse({
     data: products,
     total,
     page,
   });
 
-  return NextResponse.json(response);
+  return Response.json(validated);
 }
 ```
-
-**`src/hooks/use-products.ts`** — Frontend consumes the same type:
 
 ```ts
-"use client";
+// src/hooks/use-products.ts — frontend uses the same schema type
+import type { ProductListResponse } from "@/lib/schemas/product";
 
-import { useEffect, useState } from "react";
-import type { ProductListResponse } from "@/lib/openapi";
-
-export function useProducts(page: number) {
-  const [data, setData] = useState<ProductListResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetch(`/api/products?page=${page}`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`Request failed: ${res.status}`);
-        return res.json() as Promise<ProductListResponse>;
-      })
-      .then(setData)
-      .catch((err: Error) => setError(err.message));
-  }, [page]);
-
-  return { data, error };
+export async function fetchProducts(
+  page: number,
+): Promise<ProductListResponse> {
+  const res = await fetch(`/api/products?page=${page}`);
+  if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+  // For internal APIs, type assertion is acceptable.
+  // For public/external APIs, parse the response with the Zod schema here too.
+  return res.json() as Promise<ProductListResponse>;
 }
 ```
-
-<Callout type="warn">
-  Casting with `as Promise<ProductListResponse>` trusts the server. For production, parse the response with Zod on the client too — especially if the API is consumed by external parties.
-</Callout>
 
 ---
 
-### Standardized Error Shape
+### 3. Standardised Error Envelope
 
-Your contract must include errors, not just success responses. Define a consistent error envelope:
+Define error shapes as rigorously as success shapes:
 
 ```ts
 // src/lib/api-error.ts
+export type ApiErrorCode =
+  | "NOT_FOUND"
+  | "UNAUTHORIZED"
+  | "VALIDATION_ERROR"
+  | "INTERNAL_ERROR";
 
 export type ApiError = {
-  code: "NOT_FOUND" | "UNAUTHORIZED" | "VALIDATION_ERROR" | "INTERNAL_ERROR";
+  code: ApiErrorCode;
   message: string;
-  // Optional structured details for validation errors
-  details?: Record<string, string[]>;
+  details?: Record<string, string[]>; // field-level errors for VALIDATION_ERROR
+};
+
+const statusMap: Record<ApiErrorCode, number> = {
+  NOT_FOUND: 404,
+  UNAUTHORIZED: 401,
+  VALIDATION_ERROR: 422,
+  INTERNAL_ERROR: 500,
 };
 
 export function createApiError(
-  code: ApiError["code"],
+  code: ApiErrorCode,
   message: string,
-  details?: ApiError["details"],
+  details?: Record<string, string[]>,
 ): Response {
   const body: ApiError = { code, message, ...(details ? { details } : {}) };
-  const statusMap: Record<ApiError["code"], number> = {
-    NOT_FOUND: 404,
-    UNAUTHORIZED: 401,
-    VALIDATION_ERROR: 422,
-    INTERNAL_ERROR: 500,
-  };
   return Response.json(body, { status: statusMap[code] });
 }
 ```
 
 ```ts
-// Usage in a route handler
+// src/app/api/products/[id]/route.ts
 import { createApiError } from "@/lib/api-error";
+import { ProductSchema } from "@/lib/schemas/product";
+import { db } from "@/lib/db";
 
 export async function GET(
   _req: Request,
@@ -300,45 +280,100 @@ export async function GET(
     return createApiError("NOT_FOUND", `Product ${params.id} does not exist`);
   }
 
-  return Response.json(product);
+  // Validate outgoing response — catches DB model drift early
+  return Response.json(ProductSchema.parse(product));
 }
 ```
 
+---
+
+### 4. Contract-First Development — Enabling Parallel Work
+
+When frontend and backend need to develop simultaneously before the DB is ready:
+
+```ts
+// src/lib/schemas/order.ts — agreed on day one; both sides import from here
+import { z } from "zod";
+
+export const OrderSchema = z.object({
+  id: z.string().uuid(),
+  userId: z.string().uuid(),
+  status: z.enum(["pending", "confirmed", "shipped", "delivered", "cancelled"]),
+  totalAmount: z.number().int().positive(),
+  createdAt: z.string().datetime(),
+});
+
+export type Order = z.infer<typeof OrderSchema>;
+```
+
+```ts
+// src/mocks/orders.ts — frontend generates realistic mock data from the schema
+import { faker } from "@faker-js/faker";
+import type { Order } from "@/lib/schemas/order";
+
+export function generateMockOrder(): Order {
+  return {
+    id: faker.string.uuid(),
+    userId: faker.string.uuid(),
+    status: faker.helpers.arrayElement(["pending", "confirmed", "shipped"]),
+    totalAmount: faker.number.int({ min: 100, max: 100_000 }),
+    createdAt: faker.date.recent().toISOString(),
+  };
+}
+```
+
+Frontend builds UI using mock data. Backend builds the database layer. When the API endpoint ships, both sides are guaranteed to agree on the contract — it was committed on day one.
+
+---
+
 ## Real-World Use Case
 
-You're building a B2B SaaS app. The frontend team starts building the order management UI on Monday. The backend team is still writing the database migrations.
+A B2B SaaS company: the frontend team needs to build an order management dashboard and the backend team is still writing database migrations. With a contract-first approach: both teams agree on `OrderSchema` using Zod on day one and commit it to `src/lib/schemas/order.ts`. The frontend generates mock data and builds the UI. When the backend later changes `totalAmount` to `totalAmountInCents`, the TypeScript compiler immediately flags every frontend callsite — the bug never reaches staging. The shared Zod schema means there is exactly one place to update.
 
-With a contract-first approach:
-
-1. Both teams agree on the `OrderSchema` using Zod on day one and commit it to `src/lib/schemas/order.ts`.
-2. The frontend generates mock data from the schema using a tool like `@faker-js/faker` constrained to the schema shape.
-3. The backend validates every response against the schema before it ships.
-4. When the backend changes `totalAmount` to `totalAmountInCents`, the TypeScript compiler immediately flags every frontend callsite. The bug never reaches staging.
-
-This pattern eliminates the most common source of frontend-backend bugs: mismatched field names and unexpected nulls.
+---
 
 ## Common Mistakes / Gotchas
 
-**1. Treating the schema as backend-only**
+**1. Treating the schema as backend-only.** Defining validation schemas only in route handlers and manually duplicating types on the frontend means schema drift is silent. Always share from a single source.
 
-A common mistake is defining validation schemas only in the backend route handler and manually duplicating types on the frontend. When the backend changes, the frontend types silently go stale. Always share schemas from a single source — either a shared `lib/schemas` module, tRPC's inferred types, or codegen output.
+**2. Not versioning breaking changes.** Renaming a field, changing a type, or removing a field are all breaking changes. For internal APIs, coordinate explicitly with a deprecation comment and removal date. For public APIs, version the endpoint (`/api/v2/`).
 
-**2. Not versioning breaking changes**
+**3. Ignoring error contracts.** Defining success shapes carefully and leaving errors as ad-hoc strings results in `catch (e: any)` blocks everywhere. Define the error envelope once, share the type, handle consistently.
 
-Renaming a field, changing a type from `string` to `number`, or removing a field are all breaking changes. If your API is consumed by anything other than your own frontend, those changes need a version bump (`/api/v2/...`) or a migration period. Even internally, coordinate breaking changes explicitly with a deprecation comment and a removal date.
+**4. Skipping runtime response validation.** Writing a Zod schema but only using it for TypeScript types (not calling `.parse()`) means DB model drift is invisible at runtime. Validate outgoing responses in development at minimum.
 
-**3. Ignoring error contracts**
+**5. Over-fetching by default.** Returning entire database records "because the frontend might need it someday" leaks sensitive fields. Design responses around what the UI actually needs.
 
-Most teams define success response shapes carefully and leave errors as ad-hoc strings. The frontend then has a mess of `catch (e: any)` blocks and inconsistent error UI. Define your error envelope once, share the type, and handle it consistently. tRPC does this automatically via `TRPCError`. For REST, define it yourself as shown above.
-
-**4. Skipping response validation on the backend**
-
-Writing a Zod schema and only using it to generate TypeScript types (without `.parse()` at runtime) means your DB model can drift from your contract without any warning. Validate outgoing responses in development at minimum. In production, log schema violations rather than throwing — but validate.
-
-**5. Over-fetching by default**
-
-Designing REST endpoints that return entire database records because "the frontend might need it someday" leaks sensitive fields and wastes bandwidth. Design responses around what the UI actually needs. Use tRPC's `.select()` or explicit response schemas to enforce this.
+---
 
 ## Summary
 
-An API contract is the explicit, enforced agreement between frontend and backend about data shapes, endpoints, and error formats. Without it, integration bugs accumulate silently. In a TypeScript stack, tRPC is the most ergonomic approach — the router type flows directly to the client with no codegen. For public or polyglot APIs, shared Zod schemas with OpenAPI generation are the standard. Regardless of approach, always share types from a single source, define your error shape as rigorously as your success shape, and validate responses at runtime — not just at compile time.
+An API contract is the explicit, enforced agreement between frontend and backend about data shapes, endpoints, and error formats. In a TypeScript monorepo, tRPC is the most ergonomic approach — the router type flows to the client with zero codegen. For REST APIs with multiple consumers, shared Zod schemas provide a single source of truth for both runtime validation and static types. Always define error envelopes as rigorously as success shapes. Validate outgoing responses against the schema at runtime so DB model drift is caught during development rather than in production. In contract-first development, commit the schema before any implementation — it enables parallel frontend/backend work and eliminates integration bugs.
+
+---
+
+## Interview Questions
+
+**Q1. What is a contract-first API design approach and what concrete benefit does it provide during parallel development?**
+
+Contract-first means both teams agree on and commit the API schema (data shapes, endpoint signatures, error formats) before either side begins implementation. The contract becomes the coordination artifact. In practice: on day one, both frontend and backend engineers agree on a Zod schema for the `Order` type and commit it to `src/lib/schemas/order.ts`. The frontend generates mock data from the schema and builds the UI against it. The backend implements the database layer and route handler independently. When the endpoint ships, both sides are guaranteed to agree — they were building to the same contract from the start. The concrete benefit: when the backend changes `totalAmount` to `totalAmountInCents`, the TypeScript compiler immediately flags every frontend callsite. The type mismatch is caught at compile time in the PR, not as a runtime error in production.
+
+**Q2. How does tRPC eliminate the type safety gap between frontend and backend without a codegen step?**
+
+In a tRPC setup, the backend router is defined as a TypeScript object: `const appRouter = router({ orders: ordersRouter })`. This object has a precise TypeScript type — `AppRouter = typeof appRouter` — that encodes the exact input and output types of every procedure. This type is exported and imported by the client: `createTRPCReact<AppRouter>()`. The TypeScript compiler resolves the type at compile time by following the import — no intermediate code generation is needed. When you call `trpc.orders.create.useMutation()` on the client, TypeScript knows the mutation input type is `{ productId: string; quantity: number; address: { street: string; ... } }` because it inferred it from the Zod schema in the router definition. If the server changes `productId` to `product_id`, TypeScript flags every client callsite immediately. The type contract is enforced by the TypeScript type system directly, not by a generated file.
+
+**Q3. What is the difference between validating incoming requests and validating outgoing responses, and why does both matter?**
+
+Incoming request validation (tRPC `.input(schema)` or `schema.safeParse(body)` in a route handler) protects the backend from malformed, malicious, or unexpected input. It's the first line of defense. Outgoing response validation (calling `schema.parse(dbResult)` before `Response.json(...)`) protects the frontend from DB model drift — the case where the database schema changes (a column is renamed, a nullable field becomes non-nullable, a field is added) but the TypeScript types haven't been updated. TypeScript types are compile-time constructs: a Prisma query result typed as `Product` may not actually match `ProductSchema` at runtime if a migration was applied. By calling `.parse()` on the DB result before serialisation, you get a runtime error in development that immediately surfaces the mismatch — rather than sending a malformed response that produces a confusing UI bug that's hard to trace back to a schema drift.
+
+**Q4. When should you use tRPC versus shared Zod schemas for a REST API, and what determines the choice?**
+
+tRPC is the right choice when: (1) your entire stack is TypeScript; (2) the API is consumed only by your own frontend(s) within the same monorepo; (3) you want the tightest possible type safety with no codegen. tRPC's wire protocol is an implementation detail — it's not a stable contract for external consumption. Shared Zod schemas for a REST API are the right choice when: (1) the API will be consumed by external parties or non-TypeScript clients; (2) you need to generate an OpenAPI specification for documentation; (3) you're working across repositories where importing the server router type is impractical. The error contract difference: tRPC produces typed `TRPCError` objects automatically; with REST, you must define and enforce the error envelope manually using a shared error type.
+
+**Q5. What constitutes a breaking API change and what is the correct strategy for managing one?**
+
+A breaking change is any modification that causes existing, valid clients to fail: renaming a field (`totalAmount` → `totalAmountInCents`), changing a field's type (`string` → `number`), removing a field entirely, adding a required field (existing clients don't send it → validation fails), or changing a field from nullable to non-nullable. Non-breaking changes: adding an optional field with a default value, adding a new endpoint, expanding an enum with new values (some clients may break on unexpected values — test carefully). The correct strategy for internal APIs: deprecate first — add a JSDoc `@deprecated` comment, accept both the old and new field for one sprint cycle, coordinate removal with the frontend team. For external/public APIs: version the endpoint (`/api/v2/products`) and run both versions simultaneously for a migration window before sunsetting v1. The TypeScript compiler enforces this for internal tRPC contracts automatically — if you rename the field, the build fails until all callsites are updated.
+
+**Q6. What is the error envelope pattern and why is it important for API contracts?**
+
+The error envelope is a consistent, typed structure for all API error responses — as rigorously designed as success responses. Without it, each route handler returns whatever error message happens to be convenient: `{ error: "not found" }`, `{ message: "unauthorized" }`, `{ err: "internal error: PrismaError at line 42" }`. The frontend must handle each shape differently, often with `(e as any).error ?? (e as any).message`, leaking raw DB errors in some paths and providing no structured field-level errors in others. The error envelope pattern defines one shared type: `{ code: "NOT_FOUND" | "VALIDATION_ERROR" | ..., message: string, details?: Record<string, string[]> }`. Both the backend response and the frontend error handler import this type from `src/lib/api-error.ts`. The frontend can exhaustively switch on `code`, display field-level errors from `details` in form validation, and show a generic message for `INTERNAL_ERROR` without leaking details. tRPC implements this pattern automatically via `TRPCError` — you throw typed errors in the resolver and the client receives them as typed errors.

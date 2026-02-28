@@ -1,0 +1,578 @@
+---
+title: Scroll-Driven Animations
+description: How the CSS scroll-driven animations specification replaces JavaScript scroll listeners and IntersectionObserver for animation purposes, linking CSS animations to scroll progress or element visibility with compositor-thread performance and no main-thread involvement.
+---
+
+## Overview
+
+Before scroll-driven animations, linking visual effects to scroll position required JavaScript — either `scroll` event listeners with `requestAnimationFrame` throttling, or `IntersectionObserver` for visibility-triggered transitions. Both approaches run on the main thread: the JS callback reads scroll position, computes progress, and writes style changes, creating a frame of latency between the scroll input and the visual update. On busy pages this latency compounds into visible jank.
+
+The CSS Scroll-Driven Animations specification (CSS Scroll Timelines Level 1) introduces two new timeline types — `scroll()` and `view()` — that replace the time axis of a standard CSS animation with scroll progress or element visibility progress. The animation is declared entirely in CSS (or via the JavaScript `ScrollTimeline` / `ViewTimeline` APIs), and the browser resolves it on the compositor thread. There is no JS callback in the rendering loop, no forced style recalculation per frame, and no `requestAnimationFrame` scheduling. The result is the same declarative model as `@keyframes` but driven by scroll position instead of elapsed time.
+
+The performance advantage is structural, not incremental. A scroll-driven animation that uses only compositor-friendly properties (`transform`, `opacity`) runs entirely on the GPU compositor thread — the same pipeline that handles CSS transitions. The main thread is not involved per frame. This means scroll-linked effects remain smooth even when JavaScript is executing heavy work, which is the exact scenario where JS-based scroll animations drop frames.
+
+---
+
+## How It Works
+
+### `scroll-timeline` -- Linking Animations to Scroll Progress
+
+A scroll timeline maps an animation's progress to the scroll position of a scrollable container. At 0% scroll, the animation is at its start; at 100% scroll, it's at its end. The animation progresses proportionally as the user scrolls — no time duration is involved.
+
+The `scroll()` function creates an anonymous scroll timeline inline:
+
+```css
+.progress-bar {
+  animation: grow-width linear;
+  /* Link animation progress to the scroll position of the nearest scrollable ancestor */
+  animation-timeline: scroll();
+}
+
+@keyframes grow-width {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+```
+
+By default, `scroll()` targets the nearest scrollable ancestor in the `block` axis. You can specify a different scroller and axis:
+
+```css
+/* Explicit scroller and axis */
+animation-timeline: scroll(root block);
+/* root = document viewport scroller, block = vertical in LTR */
+
+animation-timeline: scroll(nearest inline);
+/* nearest scrollable ancestor, horizontal axis */
+```
+
+The scroller argument accepts `nearest` (default), `root` (the document viewport), or `self` (the element itself is the scroller).
+
+### `view-timeline` -- Linking Animations to Element Visibility
+
+A view timeline maps animation progress to an element's visibility within its scrollport (the visible area of its scrollable ancestor). The animation starts when the element enters the scrollport and ends when it exits. This is the direct replacement for `IntersectionObserver`-driven entrance animations.
+
+```css
+.card {
+  animation: fade-slide-in linear both;
+  animation-timeline: view();
+  /* Animation progresses as this element scrolls through the viewport */
+}
+
+@keyframes fade-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(40px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+```
+
+`view()` also accepts an axis argument: `view(block)`, `view(inline)`, `view(x)`, `view(y)`.
+
+### `animation-timeline: scroll()` and `animation-timeline: view()` Shorthand
+
+The `animation-timeline` property accepts either `scroll()` or `view()` as functional notation. These are the anonymous (unnamed) forms — they infer the scroller from the DOM hierarchy. For most use cases, the anonymous forms are sufficient:
+
+```css
+/* scroll() — progress tracks container scroll position */
+animation-timeline: scroll();
+animation-timeline: scroll(root);
+animation-timeline: scroll(nearest inline);
+
+/* view() — progress tracks element visibility in scrollport */
+animation-timeline: view();
+animation-timeline: view(block);
+animation-timeline: view(inline);
+```
+
+When using `animation-timeline`, the `animation-duration` must be set to a non-`0` value for the animation to be valid, but its actual time value is ignored — the timeline is driven by scroll, not time. Convention is to use `animation-duration: auto` or `animation: <name> linear` (which implies a duration).
+
+### `animation-range` -- Controlling Start and End Points
+
+By default, a `view()` timeline runs the animation across the element's full visibility range — from the moment any part enters the scrollport to the moment the last pixel exits. `animation-range` lets you constrain the animation to a specific subset of that range:
+
+```css
+.card {
+  animation: fade-in linear both;
+  animation-timeline: view();
+
+  /* Start at "entry 0%" (element's leading edge enters scrollport)
+     End at "entry 100%" (element is fully inside the scrollport) */
+  animation-range: entry 0% entry 100%;
+}
+```
+
+The named ranges for view timelines are:
+
+| Range       | Description                                                        |
+| ----------- | ------------------------------------------------------------------ |
+| `cover`     | Full range from first pixel entering to last pixel exiting         |
+| `contain`   | Range where the element is fully contained within the scrollport   |
+| `entry`     | From the element's leading edge entering to fully inside           |
+| `exit`      | From the element starting to leave to fully outside                |
+| `entry-crossing` | From leading edge entering to leading edge reaching the far side |
+| `exit-crossing`  | From trailing edge reaching the near side to trailing edge exiting |
+
+You can also use percentages and pixel lengths:
+
+```css
+/* Start when element is 25% into the entry phase,
+   end when element is 75% through the cover range */
+animation-range: entry 25% cover 75%;
+
+/* For scroll() timelines, use absolute percentages of scroll range */
+animation-range: 10% 90%;
+```
+
+### Named Scroll and View Timelines
+
+When the scroller and the animated element are not in a direct ancestor-descendant relationship, or when you need multiple elements to share the same timeline, use named timelines:
+
+```css
+/* Define a named scroll timeline on the scroller */
+.scroll-container {
+  scroll-timeline-name: --main-scroll;
+  scroll-timeline-axis: block;
+  /* Shorthand: scroll-timeline: --main-scroll block; */
+}
+
+/* Any descendant can reference it by name */
+.parallax-layer {
+  animation: shift linear both;
+  animation-timeline: --main-scroll;
+}
+
+@keyframes shift {
+  from { transform: translateY(0); }
+  to   { transform: translateY(-100px); }
+}
+```
+
+View timelines work identically:
+
+```css
+.observed-element {
+  view-timeline-name: --card-visibility;
+  view-timeline-axis: block;
+  /* Shorthand: view-timeline: --card-visibility block; */
+}
+
+.observed-element .badge {
+  animation: pop-in linear both;
+  animation-timeline: --card-visibility;
+  animation-range: entry 0% entry 100%;
+}
+```
+
+Named timelines use the `--` prefix by convention (similar to CSS custom properties) and are scoped to the subtree of the element that defines them.
+
+### `ScrollTimeline` and `ViewTimeline` JavaScript APIs
+
+For imperative control — dynamic timeline creation, reading progress values, or orchestrating animations that depend on runtime conditions — the JavaScript APIs provide the same functionality:
+
+```ts
+// Create a ScrollTimeline linked to the document scroller
+const scrollTimeline = new ScrollTimeline({
+  source: document.documentElement,
+  axis: "block",
+});
+
+// Attach a scroll-driven animation imperatively via WAAPI
+const progressBar = document.querySelector(".progress-bar");
+progressBar.animate(
+  [
+    { transform: "scaleX(0)" },
+    { transform: "scaleX(1)" },
+  ],
+  {
+    timeline: scrollTimeline,
+    fill: "both",
+  },
+);
+```
+
+```ts
+// Create a ViewTimeline for a specific element
+const card = document.querySelector(".card");
+const viewTimeline = new ViewTimeline({
+  subject: card,
+  axis: "block",
+});
+
+card.animate(
+  [
+    { opacity: 0, transform: "translateY(40px)" },
+    { opacity: 1, transform: "translateY(0)" },
+  ],
+  {
+    timeline: viewTimeline,
+    rangeStart: "entry 0%",
+    rangeEnd: "entry 100%",
+    fill: "both",
+  },
+);
+```
+
+The JS APIs are useful for two scenarios: applying scroll-driven animations conditionally (feature detection, user preferences), and reading the current progress of a timeline for non-animation logic.
+
+### Axis Options
+
+Both `scroll()` and `view()` accept an axis parameter that determines which scroll direction drives the animation:
+
+| Axis     | Description                                                                    |
+| -------- | ------------------------------------------------------------------------------ |
+| `block`  | The block axis of the writing mode (vertical in LTR/RTL horizontal writing)    |
+| `inline` | The inline axis of the writing mode (horizontal in LTR/RTL horizontal writing) |
+| `x`      | Physical horizontal axis regardless of writing mode                            |
+| `y`      | Physical vertical axis regardless of writing mode                              |
+
+Use `block` and `inline` for internationalization-safe behavior. Use `x` and `y` only when the physical axis matters regardless of writing direction.
+
+<Callout type="warn">
+  Browser support as of early 2026: Chrome 115+ and Edge 115+ ship scroll-driven
+  animations with full support. Firefox has partial support behind the
+  `layout.css.scroll-driven-animations.enabled` flag (enabled by default since
+  Firefox 110+ for `scroll-timeline`, partial for `view-timeline` and
+  `animation-range`). Safari has begun implementation in Technology Preview
+  builds but does not yet ship stable support. Always provide a fallback
+  experience for Safari users and test Firefox behavior for `animation-range`
+  edge cases.
+</Callout>
+
+---
+
+## Code Examples
+
+### Scroll Progress Indicator
+
+The classic reading progress bar at the top of a page — no JavaScript required.
+
+```css
+/* A fixed bar at the top that grows from 0% to 100% width as the page scrolls */
+.scroll-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 3px;
+  width: 100%;
+  background: var(--color-primary);
+  transform-origin: left;
+  z-index: 100;
+
+  /* scaleX avoids layout — it's compositor-only unlike width */
+  animation: progress-scale linear both;
+  animation-timeline: scroll(root block);
+}
+
+@keyframes progress-scale {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+
+/* Fallback for browsers without scroll-timeline support:
+   show the bar at full width so it's still visible as a static accent */
+@supports not (animation-timeline: scroll()) {
+  .scroll-progress {
+    transform: scaleX(1);
+  }
+}
+```
+
+```tsx
+// components/ScrollProgress.tsx
+// No client directive needed — this is pure CSS, no JS hydration required
+export function ScrollProgress() {
+  return (
+    <div
+      className="scroll-progress"
+      role="progressbar"
+      aria-label="Reading progress"
+    />
+  );
+}
+```
+
+### Fade-In on Scroll Using `view()` Timeline
+
+This replaces the common `IntersectionObserver` + class-toggle pattern for entrance animations. The entire effect is declarative CSS.
+
+```css
+/* Elements animate from invisible to visible as they enter the viewport */
+.reveal-on-scroll {
+  animation: reveal linear both;
+  animation-timeline: view();
+
+  /* Animate only during the entry phase — from leading edge entering
+     to the element being fully inside the scrollport */
+  animation-range: entry 0% entry 100%;
+}
+
+@keyframes reveal {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Accessibility: disable scroll-linked motion for users who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .reveal-on-scroll {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Fallback: browsers without support see elements at full opacity */
+@supports not (animation-timeline: view()) {
+  .reveal-on-scroll {
+    opacity: 1;
+    transform: none;
+  }
+}
+```
+
+```tsx
+// components/FeatureSection.tsx
+interface Feature {
+  id: string;
+  title: string;
+  description: string;
+}
+
+export function FeatureSection({ features }: { features: Feature[] }) {
+  return (
+    <section className="grid gap-8 md:grid-cols-2 lg:grid-cols-3">
+      {features.map((feature) => (
+        <article key={feature.id} className="reveal-on-scroll">
+          <h3 className="text-xl font-semibold">{feature.title}</h3>
+          <p className="text-gray-600 mt-2">{feature.description}</p>
+        </article>
+      ))}
+    </section>
+  );
+}
+```
+
+### Parallax Effect with Scroll-Driven Animations
+
+A parallax layer that moves at a different rate than the page scroll — implemented without any JavaScript scroll listeners.
+
+```css
+.parallax-container {
+  /* Named timeline so children can reference it regardless of nesting depth */
+  scroll-timeline: --page-scroll block;
+  overflow-y: auto;
+  height: 100vh;
+}
+
+.parallax-bg {
+  /* Moves upward at 50% of the scroll rate, creating depth illusion */
+  animation: parallax-shift linear both;
+  animation-timeline: --page-scroll;
+}
+
+.parallax-fg {
+  /* Foreground moves slightly faster than normal scroll for emphasis */
+  animation: parallax-foreground linear both;
+  animation-timeline: --page-scroll;
+}
+
+@keyframes parallax-shift {
+  from { transform: translateY(0); }
+  to   { transform: translateY(-200px); }
+}
+
+@keyframes parallax-foreground {
+  from { transform: translateY(0); }
+  to   { transform: translateY(-50px); }
+}
+
+/* Parallax is a vestibular trigger — always disable for reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .parallax-bg,
+  .parallax-fg {
+    animation: none;
+    transform: none;
+  }
+}
+```
+
+### React Component with CSS Scroll-Driven Animation and JS Fallback
+
+A production-ready component that uses CSS scroll-driven animations when supported and falls back to `IntersectionObserver` for unsupported browsers.
+
+```tsx
+// components/ScrollReveal.tsx
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+interface ScrollRevealProps {
+  children: React.ReactNode;
+  className?: string;
+}
+
+/**
+ * Reveals children with a fade+slide animation as they scroll into view.
+ * Uses CSS scroll-driven animations (view timeline) when supported.
+ * Falls back to IntersectionObserver for Safari and older browsers.
+ */
+export function ScrollReveal({ children, className = "" }: ScrollRevealProps) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [isVisible, setIsVisible] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    // Feature detection: if CSS scroll-driven animations are supported,
+    // the CSS handles everything — no JS needed for the animation itself
+    if (CSS.supports("animation-timeline", "view()")) {
+      return;
+    }
+
+    // Fallback: IntersectionObserver for browsers without support
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setIsVisible(true);
+          // Stop observing after first reveal — one-time entrance animation
+          observer.unobserve(el);
+        }
+      },
+      { threshold: 0.1 },
+    );
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      className={`scroll-reveal ${isVisible ? "scroll-reveal--visible" : ""} ${className}`}
+    >
+      {children}
+    </div>
+  );
+}
+```
+
+```css
+/* styles/scroll-reveal.css */
+
+/* Primary path: CSS scroll-driven animation (Chrome, Edge) */
+@supports (animation-timeline: view()) {
+  .scroll-reveal {
+    animation: scroll-reveal-enter linear both;
+    animation-timeline: view();
+    animation-range: entry 0% entry 100%;
+  }
+}
+
+/* Fallback path: JS-toggled class (Safari, older Firefox) */
+@supports not (animation-timeline: view()) {
+  .scroll-reveal {
+    opacity: 0;
+    transform: translateY(24px);
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+
+  .scroll-reveal--visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scroll-reveal-enter {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scroll-reveal {
+    animation: none;
+    transition: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+```
+
+---
+
+## Real-World Use Case
+
+**Documentation site reading progress.** A long-form documentation site needs a reading progress indicator. The previous implementation used a `scroll` event listener with `requestAnimationFrame` throttling — roughly 15 lines of JavaScript, a `useEffect` cleanup, and a forced style recalculation per frame to update the bar width. Replacing this with a single `animation-timeline: scroll(root)` declaration on a fixed progress bar eliminates all JavaScript from the rendering loop. The bar animates at compositor-thread speed, stays smooth during heavy code syntax highlighting (which blocks the main thread), and the implementation shrinks to pure CSS with zero hydration cost.
+
+**E-commerce product landing page with scroll-triggered sections.** Each product feature section fades and slides into view as the user scrolls. The previous implementation used `IntersectionObserver` with a class toggle — a `useEffect` in every section component, observer setup and teardown, and a CSS transition on the toggled class. Migrating to `animation-timeline: view()` with `animation-range: entry` eliminates all observer code. The animation is smoother because it's proportional to scroll position (the element fades in progressively as it enters) rather than binary (invisible until threshold, then transition). The fallback for Safari uses the same `IntersectionObserver` approach, wrapped in a shared `ScrollReveal` component.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Forgetting to set a non-zero `animation-duration`.**
+When `animation-timeline` is set to `scroll()` or `view()`, the duration is ignored in favor of scroll progress — but the animation is still invalid if `animation-duration` is `0s` (the initial value). You must explicitly set it to any non-zero value or use `auto`. The convention is to rely on the `animation` shorthand (`animation: fade-in linear both`) which implies a duration, or set `animation-duration: auto`.
+
+**2. Animating layout-triggering properties with scroll timelines.**
+Scroll-driven animations follow the same rendering rules as time-driven animations. If you animate `width`, `height`, or `top`, the browser still triggers layout recalculation per scroll frame — defeating the performance advantage. Only `transform` and `opacity` run on the compositor thread. The scroll-driven timeline gives you frame-perfect synchronization with scroll position, but the performance benefit depends on animating compositor-only properties.
+
+**3. Missing the `@supports` fallback for Safari.**
+Safari does not yet ship scroll-driven animations in stable releases. Without a `@supports not (animation-timeline: view())` fallback, elements that should be visible will remain in their `from` keyframe state (typically `opacity: 0`) — invisible content with no way to trigger the animation. Always provide either a JS fallback or a `@supports` block that resets the element to its visible state.
+
+**4. Using `animation-range` percentages with `scroll()` timelines when you mean `view()` ranges.**
+Named ranges like `entry`, `exit`, and `contain` only apply to `view()` timelines. On a `scroll()` timeline, `animation-range` accepts only percentages or lengths relative to the total scroll range. Mixing them up produces no error but the animation will not behave as expected — the named range keywords are silently ignored on scroll timelines.
+
+**5. Not respecting `prefers-reduced-motion` for scroll-linked animations.**
+Scroll-driven parallax and entrance effects are vestibular triggers. The global `prefers-reduced-motion: reduce` media query must disable or replace these animations. Unlike time-based animations where you can reduce duration, scroll-linked animations should typically be removed entirely under reduced motion — the spatial movement tied to scroll is the problematic part, not the speed.
+
+**6. Expecting `animation-timeline` to work with `transition`.**
+Scroll-driven timelines only work with CSS `animation` declarations, not `transition`. There is no `transition-timeline` property. If you are currently using transitions toggled by `IntersectionObserver`, you must convert them to `@keyframes` animations to use scroll-driven timelines.
+
+---
+
+## Summary
+
+CSS scroll-driven animations replace JavaScript scroll listeners and `IntersectionObserver` for animation use cases by linking `@keyframes` animations to scroll progress (`scroll()`) or element visibility (`view()`) instead of elapsed time. The browser resolves these animations on the compositor thread when animating `transform` and `opacity`, achieving frame-perfect scroll synchronization with zero main-thread cost per frame. `animation-range` constrains the active portion of the timeline using named ranges (`entry`, `exit`, `contain`, `cover`) for `view()` timelines or percentages for `scroll()` timelines. Named timelines (`scroll-timeline-name`, `view-timeline-name`) allow non-ancestor elements to share a timeline, and the `ScrollTimeline` / `ViewTimeline` JavaScript APIs provide imperative control for dynamic scenarios. Browser support is strong in Chromium (Chrome/Edge 115+), partial in Firefox, and absent in stable Safari — always provide a `@supports` fallback and respect `prefers-reduced-motion`.
+
+---
+
+## Interview Questions
+
+**Q1. How do scroll-driven animations differ from using IntersectionObserver for entrance animations, and what is the performance advantage?**
+
+`IntersectionObserver` fires a JavaScript callback when an element crosses a visibility threshold. The callback runs on the main thread, typically toggling a CSS class that triggers a time-based transition. This creates a binary effect (invisible then visible) with a frame of latency between the intersection event and the style change. Scroll-driven animations with `animation-timeline: view()` run the animation proportionally as the element enters the scrollport — the fade-in progresses with scroll position, not as a one-shot transition. The performance advantage is that when animating compositor-only properties (`transform`, `opacity`), the browser resolves the animation on the compositor thread. There is no JavaScript in the per-frame rendering loop — the main thread is uninvolved. This means the animation stays smooth even when JavaScript is busy, which is exactly when `IntersectionObserver` callbacks experience delays.
+
+**Q2. What is the difference between `scroll()` and `view()` timelines, and when would you choose each?**
+
+`scroll()` maps animation progress to the scroll position of a container — 0% scroll equals 0% animation progress, 100% scroll equals 100% progress. It is used for effects that track overall page or container scroll: reading progress bars, parallax layers, header shrink effects. `view()` maps animation progress to how much of a specific element is visible in its scrollport — the animation runs from the element entering to it exiting. It is used for per-element effects: entrance animations, exit animations, sticky highlights. The key distinction is the reference: `scroll()` is relative to the scroller's total scroll range, while `view()` is relative to a specific element's intersection with the scrollport. You choose `scroll()` when the effect is global to the scroll container and `view()` when the effect is local to a particular element.
+
+**Q3. Why must you provide a `@supports` fallback when using scroll-driven animations?**
+
+Safari does not ship scroll-driven animations in stable releases, and Firefox support is partial. Without a fallback, elements whose `@keyframes` start at `opacity: 0` or `transform: translateY(40px)` will remain in that initial state permanently — the animation never progresses because the browser doesn't understand `animation-timeline: view()`. The element is effectively invisible with no mechanism to reveal it. A `@supports not (animation-timeline: view())` block should either reset the element to its visible end state (static fallback) or apply a JavaScript-driven alternative like `IntersectionObserver` with a class toggle. Feature detection via `CSS.supports("animation-timeline", "view()")` in JavaScript enables conditional logic for the JS fallback path.
+
+**Q4. Explain `animation-range` and the named range keywords. How does `entry 0% entry 100%` differ from `cover 0% cover 100%`?**
+
+`animation-range` defines the subset of the timeline over which the animation runs. For `view()` timelines, named range keywords describe specific phases of an element's passage through the scrollport. `entry 0%` is the moment the element's leading edge enters the scrollport; `entry 100%` is when the element is fully inside. So `animation-range: entry 0% entry 100%` runs the animation only during the entry phase — from first pixel visible to fully visible. `cover 0% cover 100%` is the full range — from first pixel entering to last pixel exiting. The practical difference: `entry` constrains the animation to a short scroll distance (roughly the element's height), creating a quick reveal as the element enters. `cover` spreads the animation across the entire passage through the viewport, which is a much longer scroll distance and produces a slower, more gradual effect. The right choice depends on whether you want a snappy entrance (`entry`) or a continuous scroll-linked transformation (`cover`).
+
+**Q5. How would you implement a scroll progress indicator that works across all major browsers?**
+
+For Chromium browsers, use a fixed-position element with `animation-timeline: scroll(root block)` animating `transform: scaleX()` from 0 to 1 with `transform-origin: left`. This is zero-JS, compositor-only, and frame-perfect. Wrap this in `@supports (animation-timeline: scroll())`. For the fallback, use a `scroll` event listener on `window` inside a `useEffect`, compute `scrollTop / (scrollHeight - clientHeight)`, and set the `scaleX` transform via a ref. Throttle with `requestAnimationFrame` to avoid redundant style writes. The CSS approach is preferred because it has no hydration cost and no main-thread involvement; the JS fallback is necessary only until Safari and Firefox ship full support. Always include `prefers-reduced-motion` handling — a reading progress bar with no spatial movement is generally acceptable even under reduced motion, but verify it does not cause discomfort by testing with the OS setting enabled.
+
+**Q6. Can you use `animation-timeline` with CSS transitions? Why or why not?**
+
+No. The scroll-driven animations specification defines `animation-timeline` as a property of the CSS animations model only. There is no `transition-timeline` property. CSS transitions are inherently state-change driven — they animate between two computed values when a property changes. Scroll-driven timelines are progress-driven — they need a `@keyframes` definition with explicit start and end states to interpolate across the timeline range. If you have existing entrance effects built with `IntersectionObserver` toggling a class that triggers a `transition`, migrating to scroll-driven animations requires converting the transition to a `@keyframes` animation. This is a mechanical refactor: the `from` state becomes the first keyframe, the `to` state becomes the last keyframe, and the `transition-*` properties become `animation-*` properties with `animation-timeline: view()`.

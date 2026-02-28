@@ -13,9 +13,7 @@
     "networking-and-protocols",
     "security",
     "performance-and-core-web-vitals",
-    "browser-observation-apis",
     "memory-and-garbage-collection",
-    "concurrency-and-workers",
     "accessibility",
     "devx-and-delivery",
     "architecture-and-decision-making"

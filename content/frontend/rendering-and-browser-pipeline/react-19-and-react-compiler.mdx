@@ -1,0 +1,631 @@
+---
+title: React 19 & React Compiler
+description: A deep technical guide to React 19's new APIs — Actions, useActionState, useOptimistic, useFormStatus, the use() hook, ref as a prop, document metadata hoisting — and the React Compiler (React Forget) that eliminates manual memoization by auto-optimizing components, hooks, and JSX at build time.
+---
+
+## Overview
+
+React 19 is the largest API surface expansion since Hooks. It introduces first-class primitives for form handling (Actions, `useActionState`, `useFormStatus`), optimistic UI (`useOptimistic`), promise reading in render (`use()`), simplified ref forwarding (ref as a regular prop), and built-in document metadata hoisting. These are not convenience wrappers — they change the canonical patterns for handling mutations, pending states, and progressive enhancement in React applications.
+
+The React Compiler (previously codenamed "React Forget") is the other half of the release. It is an ahead-of-time build tool that analyzes your component and hook source code, then automatically inserts the memoization that developers previously wrote by hand with `useMemo`, `useCallback`, and `React.memo`. The compiler understands React's rules (pure render, stable hook ordering, no side effects in render) and uses that contract to determine what values can be safely cached between renders. If your code follows the rules of React, the compiler memoizes it — and if it does not, the compiler skips that code and emits a diagnostic.
+
+Together, React 19 and the React Compiler shift the developer experience: fewer wrappers, less boilerplate, and a performance model where the framework handles caching instead of the developer. But this only works if you understand what the new APIs do, what the compiler can and cannot optimize, and where manual intervention is still required.
+
+---
+
+## How It Works
+
+### Actions and `useActionState`
+
+React 19 introduces **Actions** — async functions that handle form mutations. An Action is any async function passed to a `<form action={...}>` or to `useActionState`. React manages the lifecycle: it sets pending state before the action runs, processes the return value, and resets pending state when the action completes. If the action throws, React rolls back any optimistic updates associated with it.
+
+`useActionState` replaces the React 18 `useFormState` (renamed for clarity). It accepts an action function and initial state, and returns the current state, a wrapped action to pass to the form, and a boolean `isPending` flag:
+
+```ts
+const [state, formAction, isPending] = useActionState(action, initialState);
+```
+
+The action function receives the previous state and the `FormData` object from the submission. This design enables **progressive enhancement** — forms work without JavaScript because the browser natively submits `FormData` to the action. When JavaScript loads, React intercepts the submission and runs the action client-side with pending states and optimistic updates.
+
+### `useOptimistic`
+
+`useOptimistic` provides a mechanism to show an immediate UI update before an async Action completes. It takes the current state and a reducer that describes how to apply the optimistic value:
+
+```ts
+const [optimisticState, addOptimistic] = useOptimistic(state, updateFn);
+```
+
+When you call `addOptimistic(value)` inside an Action, the `updateFn` merges `value` into the current state and React immediately re-renders with the optimistic result. When the Action settles (resolves or rejects), React reverts the optimistic state and replaces it with the actual server response. If the Action throws, the optimistic value is automatically rolled back — no manual error handling required for the UI revert.
+
+### `useFormStatus`
+
+`useFormStatus` reads the pending state of the nearest parent `<form>` without prop drilling. It returns an object with `pending`, `data`, `method`, and `action` fields. This hook must be called from a component that is rendered inside a `<form>` — it does not work if the form is a sibling or ancestor.
+
+The primary use case is building reusable submit buttons that automatically disable themselves and show loading indicators when any form they are placed inside is submitting. Because it reads from context internally, the component using `useFormStatus` re-renders only when the form's status changes.
+
+### `use()` Hook
+
+The `use()` hook is unique among React hooks: it can be called conditionally and inside loops. It reads the resolved value of a Promise or the current value of a Context. When called with a Promise, `use()` integrates with `Suspense` — the component suspends until the Promise resolves, and the nearest `<Suspense>` boundary renders its fallback.
+
+Unlike `useEffect`-based data fetching, `use()` reads the Promise during render. The Promise must be created outside the component (in a Server Component, a route loader, or a cached function) — creating a new Promise inside the render body would cause an infinite suspend-rerender loop.
+
+`use(Context)` is equivalent to `useContext(Context)` but can be called conditionally, enabling patterns like early returns before context reads.
+
+### `ref` as a Prop
+
+In React 19, function components accept `ref` as a regular prop. The `forwardRef` wrapper is no longer required. React passes the ref directly as a prop, and you can use it like any other prop — destructure it, rename it, or pass it to a child element. `forwardRef` still works but is deprecated and will be removed in a future major version.
+
+This simplifies component APIs, removes a layer of indentation, and makes ref handling consistent with every other prop.
+
+### Document Metadata
+
+React 19 hoists `<title>`, `<meta>`, and `<link>` elements rendered anywhere in the component tree into the document `<head>`. This means components can declare their own metadata without a third-party library like `react-helmet` or framework-specific APIs. React deduplicates metadata by key and ensures correct ordering.
+
+For stylesheets specifically, React 19 supports a `precedence` prop on `<link rel="stylesheet">` that controls insertion order in the `<head>` — higher-precedence stylesheets are inserted after lower-precedence ones, preventing specificity conflicts.
+
+### React Compiler (React Forget)
+
+The React Compiler is a build-time tool (a Babel plugin or bundler plugin) that statically analyzes your components and hooks, then automatically inserts memoization. It replaces the need for manual `useMemo`, `useCallback`, and `React.memo` in the vast majority of cases.
+
+**What it memoizes:**
+
+- **Component return values (JSX):** If the inputs to a JSX subtree have not changed, the compiler caches the JSX element and skips re-rendering that subtree. This is equivalent to wrapping every component in `React.memo`.
+- **Hook return values:** Computed values from hooks are cached based on their dependencies. This replaces `useMemo`.
+- **Callback functions:** Functions defined inside components are cached based on their closure dependencies. This replaces `useCallback`.
+- **Intermediate expressions:** The compiler tracks individual expressions and variables within a component, memoizing at a finer granularity than a developer would manually.
+
+**The "rules of React" it enforces:**
+
+The compiler relies on the contract that React components are pure functions of their props and state. Specifically:
+
+1. Components and hooks must be idempotent — same inputs, same output.
+2. The render body must not contain side effects (mutations, API calls, DOM access).
+3. Props and state must not be mutated directly — always create new objects.
+4. Hook return values and props are treated as immutable after being returned.
+
+If the compiler detects code that violates these rules, it does not memoize that portion. It emits a warning via the `eslint-plugin-react-compiler` and falls back to the unoptimized behavior. The code still runs — it just does not benefit from automatic caching.
+
+**How it works internally:**
+
+The compiler builds a dependency graph of every value in the component. It traces which variables depend on which props, state, and hook returns. It then groups values into "reactive scopes" — blocks of code that need to re-execute together when their inputs change. Each scope gets a cache slot. On re-render, the compiler checks whether the scope's inputs changed; if not, the cached output is returned.
+
+```
+// What you write:
+function ProductCard({ product, onAdd }) {
+  const price = formatPrice(product.price);
+  return <div onClick={() => onAdd(product.id)}>{price}</div>;
+}
+
+// What the compiler produces (conceptual):
+function ProductCard({ product, onAdd }) {
+  // Compiler-generated cache slots
+  const price = cache(formatPrice, [product.price]);
+  const onClick = cache(() => onAdd(product.id), [onAdd, product.id]);
+  return cache(<div onClick={onClick}>{price}</div>, [onClick, price]);
+}
+```
+
+### Compiler Limitations
+
+The React Compiler cannot optimize everything. Understanding its boundaries prevents false confidence:
+
+- **Code that violates React's rules:** Mutating props, mutating objects that were returned from hooks, side effects in render — none of these are memoized. The compiler detects the violation and bails out.
+- **Dynamic patterns the compiler cannot statically analyze:** If a value's dependency chain passes through a pattern the compiler cannot trace (e.g., dynamic property access via bracket notation with a runtime-computed key, `eval`, or `with` statements), it skips memoization for that scope.
+- **External mutable state:** If a component reads from a mutable external variable (a module-level `let`, a global, a mutable ref read during render), the compiler cannot know when it changes and cannot safely cache the result. Use `useSyncExternalStore` for external stores.
+- **Third-party libraries that break React's contract:** If a library's hook mutates its return values or relies on side effects in render, the compiler's memoization may produce stale values. The `eslint-plugin-react-compiler` surfaces these issues.
+- **Components that are already manually memoized:** The compiler's output coexists with existing `useMemo`/`useCallback` calls — it does not remove them but may add redundant caching on top. During migration, this is harmless but adds minor overhead.
+
+<Callout type="warn">
+  Before enabling the React Compiler on an existing codebase, run the `eslint-plugin-react-compiler` across your project. It reports components and hooks that violate the rules of React and would not benefit from auto-memoization. Fix these violations first — they are latent bugs regardless of the compiler.
+</Callout>
+
+<Callout type="warn">
+  The `useActionState` hook was renamed from `useFormState` in React 18 canary builds. If you are migrating from an early canary version, update all `useFormState` imports to `useActionState` — the API signature is the same, but a third `isPending` value was added to the return tuple.
+</Callout>
+
+---
+
+## Code Examples
+
+### Form with `useActionState` and Server Action (Next.js App Router)
+
+```tsx
+// app/contact/page.tsx
+import { ContactForm } from "./contact-form";
+
+export default function ContactPage() {
+  return (
+    <div className="max-w-md mx-auto py-8">
+      <h1 className="text-2xl font-bold mb-4">Contact Us</h1>
+      <ContactForm />
+    </div>
+  );
+}
+```
+
+```ts
+// app/contact/actions.ts
+"use server";
+
+interface ContactState {
+  success: boolean;
+  error: string | null;
+  fieldErrors: Record<string, string>;
+}
+
+export async function submitContact(
+  prevState: ContactState,
+  formData: FormData,
+): Promise<ContactState> {
+  const name = formData.get("name") as string;
+  const email = formData.get("email") as string;
+  const message = formData.get("message") as string;
+
+  // Server-side validation — runs even without JavaScript
+  const fieldErrors: Record<string, string> = {};
+  if (!name || name.length < 2) fieldErrors.name = "Name must be at least 2 characters";
+  if (!email || !email.includes("@")) fieldErrors.email = "Valid email required";
+  if (!message || message.length < 10) fieldErrors.message = "Message must be at least 10 characters";
+
+  if (Object.keys(fieldErrors).length > 0) {
+    return { success: false, error: null, fieldErrors };
+  }
+
+  // Simulate a database write or external API call
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+
+  // In a real app: await db.contacts.create({ name, email, message });
+  return { success: true, error: null, fieldErrors: {} };
+}
+```
+
+```tsx
+// app/contact/contact-form.tsx
+"use client";
+
+import { useActionState } from "react";
+import { submitContact } from "./actions";
+
+const initialState = {
+  success: false,
+  error: null as string | null,
+  fieldErrors: {} as Record<string, string>,
+};
+
+export function ContactForm() {
+  // useActionState wires together:
+  // 1. The server action function
+  // 2. The returned state from the last submission
+  // 3. A pending boolean while the action is in flight
+  const [state, formAction, isPending] = useActionState(submitContact, initialState);
+
+  if (state.success) {
+    return <p className="text-green-600">Message sent. We will reply within 24 hours.</p>;
+  }
+
+  return (
+    // Passing formAction to action= enables progressive enhancement:
+    // without JS, the browser submits the form as a POST to the server action.
+    // With JS, React intercepts and handles it client-side.
+    <form action={formAction} className="space-y-4">
+      <div>
+        <label htmlFor="name" className="block text-sm font-medium">Name</label>
+        <input id="name" name="name" type="text" required className="border rounded p-2 w-full" />
+        {state.fieldErrors.name && (
+          <p className="text-red-500 text-sm mt-1">{state.fieldErrors.name}</p>
+        )}
+      </div>
+
+      <div>
+        <label htmlFor="email" className="block text-sm font-medium">Email</label>
+        <input id="email" name="email" type="email" required className="border rounded p-2 w-full" />
+        {state.fieldErrors.email && (
+          <p className="text-red-500 text-sm mt-1">{state.fieldErrors.email}</p>
+        )}
+      </div>
+
+      <div>
+        <label htmlFor="message" className="block text-sm font-medium">Message</label>
+        <textarea id="message" name="message" rows={4} required className="border rounded p-2 w-full" />
+        {state.fieldErrors.message && (
+          <p className="text-red-500 text-sm mt-1">{state.fieldErrors.message}</p>
+        )}
+      </div>
+
+      <button
+        type="submit"
+        disabled={isPending}
+        className="bg-blue-600 text-white rounded px-4 py-2 disabled:opacity-50"
+      >
+        {isPending ? "Sending..." : "Send Message"}
+      </button>
+    </form>
+  );
+}
+```
+
+---
+
+### `useOptimistic` for a Like/Unlike Button
+
+```tsx
+// components/like-button.tsx
+"use client";
+
+import { useOptimistic, useTransition } from "react";
+
+interface LikeButtonProps {
+  postId: string;
+  initialLiked: boolean;
+  initialCount: number;
+  onToggle: (postId: string, liked: boolean) => Promise<{ liked: boolean; count: number }>;
+}
+
+interface LikeState {
+  liked: boolean;
+  count: number;
+}
+
+export function LikeButton({ postId, initialLiked, initialCount, onToggle }: LikeButtonProps) {
+  const currentState: LikeState = { liked: initialLiked, count: initialCount };
+  const [isPending, startTransition] = useTransition();
+
+  // useOptimistic takes the actual state and a reducer that applies the optimistic update.
+  // When the Action completes, React replaces the optimistic state with the actual state
+  // returned from the server. If the Action throws, the optimistic value is rolled back.
+  const [optimistic, addOptimistic] = useOptimistic(
+    currentState,
+    (current: LikeState, newLiked: boolean) => ({
+      liked: newLiked,
+      count: current.count + (newLiked ? 1 : -1),
+    }),
+  );
+
+  function handleClick() {
+    const nextLiked = !optimistic.liked;
+
+    startTransition(async () => {
+      // Show the optimistic UI immediately — the count changes before the network call
+      addOptimistic(nextLiked);
+
+      // The actual server call; if this throws, the optimistic update reverts
+      await onToggle(postId, nextLiked);
+    });
+  }
+
+  return (
+    <button
+      onClick={handleClick}
+      disabled={isPending}
+      className="flex items-center gap-1 px-3 py-1 border rounded"
+      aria-pressed={optimistic.liked}
+    >
+      <span>{optimistic.liked ? "Liked" : "Like"}</span>
+      <span className="text-sm text-gray-500">{optimistic.count}</span>
+    </button>
+  );
+}
+```
+
+---
+
+### `use()` with Suspense for Data Fetching
+
+```tsx
+// app/dashboard/page.tsx
+import { Suspense } from "react";
+import { UserProfile } from "./user-profile";
+
+// The Promise is created in the Server Component — not inside the client component.
+// This is critical: creating a Promise inside a client component's render body
+// would cause a new Promise on every render, triggering infinite suspense loops.
+async function fetchUser(id: string) {
+  const res = await fetch(`https://api.example.com/users/${id}`, {
+    next: { revalidate: 60 },
+  });
+  if (!res.ok) throw new Error("Failed to fetch user");
+  return res.json() as Promise<{ name: string; email: string; role: string }>;
+}
+
+export default function DashboardPage() {
+  // Create the Promise here (server-side) and pass it as a prop
+  const userPromise = fetchUser("current");
+
+  return (
+    <div className="p-6">
+      <h1 className="text-xl font-bold mb-4">Dashboard</h1>
+      <Suspense fallback={<div className="animate-pulse h-20 bg-gray-100 rounded" />}>
+        <UserProfile userPromise={userPromise} />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+```tsx
+// app/dashboard/user-profile.tsx
+"use client";
+
+import { use } from "react";
+
+interface User {
+  name: string;
+  email: string;
+  role: string;
+}
+
+interface UserProfileProps {
+  userPromise: Promise<User>;
+}
+
+export function UserProfile({ userPromise }: UserProfileProps) {
+  // use() suspends this component until the Promise resolves.
+  // The nearest Suspense boundary shows its fallback during suspension.
+  // Unlike useEffect-based fetching, there is no loading state to manage —
+  // the component only renders once the data is available.
+  const user = use(userPromise);
+
+  return (
+    <div className="border rounded p-4">
+      <h2 className="font-semibold text-lg">{user.name}</h2>
+      <p className="text-gray-600">{user.email}</p>
+      <span className="inline-block mt-2 text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">
+        {user.role}
+      </span>
+    </div>
+  );
+}
+```
+
+---
+
+### Before/After React Compiler — Eliminating Manual Memoization
+
+**Before (React 18 — manual memoization required):**
+
+```tsx
+// components/product-card.tsx (React 18 — manual memoization)
+"use client";
+
+import { memo, useMemo, useCallback } from "react";
+
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+  currency: string;
+}
+
+interface ProductCardProps {
+  product: Product;
+  onAddToCart: (id: string) => void;
+}
+
+// memo() prevents re-render when parent re-renders but product/onAddToCart are unchanged
+const ProductCard = memo(function ProductCard({ product, onAddToCart }: ProductCardProps) {
+  // useMemo prevents recalculating formatted price on every render
+  const formattedPrice = useMemo(
+    () =>
+      new Intl.NumberFormat("en-US", {
+        style: "currency",
+        currency: product.currency,
+      }).format(product.price),
+    [product.price, product.currency],
+  );
+
+  // useCallback prevents creating a new function reference on every render,
+  // which would defeat memo() on child components receiving this handler
+  const handleClick = useCallback(() => {
+    onAddToCart(product.id);
+  }, [onAddToCart, product.id]);
+
+  return (
+    <div className="border rounded p-4">
+      <h3 className="font-semibold">{product.name}</h3>
+      <p className="text-lg">{formattedPrice}</p>
+      <button onClick={handleClick} className="mt-2 bg-blue-600 text-white px-3 py-1 rounded">
+        Add to Cart
+      </button>
+    </div>
+  );
+});
+
+export { ProductCard };
+```
+
+**After (React 19 with React Compiler — no manual memoization):**
+
+```tsx
+// components/product-card.tsx (React 19 + React Compiler — auto-memoized)
+"use client";
+
+interface Product {
+  id: string;
+  name: string;
+  price: number;
+  currency: string;
+}
+
+interface ProductCardProps {
+  product: Product;
+  onAddToCart: (id: string) => void;
+}
+
+// No memo(), no useMemo(), no useCallback().
+// The React Compiler statically analyzes this component and:
+// 1. Caches the JSX output based on product and onAddToCart references (replaces memo)
+// 2. Caches formattedPrice based on product.price and product.currency (replaces useMemo)
+// 3. Caches handleClick based on onAddToCart and product.id (replaces useCallback)
+export function ProductCard({ product, onAddToCart }: ProductCardProps) {
+  const formattedPrice = new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: product.currency,
+  }).format(product.price);
+
+  function handleClick() {
+    onAddToCart(product.id);
+  }
+
+  return (
+    <div className="border rounded p-4">
+      <h3 className="font-semibold">{product.name}</h3>
+      <p className="text-lg">{formattedPrice}</p>
+      <button onClick={handleClick} className="mt-2 bg-blue-600 text-white px-3 py-1 rounded">
+        Add to Cart
+      </button>
+    </div>
+  );
+}
+```
+
+The resulting behavior is identical. The React Compiler version is easier to read, has fewer imports, and cannot have incorrect dependency arrays — the compiler traces dependencies automatically.
+
+---
+
+### `ref` as a Prop (No `forwardRef`)
+
+**Before (React 18 — `forwardRef` required):**
+
+```tsx
+// components/text-input.tsx (React 18)
+import { forwardRef } from "react";
+
+interface TextInputProps {
+  label: string;
+  error?: string;
+}
+
+// forwardRef wraps the component and passes ref as the second argument.
+// This adds a layer of indentation and makes the component harder to type.
+const TextInput = forwardRef<HTMLInputElement, TextInputProps>(function TextInput(
+  { label, error },
+  ref,
+) {
+  return (
+    <div>
+      <label className="block text-sm font-medium">{label}</label>
+      <input ref={ref} className="border rounded p-2 w-full" />
+      {error && <p className="text-red-500 text-sm">{error}</p>}
+    </div>
+  );
+});
+
+export { TextInput };
+```
+
+**After (React 19 — ref is a regular prop):**
+
+```tsx
+// components/text-input.tsx (React 19)
+
+interface TextInputProps {
+  label: string;
+  error?: string;
+  ref?: React.Ref<HTMLInputElement>;
+}
+
+// ref is destructured alongside other props — no wrapper, no special handling.
+// The component signature is simpler and the TypeScript types are straightforward.
+export function TextInput({ label, error, ref }: TextInputProps) {
+  return (
+    <div>
+      <label className="block text-sm font-medium">{label}</label>
+      <input ref={ref} className="border rounded p-2 w-full" />
+      {error && <p className="text-red-500 text-sm">{error}</p>}
+    </div>
+  );
+}
+```
+
+```tsx
+// Usage — identical in both versions
+"use client";
+
+import { useRef } from "react";
+import { TextInput } from "./text-input";
+
+export function LoginForm() {
+  const emailRef = useRef<HTMLInputElement>(null);
+
+  function handleSubmit() {
+    // Direct access to the underlying input element
+    emailRef.current?.focus();
+  }
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <TextInput ref={emailRef} label="Email" />
+      <button type="submit">Log In</button>
+    </form>
+  );
+}
+```
+
+---
+
+## Real-World Use Case
+
+**Migrating a checkout form from React 18 to React 19.** A multi-step checkout form previously used a custom `useFormMutation` hook built on `useState` + `useEffect` + manual error handling. The form had three states managed by hand: idle, submitting, and error. Progressive enhancement was not possible because the form relied entirely on JavaScript event handlers.
+
+After migration: the form's submit handler becomes a server action passed to `useActionState`. The `isPending` boolean replaces the manual `isSubmitting` state. Validation errors are returned from the server action as structured state, eliminating the need for a separate error-handling `useEffect`. The form works without JavaScript because `<form action={formAction}>` falls back to a native POST submission. The submit button uses `useFormStatus` to read pending state from context instead of receiving `isPending` as a prop drilled through three component layers. The net result is roughly 40% fewer lines of form-handling code, zero custom hooks for form state, and progressive enhancement by default.
+
+**Enabling the React Compiler on a component library.** A design system with 120 components previously exported every component wrapped in `React.memo`, with `useCallback` on every event handler prop and `useMemo` on every derived value. Dependency arrays were a constant source of bugs — stale closures from missing dependencies, unnecessary re-renders from over-specified dependencies. After enabling the React Compiler: all `React.memo` wrappers, `useMemo` calls, and `useCallback` calls were removed. The compiler produces equivalent memoization with correct dependencies by construction. The `eslint-plugin-react-compiler` flagged 8 components that mutated props or had render-phase side effects — these were genuine bugs that the manual memoization had been masking. After fixing them, the library compiled cleanly with no performance regressions and significantly improved maintainability.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Creating a new Promise inside a component that calls `use()`.**
+If you create the Promise in the render body (`const data = use(fetch(...))`), every render creates a new Promise, which causes the component to suspend again, which triggers a re-render, which creates a new Promise — an infinite loop. The Promise must be created outside the component: in a Server Component, a route loader, or a module-level cached function. Pass it as a prop.
+
+**2. Using `useFormStatus` outside a `<form>` boundary.**
+`useFormStatus` reads the pending state of the nearest parent `<form>` element. If the component using `useFormStatus` is not a descendant of a `<form>`, it returns `{ pending: false }` permanently. This is a silent failure — no error is thrown, the button just never shows a loading state. Ensure the component is rendered inside the `<form>`, not beside it.
+
+**3. Assuming the React Compiler eliminates all re-renders.**
+The compiler memoizes values and JSX, but it cannot prevent re-renders caused by context changes, parent re-renders with genuinely new prop values, or state changes within the component itself. If a component re-renders because its props actually changed, that re-render is correct and the compiler does not suppress it. The compiler eliminates unnecessary re-renders — those caused by unchanged props with new object references.
+
+**4. Keeping `React.memo`, `useMemo`, and `useCallback` after enabling the compiler.**
+While the compiler coexists with manual memoization, the double caching adds unnecessary complexity and minor runtime overhead. More importantly, it makes the code harder to understand because readers cannot tell whether the memoization is doing anything. Remove manual memoization after enabling the compiler and verifying that the `eslint-plugin-react-compiler` reports no violations.
+
+**5. Mutating objects returned from `useOptimistic` or `useActionState`.**
+The state returned from these hooks is treated as immutable by React's reconciliation. Mutating it directly (e.g., `state.fieldErrors.name = "..."`) does not trigger a re-render and can cause the React Compiler's memoization to serve stale cached values. Always return new objects from your action functions and optimistic reducers.
+
+**6. Expecting `useActionState` to work without a `<form>` element.**
+While you can call the wrapped `formAction` programmatically, `useActionState` is designed for form submissions. The action function receives `FormData` as its second argument. If you call it outside a form context, the `FormData` will be `undefined` or an empty object. For non-form async operations, use `useTransition` with a regular async function instead.
+
+**7. Ignoring React Compiler diagnostics in the ESLint plugin.**
+The `eslint-plugin-react-compiler` does not just report style issues — it reports code that the compiler cannot safely optimize. Each diagnostic represents either a latent bug (mutation in render, side effect in render) or a performance gap (the compiler skipped memoization for that scope). Treat these as errors, not warnings, and fix them before assuming the compiler is optimizing your codebase.
+
+---
+
+## Summary
+
+React 19 introduces Actions and `useActionState` for form mutations with built-in pending states and progressive enhancement, `useOptimistic` for instant UI feedback with automatic rollback on failure, `useFormStatus` for reading form state without prop drilling, the `use()` hook for reading Promises and Context during render with Suspense integration, `ref` as a regular prop eliminating `forwardRef`, and native document metadata hoisting. The React Compiler complements these APIs by automatically memoizing components, hook return values, callback functions, and JSX at build time — replacing manual `useMemo`, `useCallback`, and `React.memo` with compiler-generated caching that has correct dependencies by construction. The compiler relies on the rules of React (pure renders, no side effects, no mutation) and skips code that violates them, making the `eslint-plugin-react-compiler` essential for adoption. Together, these changes reduce boilerplate, eliminate an entire class of dependency-array bugs, and shift performance optimization from a developer responsibility to a framework capability.
+
+---
+
+## Interview Questions
+
+**Q1. How does `useActionState` differ from manually managing form state with `useState` and `useEffect`, and what does it enable that the manual approach does not?**
+
+`useActionState` accepts a server action function and initial state, returning `[state, formAction, isPending]`. The key difference is progressive enhancement: when `formAction` is passed to `<form action={formAction}>`, the form works natively without JavaScript — the browser submits `FormData` to the server action as a POST request. When JavaScript is available, React intercepts the submission, calls the action client-side, manages the `isPending` flag automatically, and updates the returned state with the action's return value. The manual `useState` + `useEffect` approach cannot achieve progressive enhancement because it relies entirely on JavaScript event handlers. Additionally, `useActionState` integrates with React's transition system — the state update from the action is automatically batched and the `isPending` boolean tracks the action's async lifecycle without a separate loading state variable.
+
+**Q2. Explain how `useOptimistic` handles rollback when a server action fails.**
+
+`useOptimistic` takes the current "source of truth" state and a reducer function. When `addOptimistic(value)` is called inside an Action (a `startTransition` async callback), the reducer merges the optimistic value into the current state, and React re-renders immediately with this optimistic result. React internally tracks that this is an optimistic update tied to the current Action. If the Action resolves successfully, the optimistic state is replaced by the actual state returned from the server (which flows in through the component's props or `useActionState`). If the Action throws, React reverts the optimistic state to the pre-action value — the reducer's result is discarded and the component re-renders with the original state. This automatic rollback means developers do not need try-catch blocks or manual state reversion logic for the UI layer.
+
+**Q3. What does the React Compiler memoize and what are its limitations?**
+
+The React Compiler memoizes three categories: component JSX output (equivalent to `React.memo`), computed values within components (equivalent to `useMemo`), and callback functions (equivalent to `useCallback`). It works by building a dependency graph of every expression in the component, grouping them into reactive scopes, and inserting cache checks for each scope. Its limitations are: (1) it cannot optimize code that violates React's rules — mutations, side effects in render, or reading from external mutable state cause it to skip memoization for that scope; (2) it cannot statically analyze truly dynamic patterns like computed property access with runtime keys or `eval`; (3) it cannot memoize across component boundaries — if a parent passes a genuinely new object as a prop, the child still re-renders; (4) it does not optimize third-party library code that violates React's contract. The `eslint-plugin-react-compiler` is essential for identifying code the compiler cannot optimize.
+
+**Q4. Why can `use()` be called conditionally while other hooks cannot, and what constraint does it impose on Promise creation?**
+
+Traditional hooks (`useState`, `useEffect`, `useMemo`) are stored as a positional linked list on the fiber node — React identifies each hook by its position in the call sequence, so the sequence must be identical on every render. `use()` is implemented differently: it does not allocate a slot in the hooks linked list. Instead, it reads from the Promise or Context directly during the render phase and integrates with Suspense by throwing the Promise to the nearest boundary. This implementation means it can be called conditionally or in loops without corrupting the hook list. The constraint is on Promise creation: the Promise must be created outside the component (in a parent Server Component, a cached function, or a route loader). Creating a Promise inside the render body produces a new Promise on every render, causing the component to suspend, re-render, create a new Promise, suspend again — an infinite loop.
+
+**Q5. How should a team approach migrating an existing codebase to use the React Compiler?**
+
+The migration should be incremental. First, upgrade to React 19 and ensure the codebase runs correctly without the compiler. Second, install `eslint-plugin-react-compiler` and run it across the entire codebase — it reports components that violate React's rules and would not be optimized. Fix these violations (mutations in render, side effects in render, mutable external state reads) because they are latent bugs regardless of the compiler. Third, enable the compiler on a subset of the codebase (a single directory or package) and verify behavior in tests and production metrics. Fourth, once confident, enable it project-wide. Fifth, remove manual `useMemo`, `useCallback`, and `React.memo` calls — they are now redundant and add unnecessary complexity. Monitor rendering performance metrics (INP, component render times) to confirm the compiler's memoization matches or exceeds the manual approach.
+
+**Q6. What is the practical difference between `useFormStatus` and passing `isPending` from `useActionState` as a prop?**
+
+Both provide the form's pending state, but they solve different architectural problems. Passing `isPending` as a prop requires the parent component (which owns the `useActionState` call) to thread the boolean through every intermediate component down to the submit button — classic prop drilling. `useFormStatus` reads the pending state from a React-internal context tied to the nearest parent `<form>` element. Any component rendered inside that `<form>` can call `useFormStatus` without receiving any props. This enables truly reusable submit button components that work in any form without the form owner needing to pass state. The tradeoff is that `useFormStatus` only works for components rendered inside a `<form>` — it silently returns `{ pending: false }` if called outside a form boundary, which can be a subtle bug.

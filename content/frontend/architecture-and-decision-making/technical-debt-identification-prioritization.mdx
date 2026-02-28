@@ -1,313 +1,339 @@
 ---
 title: Technical Debt
-description: How to systematically identify, categorize, and prioritize technical debt in a modern web codebase so your team can act on it without stalling feature delivery.
+description: A system for identifying, categorising, and prioritising technical debt — the four debt types, the impact/effort prioritisation matrix, automated detection with ESLint and TypeScript strict mode, a debt registry with compound cost scoring, and strategies for allocating sprint capacity to paydown without stalling feature delivery.
 ---
 
 ## Overview
 
 Technical debt is the accumulated cost of shortcuts, outdated patterns, and deferred refactoring in a codebase. Like financial debt, it accrues interest — the longer you ignore it, the more expensive future changes become.
 
-Identifying debt is straightforward. Prioritizing it is the hard part. Not all debt is worth paying down immediately, and some debt is intentional. This doc gives you a concrete system to find, categorize, and rank technical debt so engineering teams can act on it with confidence.
+Identifying debt is straightforward. Prioritising it is the hard part. Not all debt is worth paying down immediately, and some debt is intentional. This doc gives you a concrete system to find, categorise, and rank technical debt so engineering teams can act on it with confidence.
 
 ---
 
 ## How It Works
 
-Technical debt falls into four broad categories:
+### The Four Debt Types
 
-**1. Deliberate debt** — A known shortcut taken consciously to ship faster. Example: hardcoding a config value with a TODO comment.
+**1. Deliberate debt** — A known shortcut taken consciously to ship faster. Example: hardcoding a config value with a `TODO` comment. Acceptable when the trade-off is explicit and the owner is named.
 
 **2. Accidental debt** — Introduced unintentionally through lack of knowledge or oversight. Example: a component re-fetching data it could have received as a prop.
 
-**3. Bit rot** — Code that was once correct but became outdated as the ecosystem evolved. Example: using the Next.js `pages/` router in a codebase migrating to App Router.
+**3. Bit rot** — Code that was once correct but became outdated as the ecosystem evolved. Example: using `getServerSideProps` in a codebase migrating to App Router.
 
-**4. Architectural debt** — Structural problems that affect the whole system. Example: a monolithic API that should be split into focused route handlers.
+**4. Architectural debt** — Structural problems affecting the whole system. Example: a monolithic data fetching layer where every page makes 15 sequential requests.
 
-Once categorized, debt is prioritized using two axes:
+### Prioritisation Framework
 
-- **Impact** — How much does this debt slow down development, cause bugs, or degrade UX?
-- **Effort** — How costly is it to fix?
+After categorising, prioritise using two axes:
 
-High impact + low effort items are your immediate wins. High impact + high effort items need to be planned as dedicated engineering work. Low impact items may never be worth touching.
+|                 | Low Effort                  | High Effort            |
+| --------------- | --------------------------- | ---------------------- |
+| **High Impact** | Do immediately (quick wins) | Plan as dedicated work |
+| **Low Impact**  | Do if convenient            | Probably never         |
+
+**Impact** measures: how much does this debt slow down development, cause bugs, or degrade UX?
+**Effort** measures: how costly is it to fix — not just time, but risk of introducing regressions.
+
+### Compound Cost Scoring
+
+Some debt compounds over time — it gets more expensive to fix the longer it sits. Characteristics of compounding debt:
+
+- Debt in the core data fetching or state management layer
+- Debt that blocks adoption of a new tooling approach
+- Debt with many dependents — a shared utility with bad patterns spread everywhere
+- Debt that causes bugs — each bug costs debugging time plus user trust
+
+Stable debt does not compound — it has a fixed, one-time cost whenever you eventually fix it. An outdated comment or a minor naming inconsistency is stable. A wrong caching strategy that copies into every new feature is compounding.
 
 ---
 
-## Code Example(s)
+## Code Examples
 
-### Automated Debt Detection with ESLint and TypeScript
+### 1. Automated Debt Detection — TypeScript Strict Mode
 
-Static analysis catches accidental debt continuously. Set up strict rules so debt doesn't silently accumulate.
+The most impactful single change for catching accidental debt continuously:
 
-```bash
-npm install --save-dev eslint @typescript-eslint/parser @typescript-eslint/eslint-plugin eslint-plugin-react-hooks
+```json
+// tsconfig.json
+{
+  "compilerOptions": {
+    "strict": true, // enables all strict flags below
+    "noUncheckedIndexedAccess": true, // arr[i] returns T | undefined, not T
+    "noImplicitReturns": true, // all code paths must return a value
+    "exactOptionalPropertyTypes": true, // { a?: string } prohibits { a: undefined }
+    "noPropertyAccessFromIndexSignature": true
+  }
+}
 ```
 
-```ts
+Enabling `strict: true` on an existing codebase surfaces all existing `any` types and unsafe assignments. These are often the root cause of runtime type errors — each one is a piece of accidental debt.
+
+---
+
+### 2. ESLint Rules for Debt Prevention
+
+```js
 // eslint.config.mjs
-import tseslint from "@typescript-eslint/eslint-plugin";
-import tsparser from "@typescript-eslint/parser";
-import reactHooks from "eslint-plugin-react-hooks";
+import js from "@eslint/js";
+import tsPlugin from "@typescript-eslint/eslint-plugin";
 
 export default [
+  js.configs.recommended,
   {
-    files: ["**/*.ts", "**/*.tsx"],
-    languageOptions: {
-      parser: tsparser,
-      parserOptions: {
-        project: "./tsconfig.json", // enables type-aware linting rules
-      },
-    },
-    plugins: {
-      "@typescript-eslint": tseslint,
-      "react-hooks": reactHooks,
-    },
+    plugins: { "@typescript-eslint": tsPlugin },
     rules: {
-      // Catches untyped any — a major source of accidental debt
+      // Prevent `any` — the single most common source of accidental type debt
       "@typescript-eslint/no-explicit-any": "error",
 
-      // Forces explicit return types on exported functions
-      "@typescript-eslint/explicit-module-boundary-types": "warn",
-
-      // Catches stale closures and missing deps in useEffect
-      "react-hooks/exhaustive-deps": "error",
-
-      // Prevents floating promises — a common source of silent bugs
-      "@typescript-eslint/no-floating-promises": "error",
-
-      // Discourages non-null assertions that mask real type debt
+      // Prevent non-null assertions — unsafe runtime assumptions
       "@typescript-eslint/no-non-null-assertion": "warn",
+
+      // Prevent console.log in production code — structured logger should be used
+      "no-console": ["warn", { allow: ["warn", "error"] }],
+
+      // Prevent TODO comments from lingering indefinitely
+      // Enforce a pattern: TODO(owner): description #issueNumber
+      "no-warning-comments": [
+        "warn",
+        {
+          terms: ["TODO", "FIXME", "HACK"],
+          location: "start",
+        },
+      ],
+
+      // Prevent default exports — named exports are easier to refactor and search
+      "import/no-default-export": "warn",
     },
   },
 ];
 ```
 
-### Debt Inventory as a Structured Data File
+---
 
-Keep a machine-readable debt registry that your team updates alongside the codebase. This prevents debt from living only in someone's head or a Slack thread.
+### 3. Debt Registry
+
+Track debt explicitly rather than in scattered TODO comments:
 
 ```ts
-// lib/tech-debt/registry.ts
+// src/lib/debt-registry.ts
+// A machine-readable record of known technical debt in the codebase.
+// Each entry should link to an issue or PR for accountability.
 
-export type DebtCategory =
-  | "deliberate"
-  | "accidental"
-  | "bit-rot"
-  | "architectural";
+type DebtType = "deliberate" | "accidental" | "bit-rot" | "architectural";
+type Priority = "critical" | "high" | "medium" | "low";
 
-export type DebtPriority = "critical" | "high" | "medium" | "low";
-
-export interface DebtItem {
+interface DebtItem {
   id: string;
+  type: DebtType;
+  priority: Priority;
   title: string;
-  category: DebtCategory;
-  priority: DebtPriority;
-  impactScore: 1 | 2 | 3 | 4 | 5; // 5 = blocks development or causes prod bugs
-  effortScore: 1 | 2 | 3 | 4 | 5; // 5 = multi-week refactor
-  affectedPaths: string[]; // file or module paths
-  owner?: string; // team or individual responsible
-  trackerUrl?: string; // link to Jira/Linear/GitHub issue
-  createdAt: string; // ISO date
+  location: string; // file path or module name
+  description: string;
+  impact: number; // 1–10: how much does this slow down development or cause bugs?
+  effort: number; // 1–10: how hard is it to fix?
+  compounds: boolean; // does this get more expensive over time?
+  issueUrl?: string; // link to tracking issue
+  owner?: string; // @username
+  createdAt: string; // ISO date — when was this registered?
 }
 
 export const debtRegistry: DebtItem[] = [
   {
     id: "DEBT-001",
-    title: "Replace hardcoded API base URL with environment variable",
-    category: "deliberate",
+    type: "bit-rot",
     priority: "high",
-    impactScore: 4,
-    effortScore: 1,
-    affectedPaths: ["lib/api/client.ts"],
-    owner: "platform-team",
-    trackerUrl: "https://linear.app/myapp/issue/ENG-412",
-    createdAt: "2024-11-03",
+    title: "Pages Router routes not yet migrated to App Router",
+    location: "src/pages/",
+    description:
+      "Three routes (/reports, /admin/users, /admin/settings) still use getServerSideProps. " +
+      "This creates split mental models for new engineers and prevents adopting RSC in these routes.",
+    impact: 8,
+    effort: 6,
+    compounds: true, // more pages added here = more migration cost
+    issueUrl: "https://github.com/acme/app/issues/412",
+    owner: "@alice",
+    createdAt: "2025-09-15",
   },
   {
     id: "DEBT-002",
-    title: "Migrate remaining pages/ routes to App Router",
-    category: "bit-rot",
-    priority: "critical",
-    impactScore: 5,
-    effortScore: 4,
-    affectedPaths: ["pages/account.tsx", "pages/settings.tsx"],
-    owner: "frontend-team",
-    trackerUrl: "https://linear.app/myapp/issue/ENG-388",
-    createdAt: "2024-10-15",
+    type: "accidental",
+    priority: "medium",
+    title: "ProductCard fetches its own data instead of receiving props",
+    location: "src/components/ProductCard.tsx",
+    description:
+      "ProductCard calls useProduct(id) internally, causing N+1 requests " +
+      "on any page rendering a list of products. Should accept product data as props.",
+    impact: 7,
+    effort: 3,
+    compounds: false, // isolated to this component — not spreading
+    issueUrl: "https://github.com/acme/app/issues/388",
+    owner: "@bob",
+    createdAt: "2025-08-01",
   },
   {
     id: "DEBT-003",
-    title: "Extract inline SQL in /api/orders/route.ts into a repository layer",
-    category: "architectural",
-    priority: "medium",
-    impactScore: 3,
-    effortScore: 3,
-    affectedPaths: ["app/api/orders/route.ts"],
-    owner: "backend-team",
-    createdAt: "2025-01-20",
+    type: "deliberate",
+    priority: "low",
+    title: "Hardcoded tax rate of 0.2",
+    location: "src/lib/pricing.ts:14",
+    description:
+      "Tax rate hardcoded as 0.2 during initial MVP. " +
+      "Should be configurable per region via the CMS or env config.",
+    impact: 3,
+    effort: 2,
+    compounds: false,
+    owner: "@carol",
+    createdAt: "2025-07-10",
   },
 ];
+
+// Compute a prioritisation score: high impact + low effort + compounding = highest priority
+export function debtScore(item: DebtItem): number {
+  const compoundBonus = item.compounds ? 20 : 0;
+  return item.impact * (10 - item.effort) + compoundBonus;
+}
+
+const prioritised = [...debtRegistry].sort(
+  (a, b) => debtScore(b) - debtScore(a),
+);
+
+console.table(
+  prioritised.map((d) => ({ id: d.id, title: d.title, score: debtScore(d) })),
+);
+// ┌─────────┬──────────────────────────────────────────┬───────┐
+// │  DEBT-002: ProductCard N+1                          │  49   │
+// │  DEBT-001: Pages Router migration                   │  36   │
+// │  DEBT-003: Hardcoded tax rate                       │  24   │
+// └─────────┴──────────────────────────────────────────┴───────┘
 ```
 
-### Priority Scoring Utility
+---
 
-Use a weighted formula to objectively rank debt items rather than arguing about gut feelings in planning meetings.
+### 4. Making Debt Legible to Non-Engineers
+
+Technical debt discussions fail when they're too abstract. Quantify the cost:
 
 ```ts
-// lib/tech-debt/prioritize.ts
-import type { DebtItem } from "./registry";
+// debt-cost-calculator.ts
+// Estimates the engineering cost of leaving debt in place for one quarter
 
-/**
- * Calculates a priority score for a debt item.
- * Higher score = fix sooner.
- *
- * Formula: (impact * 2) - effort
- * Impact is weighted double because developer-hour cost matters more than fix cost.
- */
-export function calculatePriorityScore(item: DebtItem): number {
-  return item.impactScore * 2 - item.effortScore;
+interface DebtCostEstimate {
+  weeklySlowdownHours: number; // extra hours per week this debt costs the team
+  bugFrequency: number; // average bugs per month attributable to this debt
+  avgDebugHoursPerBug: number;
+  teamSize: number;
 }
 
-export function rankDebtItems(items: DebtItem[]): DebtItem[] {
-  return [...items].sort(
-    (a, b) => calculatePriorityScore(b) - calculatePriorityScore(a),
-  );
+function quarterlyDebtCost(est: DebtCostEstimate): string {
+  const weeksPerQuarter = 13;
+  const slowdownCost = est.weeklySlowdownHours * weeksPerQuarter * est.teamSize;
+  const bugCost = est.bugFrequency * 3 * est.avgDebugHoursPerBug;
+  const total = slowdownCost + bugCost;
+
+  return `Estimated quarterly cost: ${total} engineering-hours`;
 }
+
+// DEBT-002: ProductCard N+1 requests
+console.log(
+  quarterlyDebtCost({
+    weeklySlowdownHours: 0.5, // each engineer spends ~30 min/week on this issue
+    bugFrequency: 2, // causes ~2 performance complaints per month
+    avgDebugHoursPerBug: 1.5,
+    teamSize: 6,
+  }),
+);
+// "Estimated quarterly cost: 48 engineering-hours"
 ```
+
+48 engineer-hours is ~$8,000 in salary cost at a $100/hour blended rate. Framing debt in dollars or engineer-hours makes the trade-off legible to product managers and stakeholders who need to allocate sprint capacity.
+
+---
+
+### 5. Sprint Allocation Strategy
+
+A sustainable approach that avoids both ignoring debt (it compounds) and pure debt sprints (team morale and product velocity suffer):
 
 ```ts
-// Usage in a script or admin tool
-import { debtRegistry } from "./registry";
-import { rankDebtItems, calculatePriorityScore } from "./prioritize";
+// debt-allocation.ts
+// Policy: reserve 20% of engineering capacity for debt paydown each sprint
 
-const ranked = rankDebtItems(debtRegistry);
-
-for (const item of ranked) {
-  console.log(`[${calculatePriorityScore(item)}] ${item.id}: ${item.title}`);
+interface Sprint {
+  totalEngineers: number;
+  sprintDays: number;
+  hoursPerDay: number;
+  debtAllocationPct: number; // 0.0 – 1.0
 }
 
-// Output:
-// [7] DEBT-001: Replace hardcoded API base URL with environment variable
-// [6] DEBT-002: Migrate remaining pages/ routes to App Router
-// [3] DEBT-003: Extract inline SQL into a repository layer
-```
+function debtCapacity(sprint: Sprint): number {
+  const totalHours =
+    sprint.totalEngineers * sprint.sprintDays * sprint.hoursPerDay;
+  return Math.floor(totalHours * sprint.debtAllocationPct);
+}
 
-### Surfacing Debt in a Next.js Admin Route
-
-Expose the debt registry through a protected internal route so non-engineers (PMs, tech leads) can see it without digging through code.
-
-```tsx
-// app/internal/tech-debt/page.tsx
-// This is a Server Component — no 'use client' needed for a read-only view
-
-import { debtRegistry } from "@/lib/tech-debt/registry";
-import { rankDebtItems, calculatePriorityScore } from "@/lib/tech-debt/prioritize";
-
-export const metadata = {
-  title: "Tech Debt Registry",
+const currentSprint: Sprint = {
+  totalEngineers: 6,
+  sprintDays: 10,
+  hoursPerDay: 6,
+  debtAllocationPct: 0.2,
 };
 
-export default function TechDebtPage() {
-  const rankedItems = rankDebtItems(debtRegistry);
-
-  return (
-    <main className="p-8 max-w-4xl mx-auto">
-      <h1 className="text-2xl font-bold mb-6">Technical Debt Registry</h1>
-      <table className="w-full text-sm border-collapse">
-        <thead>
-          <tr className="bg-gray-100 text-left">
-            <th className="p-3 border">ID</th>
-            <th className="p-3 border">Title</th>
-            <th className="p-3 border">Category</th>
-            <th className="p-3 border">Priority</th>
-            <th className="p-3 border">Score</th>
-            <th className="p-3 border">Owner</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rankedItems.map((item) => (
-            <tr key={item.id} className="border-b hover:bg-gray-50">
-              <td className="p-3 border font-mono">{item.id}</td>
-              <td className="p-3 border">
-                {item.trackerUrl ? (
-
-                    href={item.trackerUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-blue-600 underline"
-                  >
-                    {item.title}
-                  </a>
-                ) : (
-                  item.title
-                )}
-              </td>
-              <td className="p-3 border capitalize">{item.category}</td>
-              <td className="p-3 border capitalize">{item.priority}</td>
-              <td className="p-3 border font-bold">
-                {calculatePriorityScore(item)}
-              </td>
-              <td className="p-3 border">{item.owner ?? "—"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </main>
-  );
-}
+console.log(`Debt capacity this sprint: ${debtCapacity(currentSprint)} hours`);
+// "Debt capacity this sprint: 72 hours"
 ```
 
-<Callout type="info">
-  Protect `/internal/*` routes with middleware that checks for an internal
-  session or IP allowlist. Never expose this page publicly.
-</Callout>
+The 20% policy (sometimes called the "Boy Scout Rule" — leave the codebase better than you found it) prevents debt from accumulating while keeping most capacity for feature work. During periods of heavy feature pressure, the percentage can drop temporarily — but never to 0%.
 
 ---
 
 ## Real-World Use Case
 
-An e-commerce platform has been shipping features for 18 months. The checkout flow was built quickly during a launch crunch and now contains:
-
-- Inline SQL queries directly in API route handlers
-- A hardcoded Stripe API key fallback in `lib/payments.ts`
-- Two remaining `pages/` router pages that haven't been migrated to App Router
-- A `useEffect` with a missing dependency that causes a stale cart total on mobile
-
-During sprint planning, the team debates what to fix. Without a structured approach, the loudest voice wins. With the registry and scoring system above:
-
-1. The hardcoded key gets fixed this sprint (score: 7, effort: 1 day).
-2. The `useEffect` bug is caught by the ESLint rule before it even reaches review.
-3. The App Router migration is planned as a two-sprint epic (score: 6, effort: high).
-4. The inline SQL is logged and scheduled for Q3 (score: 3, effort: medium).
-
-The team ships features without ignoring debt, and every decision is traceable.
+An e-commerce platform's checkout performance is degrading. Using the debt registry, the team identifies that `OrderSummary` calls `useProduct(id)` for each item — causing 12 sequential API requests for a 12-item cart. Scored by the debt calculator: impact 9 (directly affects checkout conversion), effort 3 (isolated change), compounds (every new cart feature copies the pattern) → score 72. This is the highest-priority item in the registry. The PM sees "72 estimated engineer-hours per quarter in lost productivity and performance debugging" and allocates 2 sprint points to fix it. The fix (pass product data as props instead of fetching in the component) is straightforward; the debt registry entry is removed.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Treating all debt as equal urgency**
-Developers often either ignore debt entirely or want to fix everything before shipping anything. Neither works. Use the impact/effort matrix. Low-impact debt may never justify the opportunity cost of fixing it.
+**1. Treating all debt equally.** Compounding architectural debt in high-traffic paths is categorically different from a stale comment. Prioritise by impact × (10 − effort) + compound bonus.
 
-**2. Storing debt knowledge only in people's heads**
-When the engineer who knew about a workaround leaves the team, the context disappears. A written registry — even a simple TypeScript file — ensures debt is visible and transferable.
+**2. Pure "debt sprints."** Dedicating entire sprints to nothing but refactoring kills team morale and delays user value. Integrate debt work into regular sprints at a fixed allocation percentage.
 
-**3. Using TODOs as your only tracking mechanism**
-`// TODO: fix this later` comments are invisible to planning tools, can't be assigned to owners, and have no priority signal. They are fine for quick notes during development, but every significant TODO should be promoted to a registry entry or a tracked issue within the same sprint.
+**3. Not making debt legible to stakeholders.** "We need to refactor the data fetching layer" goes nowhere. "This debt costs 48 engineer-hours per quarter" gets prioritised.
 
-**4. Fixing debt without a test harness**
-Refactoring a high-debt module without test coverage first is how rewrites introduce regressions. Always add tests before touching debt-heavy code — even basic integration tests for the affected behavior.
+**4. Ignoring debt until a crisis.** By the time performance is visibly degraded or onboarding takes two weeks, compounding debt has made the fix significantly more expensive. Regular quarterly debt reviews prevent accumulation.
 
-**5. Conflating debt with bugs**
-A bug is a defect that produces incorrect behavior right now. Debt is structural or design-level drag. Mixing the two in the same backlog muddles prioritization. Track them separately.
-
-<Callout type="warn">
-  Never schedule a "tech debt sprint" once a year. Debt paid down continuously —
-  15–20% of each sprint — stays manageable. Batching it creates rewrites, and
-  rewrites fail.
-</Callout>
+**5. Writing TODOs without owners or issues.** `// TODO: fix this` scattered across the codebase accumulates. Require the format `// TODO(@owner): description https://github.com/org/repo/issues/N` and lint for unlinked TODOs.
 
 ---
 
 ## Summary
 
-Technical debt is unavoidable, but unmanaged debt compounds until it stops a team cold. Categorizing debt (deliberate, accidental, bit rot, architectural) and scoring it on impact vs. effort gives engineering teams an objective basis for prioritization. Automated tooling — strict TypeScript, exhaustive ESLint rules — catches accidental debt at the source before it enters the codebase. A structured, version-controlled registry keeps debt visible to the whole team, not just the engineers who wrote the shortcuts. Paying down debt incrementally each sprint is more effective and less risky than scheduled rewrites.
+Technical debt has four types (deliberate, accidental, bit rot, architectural) with different urgency levels. Prioritise using an impact/effort matrix with a compounding bonus — high impact, low effort, compounding debt scores highest. Automate detection with TypeScript strict mode and ESLint rules for `any`, unsafe assertions, and lingering TODOs. Maintain an explicit debt registry with scores so the backlog is visible and comparable. Make debt legible to non-engineers by quantifying it in engineer-hours per quarter. Allocate 20% of sprint capacity to debt paydown consistently — enough to prevent accumulation without sacrificing product velocity.
+
+---
+
+## Interview Questions
+
+**Q1. What are the four types of technical debt and how does the categorisation affect prioritisation?**
+
+Deliberate debt is a known, intentional shortcut: the team chose speed over quality with full awareness, usually with a TODO and an owner. It's acceptable when limited in scope and tracked. Accidental debt is introduced without awareness — a developer didn't know a better pattern existed. It's often fixable cheaply once identified. Bit rot is code that was correct at the time but became outdated as the ecosystem evolved — using legacy API patterns after a major version change, or dependencies that are abandoned. Architectural debt is structural — problems that permeate the system rather than being isolated to a component. The categorisation affects prioritisation because: deliberate debt has an owner and a known fix; accidental debt needs investigation to understand scope; bit rot needs ecosystem migration planning; architectural debt is often high-effort and requires dedicated sprint capacity rather than incidental cleanup.
+
+**Q2. What is the impact/effort prioritisation matrix and how do you use it to decide what to fix first?**
+
+The matrix has four quadrants formed by two axes: impact (how much does this debt slow development, cause bugs, or affect UX?) and effort (how costly is it to fix, including regression risk?). High impact + low effort items are immediate wins — they should be scheduled in the next sprint. High impact + high effort items are not quick wins but justify dedicated planning time: a tech spec, dedicated engineering time, and potentially a separate project. Low impact + low effort items can be done opportunistically when an engineer is already in that part of the code. Low impact + high effort items should generally never be prioritised — they cost more to fix than the return justifies. Applying the matrix prevents two failure modes: spending a sprint on low-impact cleanup (feels productive, doesn't help) and perpetually deferring high-impact/low-effort fixes (quick wins accumulate as drag).
+
+**Q3. What is compounding debt and how does it differ from stable debt?**
+
+Compounding debt gets more expensive to fix the longer it stays — either because more code depends on it, or because the wrong pattern spreads to new code. A shared data-fetching utility with an N+1 query pattern is compounding: every new feature that uses it inherits the pattern, and the eventual fix must be applied to an ever-growing set of callsites. A poorly named variable in a utility function that's rarely touched is stable: the fix is the same regardless of when you apply it. Identifying compounding debt is critical because it has a cost-of-delay — deferring a $1,000 fix today means a $3,000 fix in six months. The debt registry and scoring formula add a "compounds" bonus so compounding items consistently score higher than stable items with equivalent impact/effort ratios.
+
+**Q4. Why is making technical debt legible to non-engineers important, and how do you do it?**
+
+Product managers and stakeholders allocate sprint capacity based on perceived value. "The codebase has tech debt" is abstract and uncompelling — it competes poorly against "ship the new checkout" for sprint allocation. Converting debt into engineer-hours per quarter — "this debt costs 48 engineering-hours per quarter in slow feature development and debugging" — makes the trade-off concrete. At a blended engineer rate of $100/hour, 48 hours is $4,800/quarter or ~$19,000/year. A one-time fix costing 8 hours pays back in the first month. Framed this way, the question for product management becomes: "do you want to pay $19,000/year to have this debt, or spend $800 once to eliminate it?" That's a tractable business decision. The debt cost calculator in this doc provides a structured way to estimate this — even rough estimates (30 min/week per engineer) are useful because they make the magnitude visible.
+
+**Q5. What is the "20% rule" for technical debt allocation and why is a fixed percentage better than dedicated debt sprints?**
+
+The 20% rule allocates a fixed proportion of each sprint's engineering capacity to debt paydown — typically 15–25% depending on the codebase's current debt load. This is better than dedicated "debt sprints" for two reasons. First, morale and engagement: a sprint with zero user-visible output is demoralising for most engineers and frustrating for product stakeholders who see no features shipped. Mixing debt and feature work in every sprint keeps the ratio sustainable. Second, continuity: a debt sprint happens once every few months; by the time it arrives, compounding debt has grown substantially. Continuous allocation at a fixed percentage prevents accumulation. The percentage can flex temporarily — during a critical launch, drop to 10%; after the launch, increase to 30% until the debt load returns to baseline. What should never happen is 0% allocation for multiple consecutive sprints — that's when compounding debt accelerates to crisis levels.
+
+**Q6. How do you use TypeScript strict mode and ESLint to prevent accidental debt from accumulating in the first place?**
+
+TypeScript's `strict: true` enables a cluster of compiler checks that surface common accidental debt patterns at compile time: `noImplicitAny` prevents untyped variables from spreading through the codebase; `strictNullChecks` catches unchecked nullable access that would cause runtime errors; `noUncheckedIndexedAccess` makes array element access return `T | undefined`, forcing explicit null handling. On a legacy codebase, enabling strict mode surfaces every existing unsafe assumption — each TypeScript error is a piece of accidental debt that needs acknowledgement. ESLint complements this: `@typescript-eslint/no-explicit-any` prevents `any` annotations that would bypass TypeScript's safety; `@typescript-eslint/no-non-null-assertion` warns against `!` assertions that assume non-null without evidence; `no-warning-comments` fails the linter on bare `TODO` comments without an owner and issue link, enforcing the accountability pattern `// TODO(@owner): description #issueNumber`. Together, these gates make it harder to introduce accidental debt than to write the correct code.

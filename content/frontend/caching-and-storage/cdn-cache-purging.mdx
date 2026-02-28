@@ -1,105 +1,83 @@
 ---
 title: CDN Cache Purging
-description: How CDNs cache and serve content, and the strategies you can use to invalidate or purge stale assets in modern web applications.
+description: How CDNs cache at the edge, URL/tag/wildcard purging strategies, Cloudflare and Fastly APIs, origin shields and request coalescing for stampede prevention, Vercel Edge Network specifics, and tying purge calls to your deploy pipeline.
 ---
 
 ## Overview
 
-A Content Delivery Network (CDN) caches your assets — HTML, JS, CSS, images, API responses — across edge nodes distributed globally. When a user requests a resource, the CDN serves it from the nearest edge instead of hitting your origin server every time.
+A CDN caches your responses — HTML, JSON, images, scripts — across globally distributed edge nodes. When a user requests a resource, the CDN serves it from the nearest edge instead of forwarding to your origin. Latency drops from hundreds of milliseconds to single-digit milliseconds.
 
-The tradeoff: once something is cached, the CDN will keep serving the old version until the cache expires or you explicitly purge it. Getting this wrong means users see stale UI, broken deploys, or outdated API responses.
+The tradeoff: the CDN serves the cached version until its TTL expires — or until you explicitly purge it. A deploy that fixes a bug is invisible to users until either the TTL expires or you send a purge request. Getting this wrong means users see broken UIs, outdated API responses, or stale pricing for minutes or hours after a fix ships.
 
-Cache purging (also called cache invalidation) is the process of telling the CDN to discard a cached response and fetch a fresh copy from origin on the next request.
+Cache purging tells the CDN to discard a cached entry and fetch a fresh copy from origin on the next request.
 
 ---
 
 ## How It Works
 
-When a response travels from your origin to the CDN edge, it carries cache control headers that tell the CDN how long to store it:
+When a response travels from your origin to the CDN edge, it carries cache headers:
 
 ```http
-Cache-Control: public, max-age=31536000, immutable
+Cache-Control: public, s-maxage=3600
 ```
 
-The CDN respects this TTL (time-to-live). Until it expires, the edge won't call your origin — it just returns the cached bytes.
+The CDN stores the response and serves it for 3,600 seconds without touching your origin. Purging bypasses that TTL — you send an API request to the CDN, it marks the entry stale immediately, and the next user request fetches fresh from origin.
 
-**Purging bypasses the TTL.** You send an API request (or use a dashboard) to the CDN telling it to drop specific URLs, path patterns, or tags from cache immediately. The next visitor triggers a fresh origin fetch, and the new response gets cached for the next TTL window.
+Three purging models exist at every major CDN:
 
-There are three main purging models:
+**URL-based** — invalidate one or more exact URLs. Simple, precise, brittle at scale.
 
-- **URL-based purging** — Invalidate one or more exact URLs.
-- **Wildcard / prefix purging** — Invalidate everything under a path like `/api/products/*`.
-- **Cache-tag purging** — Tag responses at the origin with a custom header, then purge all responses sharing a tag in one API call. This is the most scalable model.
+**Wildcard / prefix-based** — invalidate everything under `/api/products/*`. Broader, works when URLs are predictable patterns.
+
+**Cache-tag / surrogate-key** — tag responses at the origin with a custom header; purge all responses sharing a tag with one API call. Most scalable, decouples invalidation from URL structure.
 
 ---
 
 ## Code Examples
 
-### 1. Setting Cache Headers at the Origin (Next.js App Router)
-
-Use `next/headers` or return a `Response` with explicit headers from a Route Handler.
+### Setting Cache Headers at the Origin
 
 ```ts
 // app/api/products/route.ts
 import { NextResponse } from "next/server";
-import { getProducts } from "@/lib/db";
 
 export async function GET() {
-  const products = await getProducts();
+  const products = await db.product.findMany({ where: { active: true } });
 
   return NextResponse.json(products, {
     headers: {
-      // Cache at CDN for 1 hour, allow stale for 1 extra minute while revalidating
-      "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=60",
-      // Attach a cache tag so we can purge all product responses at once
+      // CDN caches for 1 hour. Serve stale for 5 extra minutes while revalidating.
+      "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=300",
+
+      // Cloudflare Cache-Tag — enables tag-based purge via API
       "Cache-Tag": "products",
+
+      // Fastly Surrogate-Key — Fastly's equivalent of Cache-Tag
+      "Surrogate-Key": "products",
+
+      // Surrogate-Control — Fastly-specific, overrides Cache-Control for the CDN
+      // (browsers ignore Surrogate-Control; only Fastly reads it)
+      "Surrogate-Control": "max-age=3600",
     },
   });
 }
 ```
 
-For page-level caching in the App Router:
-
-```tsx
-// app/products/page.tsx
-import { getProducts } from "@/lib/db";
-
-// Revalidate this page's cached HTML every 3600 seconds via Next.js ISR
-export const revalidate = 3600;
-
-export default async function ProductsPage() {
-  const products = await getProducts();
-
-  return (
-    <ul>
-      {products.map((p) => (
-        <li key={p.id}>
-          {p.name} — ${p.price}
-        </li>
-      ))}
-    </ul>
-  );
-}
-```
-
 ---
 
-### 2. On-Demand Purge via Cloudflare API
-
-When a product is updated in your database, trigger an immediate purge programmatically.
+### URL-Based Purging — Cloudflare
 
 ```ts
-// lib/cdn.ts
+// lib/cdn/cloudflare.ts
 
 const CF_ZONE_ID = process.env.CLOUDFLARE_ZONE_ID!;
 const CF_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN!;
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL!;
 
-/**
- * Purge specific URLs from Cloudflare's cache.
- * Use this after mutating content that must appear fresh immediately.
- */
-export async function purgeByUrls(urls: string[]): Promise<void> {
-  const response = await fetch(
+export async function purgeByUrls(paths: string[]): Promise<void> {
+  const urls = paths.map((p) => `${SITE_URL}${p}`);
+
+  const res = await fetch(
     `https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache`,
     {
       method: "POST",
@@ -111,55 +89,22 @@ export async function purgeByUrls(urls: string[]): Promise<void> {
     },
   );
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(`Cloudflare purge failed: ${JSON.stringify(error.errors)}`);
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(`Cloudflare purge failed: ${JSON.stringify(err.errors)}`);
   }
-}
-```
-
-Call it from a Server Action or Route Handler after a write:
-
-```ts
-// app/actions/update-product.ts
-"use server";
-
-import { db } from "@/lib/db";
-import { purgeByUrls } from "@/lib/cdn";
-import { revalidatePath } from "next/cache";
-
-export async function updateProduct(
-  id: string,
-  data: { name: string; price: number },
-) {
-  await db.product.update({ where: { id }, data });
-
-  // Purge the CDN cache for this product's API route and page
-  await purgeByUrls([
-    `https://example.com/api/products/${id}`,
-    `https://example.com/products/${id}`,
-  ]);
-
-  // Also bust Next.js's internal data cache for the products list page
-  revalidatePath("/products");
 }
 ```
 
 ---
 
-### 3. Cache-Tag Purging (Fastly / Cloudflare)
-
-Tag-based purging lets you invalidate many related responses with one API call, regardless of their URLs.
+### Tag-Based Purging — Cloudflare
 
 ```ts
-// lib/cdn.ts (extended)
+// lib/cdn/cloudflare.ts (continued)
 
-/**
- * Purge all CDN responses tagged with the given tag.
- * Requires Cloudflare Cache Rules or Fastly surrogate keys configured on your origin.
- */
 export async function purgeByTag(tag: string): Promise<void> {
-  const response = await fetch(
+  const res = await fetch(
     `https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache`,
     {
       method: "POST",
@@ -167,118 +112,238 @@ export async function purgeByTag(tag: string): Promise<void> {
         Authorization: `Bearer ${CF_API_TOKEN}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ tags: [tag] }), // purges ALL responses with Cache-Tag: products
+      // Purges ALL responses tagged "products" across all edge nodes globally
+      body: JSON.stringify({ tags: [tag] }),
     },
   );
 
-  if (!response.ok) {
-    throw new Error("Tag purge failed");
-  }
+  if (!res.ok) throw new Error("Cloudflare tag purge failed");
 }
-```
 
-```ts
-// app/actions/update-product.ts (tag-based version)
-"use server";
-
-import { db } from "@/lib/db";
-import { purgeByTag } from "@/lib/cdn";
-
+// Tie to a write operation
 export async function updateProduct(
   id: string,
   data: { name: string; price: number },
 ) {
   await db.product.update({ where: { id }, data });
 
-  // One call clears every cached response tagged "products" — list pages, detail pages, API routes
+  // One call clears every CDN edge response tagged "products"
   await purgeByTag("products");
-}
-```
 
-<Callout type="info">
-  Cache-tag purging requires a CDN plan that supports it. On Cloudflare, it's
-  available from the **Pro** plan. On Fastly, surrogate keys are available on
-  all plans. Vercel's Edge Network supports it natively via `revalidateTag`.
-</Callout>
+  // Also purge the specific product detail
+  await purgeByUrls([`/api/products/${id}`, `/products/${id}`]);
 
----
-
-### 4. Vercel-Native Cache Purging
-
-If you're deploying on Vercel, use Next.js's built-in `revalidateTag` and `revalidatePath` — Vercel handles the CDN purge for you.
-
-```ts
-// app/actions/update-product.ts (Vercel/Next.js native)
-"use server";
-
-import { revalidateTag } from "next/cache";
-import { db } from "@/lib/db";
-
-export async function updateProduct(
-  id: string,
-  data: { name: string; price: number },
-) {
-  await db.product.update({ where: { id }, data });
-
-  // Purges all `fetch()` calls tagged "products" across your Next.js app
+  // Bust Next.js internal data cache too
   revalidateTag("products");
 }
 ```
 
-Tag your `fetch` calls at the data-fetching layer:
+<Callout type="info">
+  Cache-tag purging on Cloudflare requires the **Pro plan or higher**. On the
+  free plan, only URL-based and full-zone purges are available.
+</Callout>
+
+---
+
+### Surrogate Keys — Fastly
+
+Fastly uses `Surrogate-Key` headers (instead of `Cache-Tag`) and the `Surrogate-Control` header for CDN-only TTLs:
 
 ```ts
-// lib/api.ts
-export async function getProducts() {
-  const res = await fetch("https://api.example.com/products", {
-    next: { tags: ["products"] }, // Next.js cache tag
-  });
-  return res.json();
+// lib/cdn/fastly.ts
+
+const FASTLY_API_KEY = process.env.FASTLY_API_KEY!;
+const FASTLY_SERVICE_ID = process.env.FASTLY_SERVICE_ID!;
+
+export async function fastlyPurgeByKey(surrogateKey: string): Promise<void> {
+  const res = await fetch(
+    `https://api.fastly.com/service/${FASTLY_SERVICE_ID}/purge/${surrogateKey}`,
+    {
+      method: "POST",
+      headers: {
+        "Fastly-Key": FASTLY_API_KEY,
+        Accept: "application/json",
+        // Soft purge: marks stale but serves while revalidating
+        // Omit for hard purge (removes immediately)
+        "Fastly-Soft-Purge": "1",
+      },
+    },
+  );
+
+  if (!res.ok) throw new Error(`Fastly purge failed for key: ${surrogateKey}`);
+}
+
+// Bulk purge by multiple surrogate keys
+export async function fastlyPurgeByKeys(keys: string[]): Promise<void> {
+  const res = await fetch(
+    `https://api.fastly.com/service/${FASTLY_SERVICE_ID}/purge`,
+    {
+      method: "POST",
+      headers: {
+        "Fastly-Key": FASTLY_API_KEY,
+        "Content-Type": "application/json",
+        "Fastly-Soft-Purge": "1",
+      },
+      body: JSON.stringify({ surrogate_keys: keys }),
+    },
+  );
+
+  if (!res.ok) throw new Error("Fastly bulk purge failed");
 }
 ```
+
+**Fastly soft purge vs hard purge:** A soft purge marks entries as stale — they continue to be served under `stale-while-revalidate` while a background revalidation runs. A hard purge removes them immediately — the next request triggers a full origin fetch with no stale fallback. Use soft purge for content updates (users continue getting a response); use hard purge for data that must be immediately removed (deleted content, security-sensitive data).
+
+---
+
+### Vercel Edge Network — Integrated Purging
+
+On Vercel, `revalidateTag` and `revalidatePath` from `next/cache` purge both the Next.js Data Cache **and** the Vercel Edge Network cache simultaneously — no separate API calls needed:
+
+```ts
+// app/actions/publish-post.ts
+"use server";
+
+import { revalidateTag, revalidatePath } from "next/cache";
+
+export async function publishPost(slug: string) {
+  await db.post.update({ where: { slug }, data: { published: true } });
+
+  // This purges Next.js data cache AND Vercel Edge Network cache for tagged responses
+  revalidateTag(`post-${slug}`);
+  revalidateTag("posts");
+
+  // Also purges the rendered HTML at these paths from the Edge Network
+  revalidatePath(`/blog/${slug}`);
+  revalidatePath("/blog");
+}
+```
+
+For non-Next.js deployments on Vercel or when you need direct access to the Edge Network purge API:
+
+```ts
+// lib/cdn/vercel.ts
+export async function vercelPurgePath(pathname: string): Promise<void> {
+  const res = await fetch(
+    `https://api.vercel.com/v1/edge-cache/purge?teamId=${process.env.VERCEL_TEAM_ID}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.VERCEL_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ paths: [pathname] }),
+    },
+  );
+
+  if (!res.ok) throw new Error("Vercel edge cache purge failed");
+}
+```
+
+---
+
+### Origin Shield — Preventing Stampedes on Purge
+
+Without an origin shield, a purge event across 200 global edge nodes triggers 200 simultaneous origin requests (one "fill" per edge node). With an origin shield, all edge nodes route through a single shield datacenter that makes one upstream request to your origin:
+
+```
+Without shield: Purge → 200 edge nodes → 200 origin requests (stampede)
+With shield:    Purge → 200 edge nodes → 1 shield node → 1 origin request
+```
+
+Configure on Cloudflare via the dashboard: **Caching → Tiered Cache → Smart Tiered Cache Topology**. On Fastly: **Shielding** setting per service.
+
+---
+
+### Purge-on-Deploy Pipeline
+
+Wire purge calls into your CI/CD pipeline so stale HTML is cleared automatically after every production deploy:
+
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to production
+        run: vercel deploy --prod --token=${{ secrets.VERCEL_TOKEN }}
+        # Or your deploy command (fly deploy, aws s3 sync, etc.)
+
+      - name: Purge CDN cache after deploy
+        run: |
+          # Purge HTML pages likely affected by the deploy
+          curl -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data '{"files": ["https://example.com/", "https://example.com/products", "https://example.com/about"]}'
+
+          # Or purge by prefix if the CDN supports it
+          # --data '{"prefixes": ["https://example.com/"]}'
+        env:
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+```
+
+For content-hashed static assets (`main.a3f2c9d1.js`) no purge is needed — the filename changes with every deploy, so old files are simply never requested again. Purge is needed for **stable-URL resources**: HTML pages, API responses, images at fixed paths.
 
 ---
 
 ## Real-World Use Case
 
-An e-commerce platform displays product listings cached at the CDN for one hour (`s-maxage=3600`). A merchandiser uses the admin dashboard to mark a product as out of stock.
-
-Without purging, the storefront continues showing the product as available for up to 59 more minutes. With tag-based purging wired into the "update product" action, the moment the database write commits, a `purgeByTag('products')` call clears every affected edge node globally. The next customer to load any product page gets a fresh response within milliseconds.
-
-This pattern — write → purge → fresh cache — is the foundation of reliable content delivery for dynamic data.
+**SaaS marketing site with blog.** Static pages (`/`, `/pricing`, `/about`) are cached at the CDN edge for 24 hours — they change only when engineering deploys. A post-deploy pipeline purges those exact URLs. Blog posts are tagged with `post-{slug}` and `posts`; when a writer publishes a correction in the CMS, a webhook fires `POST /api/revalidate` which calls `purgeByTag("post-my-slug")` via the Cloudflare API. The blog index updates within seconds. API responses for the pricing widget use `Surrogate-Key: pricing` and are purged immediately when pricing changes — customers see the new price within one request after a sales team update. The origin shield means even after a global purge, only one origin request refills the cache per page, not hundreds.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Relying solely on TTL for dynamic content**
+**1. Purging without an origin shield.** A full-zone purge without a shield can send hundreds of simultaneous fill requests to your origin — often causing the same outage you were trying to fix. Enable Tiered Cache (Cloudflare) or Shielding (Fastly) before doing large-scale purges.
 
-Setting `Cache-Control: public, max-age=3600` on an API response that can change any time means users can see stale data for up to an hour. Always pair a reasonable TTL with a purge strategy triggered by your write operations.
+**2. Forgetting browser cache.** CDN purging clears the edge cache. Users who have the old response in their browser cache still see stale content until their browser TTL expires. For HTML pages, use short `max-age` (60–300s) so browser caches turn over quickly even without explicit invalidation.
 
-**2. Purging too broadly (full cache wipes)**
+**3. URL-based purging at scale.** Purging 10,000 individual product URLs on every price update is both slow and rate-limited. Use tag-based purging — one API call clears all `products`-tagged responses regardless of URL count.
 
-Purging your entire CDN cache on every deploy is a blunt instrument. It causes an immediate traffic spike to your origin as all edges simultaneously re-warm. Use path-based or tag-based purges scoped to what actually changed.
+**4. Not handling purge API failures.** Purge API calls can fail due to network errors, rate limits, or CDN API outages. If a purge silently fails, users continue seeing stale data. Add retry logic with exponential backoff and alerting for purge failures in production.
 
-<Callout type="warn">
-  A full-zone cache purge on a high-traffic site can overwhelm your origin
-  servers. Always prefer targeted URL or tag purges over nuking the entire
-  cache.
-</Callout>
-
-**3. Not accounting for stale-while-revalidate behavior**
-
-`stale-while-revalidate` means the CDN may serve a stale response for a short window even after purge, while it fetches the new version in the background. For content that must be immediately fresh (e.g., inventory levels, pricing), use hard purges and avoid `stale-while-revalidate` on those routes.
-
-**4. Forgetting browser cache**
-
-CDN purging clears the edge cache, but users may still have the old response in their local browser cache. Combine CDN purging with cache-busting filenames (e.g., `main.[contenthash].js`) for static assets, or use short `max-age` values for responses that change frequently.
-
-**5. Not handling purge API failures**
-
-Purge API calls can fail due to rate limits or network errors. If a purge silently fails, users see stale data. Always check the response status and set up alerting or retry logic for purge operations in critical paths.
+**5. Purging `stale-while-revalidate` content and expecting immediate freshness.** If a response has `stale-while-revalidate=300`, the CDN may still serve the stale version for up to 5 minutes after purge while a background revalidation is in-flight. For content that must be immediately fresh after purge, use a hard purge (not soft) and set `stale-while-revalidate=0` on that resource.
 
 ---
 
 ## Summary
 
-CDNs cache your responses at globally distributed edge nodes to reduce latency and origin load. Cache purging lets you invalidate stale entries on demand, bypassing the TTL. The three main strategies are URL-based, wildcard/prefix-based, and tag-based purging — with tags being the most scalable for dynamic applications. Always tie purge calls to your write operations so cache freshness is automatic. Combine CDN-level purging with Next.js's `revalidateTag` / `revalidatePath` for a complete invalidation strategy across both the edge cache and the framework's internal data cache.
+CDNs cache responses at globally distributed edges to reduce latency and origin load. Cache purging invalidates entries on demand, bypassing the TTL. URL-based purging is precise but doesn't scale; tag/surrogate-key purging invalidates many related responses with one API call and is the correct model for dynamic applications. Cloudflare uses `Cache-Tag` headers and the zones purge API; Fastly uses `Surrogate-Key` headers with soft and hard purge modes. Vercel's `revalidateTag` purges both the Next.js Data Cache and the Edge Network simultaneously. Origin shields collapse hundreds of post-purge fill requests into one. Wire purge calls to write operations for data freshness, and to your deploy pipeline for HTML page freshness.
+
+---
+
+## Interview Questions
+
+**Q1. What is the difference between URL-based purging and tag-based purging and when do you use each?**
+
+URL-based purging invalidates one or more exact cache entries by their full URLs. It's precise and requires no setup beyond knowing the URLs — but it doesn't scale: purging 10,000 product pages after a site-wide layout change requires 10,000 API calls (often rate-limited). Tag-based purging attaches tags to responses at the origin via `Cache-Tag` (Cloudflare) or `Surrogate-Key` (Fastly) headers. A single purge API call clears every edge response sharing that tag, regardless of URL count. Use URL-based purging for a small, known set of pages that change independently. Use tag-based for any resource that can be grouped by type (all product pages, all blog posts, all API responses for a given entity) — a single write operation maps to a single purge call.
+
+**Q2. What is an origin shield and why is it critical for safe cache purging?**
+
+An origin shield is a designated "shield" datacenter that sits between CDN edge nodes and your origin server. Without a shield, when a popular cache entry expires or is purged, every global edge node that receives a request for that resource independently fetches it from origin — potentially hundreds of simultaneous origin requests for a single purge event (the thundering herd / cache stampede). With a shield, edge nodes forward cache misses to the shield node first; the shield makes one upstream request to origin and serves the result to all edge nodes. Post-purge, the storm of fill requests collapses to one. Enable Cloudflare's "Smart Tiered Cache" or Fastly's "Shielding" before running any large-scale purge operations.
+
+**Q3. What is Fastly's "soft purge" and how does it differ from a hard purge?**
+
+A Fastly soft purge (`Fastly-Soft-Purge: 1`) marks a cache entry as stale without removing it. The entry continues to be served under `stale-while-revalidate` semantics — users get the stale response immediately while a background revalidation fetches the fresh version. A hard purge (no `Fastly-Soft-Purge` header) removes the entry immediately. The next request for that resource triggers a full origin fetch with no stale fallback — if the origin is slow or unavailable, users see a latency spike or error. Soft purge is the better default for content updates: users experience no interruption. Hard purge is appropriate for deleted content (a post taken down for legal reasons) or security-sensitive data that must never be served again.
+
+**Q4. How does `revalidateTag` on Vercel differ from calling the Cloudflare purge API directly?**
+
+On Vercel, `revalidateTag("products")` performs two invalidations atomically: it purges the entry from Next.js's internal Data Cache (the fetch-level cache used by Server Components and Route Handlers) and simultaneously purges the corresponding rendered output from the Vercel Edge Network. A direct Cloudflare API call purges only the edge layer — the CDN response is gone, but Next.js's internal Data Cache may still have a stale copy. The next origin request would re-render using stale Data Cache data and push that stale HTML back to the CDN. On Vercel, `revalidateTag` is the correct and sufficient tool — no additional CDN API call is needed. On non-Vercel deployments, you must coordinate both Next.js data cache invalidation and CDN purge manually.
+
+**Q5. Why doesn't CDN purging help users who already have the response in their browser cache?**
+
+CDN purging clears entries from edge nodes — shared caches that serve many users. But the browser also maintains its own private cache, governed by the `max-age` directive in `Cache-Control`. A user who fetched a resource with `max-age=3600` one hour ago has that response in their browser cache and won't request it again from the CDN (or origin) for another hour — regardless of CDN purge events. The mitigations: use short `max-age` values (60–300s) for HTML pages that change on deploy, so browser caches turn over quickly. Use content-hashed filenames for static assets — when the asset changes, the URL changes, so old cached versions are never requested again. For critical correctness issues, the only reliable solution is short browser `max-age`.
+
+**Q6. What is a thundering herd in CDN caching and how do you prevent it on high-traffic entries?**
+
+A thundering herd occurs when a popular cache entry expires (or is purged) and many concurrent user requests simultaneously see a cache miss — all forwarding to origin simultaneously. For an endpoint receiving 10,000 requests/second, even a 100ms cache expiry window can trigger thousands of simultaneous origin requests. Three prevention strategies: (1) enable origin shielding so only the shield datacenter contacts origin; (2) add TTL jitter — instead of `revalidate: 3600` exactly, use a random value in the range 3060–3540 so entries across cache nodes don't expire simultaneously; (3) use `stale-while-revalidate` so the CDN serves the stale response to all users while a single background revalidation updates the cache, rather than all users hitting origin on expiry.

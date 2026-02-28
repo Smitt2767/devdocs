@@ -6,7 +6,6 @@
     "code-splitting-strategies",
     "bundle-analysis-dependency-auditing",
     "preload-prefetch-preconnect-priority-hints",
-    "module-federation",
     "monorepo-tooling"
   ]
 }

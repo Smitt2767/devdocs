@@ -6,7 +6,6 @@
     "cache-invalidation-strategies",
     "cdn-cache-purging",
     "service-worker-lifecycle-traps",
-    "indexed-db",
-    "offline-conflict-resolution"
+    "indexed-db"
   ]
 }

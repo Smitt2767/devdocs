@@ -1,226 +1,351 @@
 ---
 title: Prototype Pollution
-description: A guide to understanding prototype pollution vulnerabilities in JavaScript, how attackers exploit them, and how to defend against them in modern Node.js and frontend applications.
+description: How prototype pollution injects properties onto Object.prototype through deep-merge, query string parsers, and JSON.parse — guarded merge with a denylist, structuredClone as a safe copy, JSON.parse reviver for key filtering, qs parser fix, Object.hasOwn vs hasOwnProperty, and real CVEs.
 ---
 
 ## Overview
 
-Prototype pollution is a JavaScript vulnerability where an attacker can inject properties into `Object.prototype` — the base object that almost every JavaScript object inherits from. Once a property is added to `Object.prototype`, it becomes accessible on **every** object in the runtime, including ones your application code creates and trusts.
+Prototype pollution is a JavaScript vulnerability where an attacker injects properties onto `Object.prototype` — the base object that nearly every JavaScript object inherits from. Once a property is on `Object.prototype`, it appears on every plain object in the process, including objects used for access control, configuration, and routing logic.
 
-This is dangerous because it can:
+This can silently change application behaviour (properties appearing where they shouldn't), bypass authorization checks (`req.user.isAdmin` becomes `true` via inheritance), or in server-side environments lead to Remote Code Execution.
 
-- Silently change application behavior by overriding expected default values
-- Bypass authorization or validation logic
-- In some environments, lead to Remote Code Execution (RCE)
-
-It's especially common in Node.js backends that accept and process arbitrary user-supplied JSON, but it affects frontend JavaScript too.
+It enters most commonly through deep-merge utilities, query string parsers, and code that assigns user-controlled keys directly to objects without validation.
 
 ---
 
 ## How It Works
 
-Every JavaScript object has an internal `[[Prototype]]` link. When you access a property on an object, JavaScript walks up the prototype chain until it finds it or reaches `null`.
+JavaScript property lookup walks the prototype chain. Every plain object (`{}`) has `Object.prototype` as its prototype. Writing to `__proto__` (or `constructor.prototype`) during a merge operation modifies this shared prototype:
 
 ```js
-const user = {};
-console.log(user.toString); // Found on Object.prototype
+const payload = JSON.parse('{ "__proto__": { "isAdmin": true } }');
+
+// A naive deep merge writes payload.__proto__ onto the target's prototype chain
+function unsafeMerge(target, source) {
+  for (const key of Object.keys(source)) {
+    target[key] = source[key]; // key === "__proto__" writes to Object.prototype
+  }
+}
+
+unsafeMerge({}, payload);
+
+const innocent = {};
+console.log(innocent.isAdmin); // true — every object is now "admin"
 ```
 
-The problem: you can write to `Object.prototype` through certain patterns, most commonly via:
+`Object.keys()` does include `__proto__` as a string key when it's an own enumerable property on the parsed JSON result — which is why naive iteration is insufficient.
 
-- Recursive merge functions
-- `JSON.parse` combined with key assignment
-- Property access using user-controlled keys like `__proto__`, `constructor`, or `prototype`
+---
 
-```js
-const payload = JSON.parse('{"__proto__": {"isAdmin": true}}');
+## Real CVEs
 
-const victim = {};
-console.log(victim.isAdmin); // true — Object.prototype was polluted
-```
+**CVE-2019-10744 — lodash `merge` / `mergeWith` (< 4.17.12):** `_.merge({}, JSON.parse('{"__proto__":{"polluted":1}}'))` polluted `Object.prototype`. Affected millions of projects. Fixed in 4.17.12.
 
-After the merge, `isAdmin` exists on `Object.prototype`, so **every plain object** in the process inherits it — including ones that gate admin actions.
+**CVE-2019-10744 related — `hoek` < 4.2.1:** Deep clone utility. Same class of vulnerability.
 
-Think of `Object.prototype` as a shared whiteboard in a room. Prototype pollution lets an attacker write on that whiteboard, and everyone in the room reads from it without knowing the attacker was there.
+**CVE-2019-11358 — jQuery `$.extend(true, ...)` (< 3.4.0):** Deep extend with user-controlled source. Fixed in 3.4.0.
+
+**CVE-2020-7598 — `minimist` < 0.2.1:** Query string parser used by millions of packages. Parsed `--__proto__.polluted=1` into `Object.prototype`.
+
+**CVE-2021-3757 — `immer` < 8.0.1:** The immutable state library used by Redux Toolkit. `produce({}, draft => { draft.__proto__.polluted = 1 })` polluted the prototype. Fixed in 8.0.1.
 
 ---
 
 ## Code Examples
 
-### Vulnerable: Naive recursive merge
-
-This is the most common real-world source of prototype pollution.
+### Vulnerable: Naive Recursive Merge
 
 ```ts
-// ❌ VULNERABLE — do not use this pattern
-function merge(target: Record<string, any>, source: Record<string, any>) {
+// ❌ VULNERABLE — do not use
+function unsafeMerge(target: Record<string, any>, source: Record<string, any>) {
   for (const key of Object.keys(source)) {
-    if (typeof source[key] === "object" && source[key] !== null) {
-      // Recursing without checking for dangerous keys
+    if (source[key] !== null && typeof source[key] === "object") {
       target[key] = target[key] ?? {};
-      merge(target[key], source[key]);
+      unsafeMerge(target[key], source[key]); // recurses into __proto__
     } else {
-      target[key] = source[key];
+      target[key] = source[key]; // __proto__.x = y — prototype polluted
     }
   }
-  return target;
 }
 
-const userInput = JSON.parse('{"__proto__": {"canDelete": true}}');
-const config = merge({}, userInput);
+const userInput = JSON.parse('{ "__proto__": { "canDelete": true } }');
+unsafeMerge({}, userInput);
 
 const record = {};
-console.log(record.canDelete); // true — Object.prototype is polluted
+console.log(record.canDelete); // true — Object.prototype is now polluted
 ```
 
-### Safe: Guarded merge with key denylist
+---
+
+### Safe: Guarded Merge with Denylist
 
 ```ts
-// ✅ SAFE — explicitly block dangerous keys
+// ✅ SAFE — explicit denylist for prototype-walking keys
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
-function safeMerge(
-  target: Record<string, any>,
-  source: Record<string, any>,
-): Record<string, any> {
+export function safeMerge(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+  depth = 0,
+): Record<string, unknown> {
+  if (depth > 20) return target; // prevent stack overflow on deeply nested payloads
+
   for (const key of Object.keys(source)) {
-    // Reject any key that could walk up the prototype chain
-    if (DANGEROUS_KEYS.has(key)) continue;
+    if (DANGEROUS_KEYS.has(key)) continue; // skip — never assign these
+
+    const srcVal = source[key];
+    const tgtVal = target[key];
 
     if (
-      typeof source[key] === "object" &&
-      source[key] !== null &&
-      !Array.isArray(source[key])
+      srcVal !== null &&
+      typeof srcVal === "object" &&
+      !Array.isArray(srcVal)
     ) {
-      target[key] =
-        target[key] && typeof target[key] === "object" ? target[key] : {};
-      safeMerge(target[key], source[key]);
+      target[key] = tgtVal && typeof tgtVal === "object" ? tgtVal : {};
+      safeMerge(
+        target[key] as Record<string, unknown>,
+        srcVal as Record<string, unknown>,
+        depth + 1,
+      );
     } else {
-      target[key] = source[key];
+      target[key] = srcVal;
     }
   }
+
   return target;
 }
 ```
 
-### Safe: Use `Object.create(null)` for data bags
+---
 
-When you need a plain key-value store with no prototype at all:
+### Safe: `structuredClone()` as a Safe Deep Copy
+
+`structuredClone()` (available in Node 17+ and all modern browsers) creates a deep clone using the structured clone algorithm, which does not walk prototype chains:
 
 ```ts
-// ✅ Object.create(null) has no prototype — nothing to pollute
-const store = Object.create(null) as Record<string, string>;
+// ✅ structuredClone — safe deep copy that ignores __proto__ keys
+const userInput = JSON.parse(
+  '{ "__proto__": { "isAdmin": true }, "name": "Alice" }',
+);
 
-store["userRole"] = "viewer";
+// structuredClone copies own enumerable properties only — __proto__ is not cloned
+const safeCopy = structuredClone(userInput);
 
-// No __proto__, no toString, no hasOwnProperty — it's a pure dictionary
-console.log(Object.getPrototypeOf(store)); // null
+const test = {};
+console.log(test.isAdmin); // undefined — prototype was not polluted
+
+// Also useful for deep copying state without mutation risk
+const settings = structuredClone(defaultSettings);
+settings.theme = "dark"; // mutation is isolated to the copy
 ```
 
-### Safe: Validate with a schema before merging (Zod example)
+<Callout type="info">
+  `structuredClone` does not preserve class instances, functions, or DOM nodes —
+  it only works with serialisable values (plain objects, arrays, primitives,
+  `Date`, `Map`, `Set`, `ArrayBuffer`). For these constraints, use it for plain
+  data deep copies and be aware of its limitations.
+</Callout>
+
+---
+
+### Safe: JSON.parse with Reviver for Key Filtering
+
+The `JSON.parse` `reviver` function is called for every key-value pair. Use it to strip dangerous keys at parse time:
 
 ```ts
-import { z } from "zod";
-
-const UpdateSchema = z.object({
-  displayName: z.string().max(100),
-  bio: z.string().max(500).optional(),
-});
-
-// In a Next.js Route Handler (app/api/profile/route.ts)
-export async function PATCH(request: Request) {
-  const body = await request.json();
-
-  // Parse and strip any keys not in the schema — __proto__ never makes it through
-  const result = UpdateSchema.safeParse(body);
-
-  if (!result.success) {
-    return Response.json({ error: result.error.flatten() }, { status: 400 });
+// Reviver that blocks prototype-polluting keys
+function safeReviver(key: string, value: unknown): unknown {
+  if (key === "__proto__" || key === "constructor" || key === "prototype") {
+    return undefined; // strips the key entirely
   }
+  return value;
+}
 
-  // result.data is now a typed, safe object with only known keys
-  await updateUserProfile(result.data);
+// Usage
+const raw = '{ "__proto__": { "isAdmin": true }, "name": "Alice" }';
+const safe = JSON.parse(raw, safeReviver);
 
-  return Response.json({ success: true });
+console.log(safe.name); // "Alice"
+console.log(safe.__proto__); // undefined — stripped by reviver
+```
+
+This is useful in high-performance paths where you want to avoid schema validation overhead for simple input filtering.
+
+---
+
+### Safe: Zod Schema Validation (Best Practice)
+
+Schema validation strips unknown keys before they reach any merge logic:
+
+```ts
+// app/api/preferences/route.ts
+import { z } from "zod";
+import { db } from "@/lib/db";
+
+const PreferencesSchema = z.object({
+  theme: z.enum(["light", "dark", "system"]),
+  language: z.string().max(10).optional(),
+  timezone: z.string().max(50).optional(),
+});
+// Zod's strict mode rejects any key not in the schema — including __proto__
+
+export async function PATCH(req: Request) {
+  const body = await req.json();
+  // z.parse() throws on __proto__ — it's not a valid schema key
+  const parsed = PreferencesSchema.strict().parse(body);
+  // ↑ .strict() rejects extra keys; without it, extra keys are stripped silently
+
+  await db.userPreferences.update({ where: { userId: "..." }, data: parsed });
+  return Response.json({ ok: true });
 }
 ```
 
-<Callout type="tip">
-  Schema validation with Zod or Valibot is the most ergonomic defense. It strips
-  unknown keys by default, so attacker-controlled keys like `__proto__` are
-  silently discarded before they reach any merge logic.
+---
+
+### `qs` Query String Parser — Vulnerability and Fix
+
+The `qs` library parses nested query strings: `?a[b]=1` → `{ a: { b: "1" } }`. It also parsed `?__proto__[isAdmin]=1` into `Object.prototype` in older versions:
+
+```bash
+# Vulnerable: qs < 6.7.3 (CVE-2022-24999)
+# Safe: qs >= 6.7.3 — allowPrototypes defaults to false
+npm install qs@latest
+```
+
+```ts
+import qs from "qs";
+
+// ✅ Modern qs — __proto__ keys are ignored by default
+const parsed = qs.parse("__proto__[isAdmin]=1");
+console.log(parsed); // {}
+console.log({}.isAdmin); // undefined — prototype not polluted
+
+// Explicit safety (redundant with modern qs, but documents intent)
+const safeParsed = qs.parse(queryString, { allowPrototypes: false });
+```
+
+Always audit query string parsers when processing URL parameters server-side.
+
+---
+
+### `Object.hasOwn()` vs `hasOwnProperty`
+
+`hasOwnProperty` can be overwritten by prototype pollution:
+
+```ts
+const obj: any = {};
+obj.hasOwnProperty = () => true; // overwrite the method
+obj.hasOwnProperty("anything"); // ← always returns true — unreliable
+
+// ✅ Object.hasOwn — static method, cannot be shadowed
+Object.hasOwn(obj, "realKey"); // reliable: true only if obj has realKey as own property
+```
+
+```ts
+// Safe property existence check in merge/access code
+function safeGet<T>(obj: Record<string, T>, key: string): T | undefined {
+  // Object.hasOwn checks own properties without prototype chain traversal
+  return Object.hasOwn(obj, key) ? obj[key] : undefined;
+}
+```
+
+---
+
+### `Object.create(null)` — No Prototype Data Container
+
+For lookup tables and caches that must never inherit from `Object.prototype`:
+
+```ts
+// ✅ Pure dictionary — Object.getPrototypeOf(store) === null
+const store = Object.create(null) as Record<string, string>;
+
+store["userId:123"] = "Alice";
+store["userId:456"] = "Bob";
+
+// No __proto__, no toString, no hasOwnProperty — truly key-value only
+// A __proto__ key is stored as a normal own property, not prototype access
+store["__proto__"] = "harmless string";
+console.log(Object.getPrototypeOf(store)); // null — prototype never changed
+```
+
+---
+
+### Freezing `Object.prototype` (High-Security Contexts)
+
+```ts
+// server/init.ts — call before processing any user input
+// Prevents all prototype pollution by making Object.prototype immutable
+
+if (process.env.NODE_ENV === "production") {
+  Object.freeze(Object.prototype);
+  Object.freeze(Function.prototype);
+  Object.freeze(Array.prototype);
+}
+
+// After freeze: any attempt to write to Object.prototype silently fails in sloppy mode
+// or throws TypeError in strict mode — pollution becomes a no-op
+```
+
+<Callout type="warn">
+  Freezing `Object.prototype` can break third-party libraries that legitimately
+  extend it (some polyfills, older testing libraries). Test thoroughly in a
+  staging environment before applying to production.
 </Callout>
 
 ---
 
 ## Real-World Use Case
 
-You're building a Node.js API that accepts a JSON body to update user preferences:
+**Node.js API accepting user preferences.** A PATCH endpoint accepts `{ "theme": "dark", "__proto__": { "isAdmin": true } }`. The handler uses `Object.assign(defaults, body)`. Because `Object.assign` copies own enumerable properties, it writes `__proto__` as a key — which JavaScript interprets as prototype access, polluting `Object.prototype.isAdmin = true` for the entire server process.
 
-```
-PATCH /api/preferences
-{ "theme": "dark", "__proto__": { "isAdmin": true } }
-```
+Later in the same request, middleware checks `if (req.user.isAdmin)`. The user has no explicit `isAdmin` field, but inherits `true` from the now-polluted `Object.prototype`. The attacker has escalated privileges.
 
-If your handler does something like `Object.assign(userPrefs, body)` or passes `body` into a naive deep-merge utility, `Object.prototype.isAdmin` is now `true` for every object in your server process for the lifetime of that request — and potentially beyond if the property persists.
-
-Later in the same request cycle, a middleware checks:
-
-```ts
-if (req.user.isAdmin) {
-  // grant elevated access
-}
-```
-
-`req.user` is a plain object. It has no `isAdmin` property of its own — but it now inherits one from `Object.prototype`. The attacker just escalated their privileges without a valid account.
-
-This exact class of vulnerability has been found in widely-used npm packages including `lodash` (pre-4.17.5), `jQuery`, `hoek`, and `minimist`.
+Zod schema validation on the route handler prevents this entirely — `__proto__` is not a declared schema field, and Zod's parser strips or rejects it before any object assignment.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Trusting `Object.keys()` to be safe**
+**1. Trusting that `Object.keys()` iteration is safe.** `Object.keys()` returns `__proto__` as a string key when it's an own property on the parsed JSON object — assigning it through bracket notation (`obj[key] = val` where `key === "__proto__"`) triggers prototype mutation. Key iteration is not sufficient; the denylist check must come before the assignment.
 
-`Object.keys()` only returns own enumerable properties — it won't yield `__proto__`. This makes people think iterating with it is safe. It's not, because `__proto__` as a **string key** is handled specially by the JavaScript engine during property assignment and can still pollute the prototype.
+**2. Assuming deep merge utilities are safe by default.** Lodash `merge` before 4.17.12, `hoek` before 4.2.1, and jQuery `$.extend` before 3.4.0 all had prototype pollution CVEs. Run `npm audit` and verify you're on patched versions.
 
-```ts
-const obj: any = {};
-obj["__proto__"]["polluted"] = true; // Engine intercepts this
+**3. Not checking query string parsers.** URL parameters like `?__proto__[admin]=1` are a common attack vector for server-side prototype pollution via `qs`, `querystring`, or custom parsers. Audit all query string parsing in your API routes.
 
-const test = {};
-console.log(test.polluted); // true
-```
+**4. Using `obj.hasOwnProperty(key)` for security-critical checks.** Prototype pollution can replace `hasOwnProperty` on an object. Use `Object.hasOwn(obj, key)` which cannot be shadowed.
 
-**2. Using `JSON.parse` output directly without sanitization**
-
-`JSON.parse` does not filter `__proto__` keys. It produces a plain object, and if you then assign properties from it without checks, you're exposed. Always validate with a schema or use a safe clone utility.
-
-**3. Assuming the problem only affects deep merge**
-
-Prototype pollution can also occur through:
-
-- `Object.assign` with nested objects that were already polluted
-- Array methods that reconstruct objects from user data
-- Query string parsers (`qs`, `querystring`) that parse nested keys like `?__proto__[admin]=1`
-
-<Callout type="warn">
-  The `qs` library parses `?__proto__[isAdmin]=true` into `{ __proto__: { isAdmin: 'true' } }` by default in older versions. Always set `{ allowPrototypes: false }` or upgrade to a version that disables this by default.
-</Callout>
-
-**4. Not freezing `Object.prototype` in high-risk contexts**
-
-In environments where you control the runtime (e.g., a sandboxed worker), you can freeze the prototype chain entirely:
-
-```ts
-// Freeze early — before any user input is processed
-Object.freeze(Object.prototype);
-```
-
-This makes prototype pollution a no-op. However, it can break third-party libraries that legitimately extend `Object.prototype`, so test thoroughly before using this in production.
+**5. Forgetting that pollution is process-wide.** Prototype pollution in Node.js persists for the lifetime of the process (or until the property is deleted). A single polluted request affects all subsequent requests handled by the same process. This makes the attack particularly severe in long-running server environments.
 
 ---
 
 ## Summary
 
-Prototype pollution exploits JavaScript's prototype chain to inject properties onto `Object.prototype`, making them appear on every plain object in the runtime. It most commonly enters through deep-merge functions, query string parsers, or any code that assigns user-controlled keys without validation. The strongest defenses are schema validation (Zod, Valibot) to strip unknown keys before any merge, explicit denylist checks for `__proto__`, `constructor`, and `prototype`, and using `Object.create(null)` for pure data containers. Several major npm packages have had prototype pollution CVEs, so auditing dependencies with `npm audit` is a necessary part of any security posture. Treating all user-supplied JSON as untrusted and validating its shape before processing is the single most effective habit to develop.
+Prototype pollution injects properties onto `Object.prototype` through naive deep-merge, query string parsers, or bracket-notation assignment of user-controlled keys. The denylist (`__proto__`, `constructor`, `prototype`) is the minimum defence in custom merge code; Zod schema validation is the most ergonomic production defence. `structuredClone()` produces a safe deep copy that ignores prototype chain traversal. Use `Object.create(null)` for pure data containers that must never inherit from `Object.prototype`. Upgrade `lodash` ≥ 4.17.12, `qs` ≥ 6.7.3, and jQuery ≥ 3.4.0 to get patched implementations. Use `Object.hasOwn()` instead of `obj.hasOwnProperty()` in security-critical checks. Pollution persists for the entire Node.js process lifetime — treat it as equivalent in severity to SQL injection.
+
+---
+
+## Interview Questions
+
+**Q1. How does prototype pollution work mechanically and why is `__proto__` the key attack vector?**
+
+JavaScript property access walks the prototype chain. Every plain object (`{}`) has `Object.prototype` at the root of its prototype chain. The `__proto__` property is a special accessor defined by JavaScript engines that, when assigned through bracket notation (`obj["__proto__"] = something`), sets the object's internal prototype rather than creating an own property. When a naive deep-merge iterates `Object.keys(source)` and assigns each key, `key === "__proto__"` triggers this prototype-setting behaviour on the target object. If the target is `{}` or any plain object, this writes onto `Object.prototype` — a singleton shared by all plain objects in the process. Subsequently, any plain object that doesn't have the property as an own property inherits it.
+
+**Q2. What are three distinct entry points for prototype pollution in a Node.js application?**
+
+First, deep-merge utilities: any function that recursively assigns source properties to a target without a denylist check. This includes hand-written `merge` functions and older versions of lodash, hoek, and jQuery's `$.extend`. Second, query string parsers: `qs.parse("?__proto__[isAdmin]=1")` in vulnerable versions reconstructs `__proto__` as a nested object key and assigns it. URL parameters accepting nested structure are a reliable attack surface. Third, `JSON.parse` combined with property assignment: `JSON.parse('{"__proto__":{"x":1}}')` produces a plain object with `__proto__` as an own string key. If code iterates this object and assigns to another object without filtering, prototype pollution occurs. Any parsing of user-controlled data followed by non-validated object assignment is a potential entry point.
+
+**Q3. How does `structuredClone()` protect against prototype pollution compared to `JSON.parse(JSON.stringify(obj))`?**
+
+Both create a deep copy that doesn't share references with the original. `structuredClone()` is more reliable because it handles types that `JSON.stringify` cannot (`Date`, `Map`, `Set`, `ArrayBuffer`, `undefined`, circular references within the value). More importantly for security: `structuredClone()` uses the structured clone algorithm which copies only own enumerable data properties — it does not copy prototype-affecting keys. `JSON.parse(JSON.stringify(obj))` also produces a clean deep copy for the same reason — JSON serialisation only includes own enumerable properties, and `JSON.parse` on that string produces a fresh object. The practical difference: `structuredClone` is faster, preserves more types, and doesn't convert `undefined` values to `null`. Neither approach prevents pollution if you then assign properties from the clone back to another object through a naive merge.
+
+**Q4. What specific CVEs in widely-used npm packages involved prototype pollution?**
+
+The most impactful: lodash `_.merge` and `_.mergeWith` (CVE-2019-10744, lodash < 4.17.12) — affected an enormous number of projects since lodash was the most downloaded npm package. jQuery `$.extend(true, ...)` (CVE-2019-11358, jQuery < 3.4.0) — affected countless legacy web applications. `minimist` (CVE-2020-7598, < 0.2.1) — a tiny argv parser used by hundreds of thousands of packages as a transitive dependency; `--__proto__.polluted=1` in CLI arguments polluted the prototype. `immer` (CVE-2021-3757, < 8.0.1) — used by Redux Toolkit; producing a draft that modified `__proto__` polluted the prototype. These CVEs demonstrate that prototype pollution is not a theoretical concern — it has affected fundamental, widely trusted libraries.
+
+**Q5. Why is `Object.hasOwn(obj, key)` safer than `obj.hasOwnProperty(key)` in security-sensitive code?**
+
+`hasOwnProperty` is an inherited method — it lives on `Object.prototype` and can be overwritten. Prototype pollution itself can replace `hasOwnProperty` on an object: `obj.hasOwnProperty = () => true` makes every subsequent `obj.hasOwnProperty(key)` return `true` regardless of reality. In an environment where user data is processed, this can be exploited to bypass checks like `if (config.hasOwnProperty("adminKey"))`. `Object.hasOwn(obj, key)` is a static method on `Object` that cannot be shadowed by per-object property assignment — it always uses the built-in implementation. For any security-relevant check about whether an object has a specific own property, `Object.hasOwn` is the correct choice.
+
+**Q6. How does Zod schema validation prevent prototype pollution and why is it superior to a manual denylist?**
+
+Zod's schema parser creates a new object containing only the properties declared in the schema. If `__proto__` is not in the schema, it is silently stripped (in default mode) or causes a validation error (in `.strict()` mode). The validated output is a freshly constructed object — it does not contain any of the attacker's extra keys, regardless of what the input contained. This is superior to a manual denylist for three reasons: (1) it's exhaustive rather than defensive — you declare what's allowed rather than blocking known bad keys, so unknown future attack vectors are also blocked; (2) it validates types and values simultaneously, not just key names; (3) it's compositional — schema validation is required for input correctness anyway, so prototype pollution protection comes for free. A manual denylist only blocks known keys and requires maintenance as new attack patterns emerge.

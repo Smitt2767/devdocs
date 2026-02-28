@@ -1,17 +1,13 @@
 ---
 title: REST vs GraphQL vs tRPC
-description: A practical comparison of REST, GraphQL, and tRPC to help you choose the right API paradigm for your Next.js or Node.js project.
+description: A practical comparison of REST, GraphQL, and tRPC — N+1 prevention with DataLoader, persisted queries, OpenAPI spec generation with zod-openapi, tRPC subscriptions, REST versioning strategies, and a decision framework for choosing the right paradigm.
 ---
 
 ## Overview
 
-When building a web application, one of the earliest architectural decisions you'll make is how your frontend and backend communicate. Three paradigms dominate modern development:
+Three paradigms dominate how frontend and backend communicate in modern TypeScript stacks: **REST** (resource-based HTTP endpoints), **GraphQL** (client-driven queries over a single endpoint), and **tRPC** (end-to-end typesafe RPC over HTTP). Each has a philosophy, a set of tradeoffs, and a class of projects where it excels.
 
-- **REST** — Resource-based HTTP endpoints, the long-standing industry default.
-- **GraphQL** — A query language that lets clients request exactly the data they need.
-- **tRPC** — End-to-end typesafe RPC calls with zero schema duplication, built for TypeScript-first stacks.
-
-Each has a distinct philosophy, set of tradeoffs, and a class of projects where it excels. Choosing the wrong one adds unnecessary complexity; choosing the right one disappears into the background.
+The right choice is determined by two questions: Who are your API consumers? How diverse are their data needs?
 
 ---
 
@@ -19,109 +15,232 @@ Each has a distinct philosophy, set of tradeoffs, and a class of projects where 
 
 ### REST
 
-REST maps operations to HTTP verbs and URLs. A `GET /products/42` fetches a product; a `PATCH /products/42` updates it. The server defines the shape of every response. Clients take what they get.
+REST maps operations to HTTP verbs and resource URLs. A `GET /products/42` fetches a product; a `PATCH /products/42` updates it. The server defines response shapes — clients take what they get.
 
-This works well when your API is consumed by many different clients (mobile apps, third parties, partner integrations) because it's language-agnostic and universally understood. The downside is over-fetching (getting fields you don't need) and under-fetching (needing multiple round-trips to assemble a UI).
+Strengths: universally understood, language-agnostic, works with CDN caching (GET responses are cacheable by URL), well-tooled with OpenAPI for documentation and codegen.
+
+Weaknesses: over-fetching (fields you don't need) and under-fetching (multiple round-trips to assemble a UI view).
 
 ### GraphQL
 
-GraphQL exposes a single endpoint (`POST /graphql`). The client sends a query describing exactly the shape of data it wants, and the server resolves only those fields. This eliminates over- and under-fetching.
+GraphQL exposes a single endpoint (`POST /graphql`). Clients send a query describing the exact shape they need; the server resolves only those fields. Eliminates over- and under-fetching.
 
-The tradeoff is operational complexity: you need a schema, resolvers, a client-side cache (Apollo, urql, or TanStack Query with a GraphQL fetcher), and tooling for things like persisted queries and rate limiting. For a public API with diverse consumers, this investment pays off. For an internal app with one frontend, it often doesn't.
+Tradeoffs: operational complexity (schema, resolvers, client-side cache, persisted queries for production, N+1 query prevention). Earns its cost when you have many clients with fundamentally different data requirements.
 
 ### tRPC
 
-tRPC is not a wire protocol — it's a TypeScript layer over HTTP. You define procedures on the server as plain TypeScript functions. The client calls them as if they were local async functions. No schema file, no codegen step, no REST endpoint design. Types flow automatically from server to client via TypeScript inference.
+tRPC is not a wire protocol — it's a TypeScript inference layer over HTTP. Server procedures are plain TypeScript functions. Clients call them as async functions. Types flow automatically — no schema file, no codegen step.
 
-tRPC is explicitly designed for **full-stack TypeScript monorepos** where the frontend and backend are developed together. It does not produce a public API contract. If you need to expose your API to non-TypeScript consumers, tRPC is the wrong tool.
-
-<Callout type="info">
-  tRPC v11 works seamlessly with Next.js App Router via React Server Components
-  and the `@trpc/react-query` adapter. Server Actions are a valid alternative
-  for simpler mutations, but tRPC gives you more structure at scale.
-</Callout>
+Constraint: both client and server must be TypeScript in the same monorepo (or the server types must be published as a package). No stable wire contract for non-TypeScript consumers.
 
 ---
 
 ## Code Examples
 
-### REST — Route Handler in Next.js App Router
+### REST — Route Handler with OpenAPI Spec via `zod-openapi`
+
+```bash
+npm install @asteasolutions/zod-to-openapi zod
+```
 
 ```ts
-// app/api/products/[id]/route.ts
+// lib/openapi/registry.ts
+import {
+  OpenAPIRegistry,
+  OpenApiGeneratorV3,
+} from "@asteasolutions/zod-to-openapi";
+import { z } from "zod";
+
+export const registry = new OpenAPIRegistry();
+
+// Define shared schemas — registered once, reused in route definitions
+export const ProductSchema = registry.register(
+  "Product",
+  z.object({
+    id: z.string().uuid(),
+    name: z.string(),
+    price: z.number().positive(),
+    stock: z.number().int().min(0),
+  }),
+);
+
+export const CreateProductSchema = ProductSchema.omit({ id: true });
+```
+
+```ts
+// app/api/products/route.ts
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
+import {
+  registry,
+  ProductSchema,
+  CreateProductSchema,
+} from "@/lib/openapi/registry";
 import { db } from "@/lib/db";
 
-export async function GET(
-  _req: NextRequest,
-  { params }: { params: { id: string } },
-) {
-  const product = await db.product.findUnique({
-    where: { id: params.id },
+// Register the route in the OpenAPI registry for spec generation
+registry.registerPath({
+  method: "get",
+  path: "/api/products",
+  tags: ["Products"],
+  responses: {
+    200: {
+      description: "List of products",
+      content: { "application/json": { schema: z.array(ProductSchema) } },
+    },
+  },
+});
+
+export async function GET() {
+  const products = await db.product.findMany({
     select: { id: true, name: true, price: true, stock: true },
+    orderBy: { name: "asc" },
   });
-
-  if (!product) {
-    return NextResponse.json({ error: "Product not found" }, { status: 404 });
-  }
-
-  return NextResponse.json(product);
+  return NextResponse.json(products);
 }
 
-export async function PATCH(
-  req: NextRequest,
-  { params }: { params: { id: string } },
-) {
-  const body = await req.json();
+registry.registerPath({
+  method: "post",
+  path: "/api/products",
+  tags: ["Products"],
+  request: {
+    body: { content: { "application/json": { schema: CreateProductSchema } } },
+  },
+  responses: {
+    201: {
+      description: "Created product",
+      content: { "application/json": { schema: ProductSchema } },
+    },
+  },
+});
 
-  const updated = await db.product.update({
-    where: { id: params.id },
-    data: { price: body.price }, // only allow price updates via this endpoint
-  });
-
-  return NextResponse.json(updated);
+export async function POST(req: NextRequest) {
+  const body = CreateProductSchema.parse(await req.json());
+  const product = await db.product.create({ data: body });
+  return NextResponse.json(product, { status: 201 });
 }
 ```
 
-### GraphQL — Schema + Resolver with graphql-yoga
+```ts
+// app/api/openapi.json/route.ts — generate spec at runtime
+import { OpenApiGeneratorV3 } from "@asteasolutions/zod-to-openapi";
+import { registry } from "@/lib/openapi/registry";
+
+export function GET() {
+  const generator = new OpenApiGeneratorV3(registry.definitions);
+  const spec = generator.generateDocument({
+    openapi: "3.0.0",
+    info: { title: "Products API", version: "1.0.0" },
+    servers: [{ url: process.env.NEXT_PUBLIC_APP_URL! }],
+  });
+  return Response.json(spec);
+}
+```
+
+---
+
+### REST — API Versioning Strategies
+
+**URL versioning** (most common, CDN-cacheable, explicit):
 
 ```ts
-// app/api/graphql/route.ts
-import { createSchema, createYoga } from "graphql-yoga";
+// app/api/v1/products/route.ts  → /api/v1/products
+// app/api/v2/products/route.ts  → /api/v2/products (new response shape)
+```
+
+**Header versioning** (cleaner URLs, harder to cache, less discoverable):
+
+```ts
+// app/api/products/route.ts
+export async function GET(req: NextRequest) {
+  const version = req.headers.get("api-version") ?? "1";
+
+  if (version === "2") {
+    return NextResponse.json(await getProductsV2());
+  }
+  return NextResponse.json(await getProductsV1());
+}
+```
+
+URL versioning is the correct default — it's explicit, copy-pasteable, CDN-cacheable, and works with every HTTP client without special configuration.
+
+---
+
+### GraphQL — DataLoader for N+1 Prevention
+
+Without DataLoader, nested field resolution fires one query per parent record:
+
+```ts
+// ❌ N+1: 50 orders → 50 separate user queries
+resolvers: {
+  Order: {
+    customer: (order) => db.user.findUnique({ where: { id: order.userId } }),
+  },
+}
+```
+
+DataLoader batches and deduplicates within a single tick:
+
+```ts
+// lib/graphql/loaders.ts
+import DataLoader from "dataloader";
 import { db } from "@/lib/db";
+
+// One loader per request — instantiate fresh per request context to avoid cross-request caching
+export function createLoaders() {
+  const userLoader = new DataLoader(async (ids: readonly string[]) => {
+    const users = await db.user.findMany({ where: { id: { in: [...ids] } } });
+    // DataLoader requires results in the same order as the input keys
+    return ids.map((id) => users.find((u) => u.id === id) ?? null);
+  });
+
+  const productLoader = new DataLoader(async (ids: readonly string[]) => {
+    const products = await db.product.findMany({
+      where: { id: { in: [...ids] } },
+    });
+    return ids.map((id) => products.find((p) => p.id === id) ?? null);
+  });
+
+  return { userLoader, productLoader };
+}
+```
+
+```ts
+// app/api/graphql/route.ts — pass loaders via context
+import { createSchema, createYoga } from "graphql-yoga";
+import { createLoaders } from "@/lib/graphql/loaders";
 
 const schema = createSchema({
   typeDefs: /* GraphQL */ `
-    type Product {
+    type Order {
+      id: ID!
+      total: Float!
+      customer: User!
+    }
+    type User {
       id: ID!
       name: String!
-      price: Float!
+      email: String!
     }
-
     type Query {
-      product(id: ID!): Product
-      products: [Product!]!
-    }
-
-    type Mutation {
-      updatePrice(id: ID!, price: Float!): Product!
+      orders: [Order!]!
     }
   `,
   resolvers: {
     Query: {
-      product: (_root, { id }) => db.product.findUnique({ where: { id } }),
-
-      products: () => db.product.findMany({ orderBy: { name: "asc" } }),
+      orders: () => db.order.findMany(),
     },
-    Mutation: {
-      updatePrice: (_root, { id, price }) =>
-        db.product.update({ where: { id }, data: { price } }),
+    Order: {
+      // DataLoader batches all customer loads from the same tick into one DB query
+      customer: (order, _args, ctx) =>
+        ctx.loaders.userLoader.load(order.userId),
     },
   },
 });
 
 const { handleRequest } = createYoga({
   schema,
+  context: () => ({ loaders: createLoaders() }), // fresh loaders per request
   graphqlEndpoint: "/api/graphql",
 });
 
@@ -129,41 +248,97 @@ export const GET = handleRequest;
 export const POST = handleRequest;
 ```
 
-The client can now query only the fields it needs:
+---
 
-```graphql
-query GetProductName($id: ID!) {
-  product(id: $id) {
-    name
-    price
-  }
-}
+### GraphQL — Persisted Queries
+
+In production, allow only pre-approved queries. Persisted queries improve security (no arbitrary query injection) and performance (send only the hash over the wire):
+
+```ts
+// lib/graphql/persisted-queries.ts — generated at build time from .graphql files
+export const PERSISTED_QUERIES: Record<string, string> = {
+  a1b2c3d4: `query GetProduct($id: ID!) { product(id: $id) { id name price } }`,
+  e5f6g7h8: `query ListOrders { orders { id total customer { name } } }`,
+};
 ```
 
-### tRPC — Router + Client in a Next.js Monorepo
+```ts
+// app/api/graphql/route.ts — only allow persisted queries in production
+const { handleRequest } = createYoga({
+  schema,
+  context: () => ({ loaders: createLoaders() }),
+  graphqlEndpoint: "/api/graphql",
+  plugins: [
+    {
+      onParams({ params, setParams }) {
+        if (process.env.NODE_ENV !== "production") return;
 
-**Server router:**
+        // In production: only allow requests that include a known query hash
+        const hash = (params.extensions as any)?.persistedQuery?.sha256Hash;
+        if (!hash || !PERSISTED_QUERIES[hash]) {
+          throw new Error("Only persisted queries are allowed in production");
+        }
+        // Replace the hash with the actual query
+        setParams({ ...params, query: PERSISTED_QUERIES[hash] });
+      },
+    },
+  ],
+});
+```
+
+---
+
+### tRPC — Full Setup with `createCallerFactory`
+
+```ts
+// server/trpc.ts
+import { initTRPC, TRPCError } from "@trpc/server";
+import { auth } from "@/auth";
+
+export const t = initTRPC.context<{ userId: string | null }>().create();
+
+export const router = t.router;
+export const publicProcedure = t.procedure;
+
+// Protected procedure — throws 401 if not authenticated
+export const protectedProcedure = t.procedure.use(async ({ ctx, next }) => {
+  if (!ctx.userId) throw new TRPCError({ code: "UNAUTHORIZED" });
+  return next({ ctx: { userId: ctx.userId } });
+});
+```
 
 ```ts
 // server/routers/product.ts
 import { z } from "zod";
-import { router, publicProcedure } from "../trpc";
+import { router, publicProcedure, protectedProcedure } from "../trpc";
 import { db } from "@/lib/db";
 
 export const productRouter = router({
-  getById: publicProcedure
-    .input(z.object({ id: z.string() }))
+  list: publicProcedure
+    .input(
+      z.object({
+        cursor: z.string().optional(),
+        limit: z.number().max(50).default(20),
+      }),
+    )
     .query(async ({ input }) => {
-      const product = await db.product.findUnique({
-        where: { id: input.id },
+      const products = await db.product.findMany({
+        take: input.limit + 1,
+        cursor: input.cursor ? { id: input.cursor } : undefined,
+        orderBy: { createdAt: "desc" },
       });
-      if (!product) throw new Error("Product not found");
-      return product; // TypeScript infers this return type automatically
+
+      const hasMore = products.length > input.limit;
+      return {
+        items: hasMore ? products.slice(0, -1) : products,
+        nextCursor: hasMore ? products[products.length - 2].id : null,
+      };
     }),
 
-  updatePrice: publicProcedure
+  update: protectedProcedure
     .input(z.object({ id: z.string(), price: z.number().positive() }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      // ctx.userId is guaranteed non-null by protectedProcedure
       return db.product.update({
         where: { id: input.id },
         data: { price: input.price },
@@ -172,98 +347,184 @@ export const productRouter = router({
 });
 ```
 
-**Client usage (no type imports needed — inferred automatically):**
+```ts
+// server/root.ts
+import { router } from "./trpc";
+import { productRouter } from "./routers/product";
+
+export const appRouter = router({ product: productRouter });
+export type AppRouter = typeof appRouter;
+
+// createCallerFactory: call procedures directly in Server Components without HTTP
+export const createCaller = appRouter.createCaller;
+```
 
 ```tsx
-// app/products/[id]/page.tsx  ← Server Component
-import { serverClient } from "@/server/trpc-server-client";
+// app/api/trpc/[trpc]/route.ts
+import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
+import { appRouter } from "@/server/root";
+import { auth } from "@/auth";
 
-export default async function ProductPage({
-  params,
-}: {
-  params: { id: string };
-}) {
-  // Fully typesafe — autocomplete works, no codegen required
-  const product = await serverClient.product.getById({ id: params.id });
+const handler = (req: Request) =>
+  fetchRequestHandler({
+    endpoint: "/api/trpc",
+    req,
+    router: appRouter,
+    createContext: async () => {
+      const session = await auth();
+      return { userId: session?.user?.id ?? null };
+    },
+  });
+
+export { handler as GET, handler as POST };
+```
+
+```tsx
+// app/products/page.tsx — Server Component: call tRPC directly, no HTTP round-trip
+import { createCaller } from "@/server/root";
+import { auth } from "@/auth";
+
+export default async function ProductsPage() {
+  const session = await auth();
+
+  // createCaller bypasses HTTP — calls the procedure function directly
+  const caller = createCaller({ userId: session?.user?.id ?? null });
+  const { items } = await caller.product.list({ limit: 20 });
 
   return (
-    <div>
-      <h1>{product.name}</h1>
-      <p>${product.price.toFixed(2)}</p>
-    </div>
+    <ul>
+      {items.map((p) => (
+        <li key={p.id}>
+          {p.name} — ${p.price}
+        </li>
+      ))}
+    </ul>
   );
 }
 ```
 
 ---
 
+### tRPC Subscriptions — Real-Time Updates
+
+```ts
+// server/routers/notifications.ts
+import { observable } from "@trpc/server/observable";
+import { router, protectedProcedure } from "../trpc";
+import { EventEmitter } from "events";
+
+const notificationEmitter = new EventEmitter();
+
+export const notificationsRouter = router({
+  onNew: protectedProcedure.subscription(({ ctx }) => {
+    return observable<{ message: string; createdAt: Date }>((emit) => {
+      const listener = (notification: { userId: string; message: string }) => {
+        if (notification.userId === ctx.userId) {
+          emit.next({ message: notification.message, createdAt: new Date() });
+        }
+      };
+
+      notificationEmitter.on("notification", listener);
+      // Cleanup when the subscription is unsubscribed
+      return () => notificationEmitter.off("notification", listener);
+    });
+  }),
+});
+
+// Emit from anywhere in the server
+export function pushNotification(userId: string, message: string) {
+  notificationEmitter.emit("notification", { userId, message });
+}
+```
+
+```tsx
+// Client component subscribing
+"use client";
+import { trpc } from "@/lib/trpc-client";
+
+export function NotificationBell() {
+  trpc.notifications.onNew.useSubscription(undefined, {
+    onData: (notification) => {
+      console.log("New notification:", notification.message);
+    },
+  });
+
+  return <button>🔔</button>;
+}
+```
+
+<Callout type="warn">
+  tRPC subscriptions require WebSocket or SSE transport — not supported in
+  serverless environments (Vercel, Cloudflare Workers) without a persistent
+  connection layer. For serverless, use SSE via Route Handlers or a separate
+  WebSocket server.
+</Callout>
+
+---
+
+## Decision Framework
+
+| Criterion                       | REST      | GraphQL   | tRPC    |
+| ------------------------------- | --------- | --------- | ------- |
+| Public API (multiple consumers) | ✅        | ✅        | ❌      |
+| Non-TypeScript consumers        | ✅        | ✅        | ❌      |
+| CDN-cacheable responses         | ✅        | ❌ (POST) | ❌      |
+| Flexible client queries         | ❌        | ✅        | Limited |
+| Fastest internal type safety    | ❌        | ❌        | ✅      |
+| Zero codegen                    | ✅        | ❌        | ✅      |
+| Real-time subscriptions         | ❌ native | ✅        | ✅      |
+| Operational simplicity          | ✅        | ❌        | ✅      |
+
+---
+
 ## Real-World Use Case
 
-**E-commerce platform with a mixed consumer base:**
-
-- The **public-facing storefront** (Next.js) and **internal admin dashboard** are built in TypeScript and share a monorepo → use **tRPC** for all internal APIs. Instant type safety, no schema maintenance.
-- A **mobile app** built by a third-party team in Swift and Kotlin needs to integrate with your catalog → expose a **REST API** from the same Next.js backend using Route Handlers. Easy to document with OpenAPI.
-- A **partner portal** where enterprise clients need to compose complex queries across products, orders, and inventory without you building bespoke endpoints for each use case → layer a **GraphQL API** on top using graphql-yoga or Apollo Server.
-
-In practice, many production apps use more than one paradigm. tRPC internally, REST or GraphQL externally.
+**E-commerce platform.** Internal Next.js app → **tRPC** for all admin and storefront data: type-safe, zero schema, Server Components call procedures directly. Public REST API for third-party mobile apps and partner integrations → Route Handlers with `zod-openapi` generating the OpenAPI spec automatically. A merchandising partner portal needing custom cross-entity queries (orders + products + inventory) → **GraphQL** with DataLoader for N+1 prevention and persisted queries in production. Three paradigms, each matched to its consumer.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Using tRPC when you need a public API**
+**1. Using tRPC for a public API.** tRPC has no stable wire contract. Its HTTP calls are implementation details. External consumers must import your TypeScript server types — which creates a versioning and deployment dependency. Use REST or GraphQL.
 
-tRPC has no stable wire contract. Its HTTP calls are an implementation detail. If a non-TypeScript client — or even a TypeScript client outside your monorepo — needs to consume your API, tRPC forces that consumer to import your server types as a package. This quickly becomes a versioning and deployment problem. Use REST or GraphQL for public-facing APIs.
+**2. Skipping DataLoader in GraphQL.** A `customer` resolver on `Order` that calls `db.user.findUnique` fires one query per order. 50 orders = 51 queries. Always batch with DataLoader.
 
-**2. Defaulting to GraphQL for internal apps**
+**3. Skipping Zod validation in tRPC.** TypeScript inference is compile-time only. Malformed runtime payloads reach your resolver as `unknown` without `.input(schema)`. Always validate.
 
-GraphQL's value scales with the number of distinct clients with different data needs. A single Next.js frontend backed by GraphQL often means you've added a resolver layer, a client-side cache, and a schema to maintain — with zero benefit over direct database calls via Server Components or tRPC. Start simple.
+**4. Using GET for mutations in REST.** `GET` must be idempotent and safe. Next.js prefetches `<Link>` hrefs on hover — a `GET /api/send-email?to=...` would fire on every hover. Mutations belong on `POST`/`PUT`/`PATCH`/`DELETE`.
 
-**3. Ignoring N+1 query problems in GraphQL**
-
-GraphQL resolvers run per-field, per-item. Without a DataLoader (or an equivalent batching layer), fetching a list of 50 orders each with a nested `customer` field triggers 51 database queries instead of 2. This is the single most common performance bug in new GraphQL implementations.
-
-```ts
-// ❌ Without DataLoader — triggers N+1 queries
-resolvers: {
-  Order: {
-    customer: (order) => db.user.findUnique({ where: { id: order.userId } }),
-  },
-}
-
-// ✅ With DataLoader — batches into a single query
-import DataLoader from "dataloader";
-
-const userLoader = new DataLoader(async (ids: readonly string[]) => {
-  const users = await db.user.findMany({ where: { id: { in: [...ids] } } });
-  return ids.map((id) => users.find((u) => u.id === id) ?? null);
-});
-
-resolvers: {
-  Order: {
-    customer: (order) => userLoader.load(order.userId),
-  },
-}
-```
-
-**4. Treating REST verbs as purely conventional**
-
-`GET` requests must be idempotent and safe — meaning no side effects and repeatable without consequence. Running a mutation on a `GET` endpoint breaks browser caching, CDN behavior, and link prefetching (Next.js prefetches `<Link>` hrefs on hover). Always use `POST`, `PUT`, `PATCH`, or `DELETE` for state changes.
-
-<Callout type="warn">
-  Never perform writes (database inserts, updates, deletions, emails sent)
-  inside a `GET` handler. Next.js and browsers will prefetch and cache GET
-  requests in ways that can silently trigger those writes multiple times.
-</Callout>
-
-**5. Skipping input validation in tRPC**
-
-tRPC's type inference does not replace runtime validation. Always attach a Zod (or Valibot) schema via `.input()`. Without it, malformed or malicious payloads reach your resolver as `unknown`.
+**5. Using GraphQL for a single internal frontend.** Adding a schema, resolvers, client cache, and DataLoader for one Next.js frontend that could just use Server Components or tRPC is unnecessary complexity. GraphQL's value scales with consumer diversity.
 
 ---
 
 ## Summary
 
-REST is the right default when your API has multiple consumers, needs to be publicly documented, or is consumed by non-TypeScript clients. GraphQL earns its complexity when diverse clients need flexible, composable queries over a shared data graph. tRPC is the fastest path to a typesafe internal API when your entire stack is TypeScript and lives in one repo — but it's not a public API solution.
+REST is the default for public, multi-consumer APIs — universally understood, cacheable, and well-tooled with OpenAPI. GraphQL earns its operational complexity when diverse clients need composable queries over a shared data graph; always use DataLoader and persisted queries in production. tRPC is the fastest path to end-to-end type safety in a TypeScript monorepo — no schema, no codegen, direct procedure calls from Server Components. URL versioning is the correct REST versioning default. Most mature applications use multiple paradigms: tRPC or Server Components internally, REST or GraphQL externally.
 
-In practice, these paradigms aren't mutually exclusive. A mature application often exposes REST or GraphQL externally while using tRPC or Server Components internally. Match the tool to the consumer, not to the trend.
+---
+
+## Interview Questions
+
+**Q1. What is the N+1 query problem in GraphQL and how does DataLoader solve it?**
+
+When a GraphQL query returns a list of items and each item has a nested field resolved by a separate database query, you get N+1 queries: 1 query for the list, N queries for each item's nested field. For 50 orders each with a `customer` field, that's 51 database queries. DataLoader solves this by batching: it collects all `load(userId)` calls that happen within the same event loop tick, then fires one `findMany` query for all of them at once. It also deduplicates: if two orders have the same customer, the customer is fetched once and returned to both. The result: 2 queries regardless of list size.
+
+**Q2. When should you choose tRPC over REST for a Next.js application?**
+
+tRPC is the right choice when your entire stack is TypeScript and the API is consumed only by clients in the same monorepo (or clients that can import the server types). The advantages: no schema to maintain, no codegen step, types flow automatically from server to client via inference, and Server Components can call procedures directly without an HTTP round-trip using `createCaller`. The constraint: tRPC is not suitable for public APIs, mobile apps in other languages, or third-party integrations — it has no stable wire contract and requires TypeScript on both sides. If you need to expose your API externally, use REST (Route Handlers) or GraphQL alongside tRPC.
+
+**Q3. What are persisted queries in GraphQL and why should you use them in production?**
+
+In standard GraphQL, clients send the full query string with every request. This has two problems: (1) an attacker can send expensive or malicious queries to your endpoint; (2) large query strings add HTTP overhead. Persisted queries replace the query string with a hash of the query, pre-registered at build time. The client sends only the hash; the server looks up the corresponding query. In production, you can reject any request that doesn't include a known hash — no arbitrary queries allowed. This improves security (no ad-hoc query injection), performance (smaller request payloads), and observability (every query has a stable, loggable ID). Generate the persisted query manifest from your client-side `.graphql` files as part of the build.
+
+**Q4. What is `createCallerFactory` in tRPC and when should you use it?**
+
+`createCallerFactory` (or the earlier `createCaller`) creates a server-side function that calls tRPC procedures directly without making an HTTP request. In Server Components, you can call `createCaller(ctx).product.list({})` to fetch data from the same procedure that handles API requests — no serialization/deserialization, no network overhead, full type safety. Use it in Server Components, Server Actions, and API route handlers that need to compose multiple procedure calls. This is the idiomatic way to fetch data in App Router Server Components when using tRPC — it avoids the redundant HTTP call that `fetch("/api/trpc/...")` would make.
+
+**Q5. What are the tradeoffs between URL versioning and header versioning for REST APIs?**
+
+URL versioning (`/api/v1/products`, `/api/v2/products`) is explicit — the version is visible in links, bookmarks, and logs. It's CDN-cacheable by URL, works with every HTTP client without configuration, and is easy to route in middleware. The downside: "unclean" URLs and the client must explicitly update all call sites when upgrading. Header versioning (`api-version: 2` header) produces clean URLs and version negotiation is separated from resource addressing. The downsides: not CDN-cacheable by URL alone (requires `Vary: api-version`), not visible in links or logs, and requires clients to configure request headers. URL versioning is the correct default — its explicitness is a feature, and the CDN cacheability advantage is significant for high-traffic GET endpoints.
+
+**Q6. How does GraphQL handle caching compared to REST and what are the workarounds?**
+
+REST maps operations to URLs, so `GET /products/42` is naturally cacheable by CDN and browser — the URL is the cache key. GraphQL exposes a single `POST /graphql` endpoint; HTTP caches don't cache POST responses by default, and the same endpoint returns completely different data depending on the query body. Workarounds: (1) **Persisted queries over GET** — register queries by hash and issue them as `GET /graphql?extensions={"persistedQuery":{"sha256Hash":"abc123"}}` — now the response is cacheable by URL+query-hash; (2) **Client-side normalized cache** — Apollo Client and urql cache at the entity level using `__typename + id` as the cache key, deduplicating and updating entities across queries; (3) **CDN with query-aware caching** — some CDNs (Fastly, Cloudflare) can be configured to cache GraphQL responses based on the query body hash.

@@ -1,11 +1,11 @@
 ---
 title: Garbage Collection Timing
-description: A practical guide to understanding when and how JavaScript's garbage collector reclaims memory, and how to write code that works with it instead of against it.
+description: How V8's generational garbage collector works — young-generation scavenging, old-generation mark-sweep-compact, incremental marking, concurrent GC, Oilpan for DOM nodes, FinalizationRegistry for post-GC hooks, and how GC pauses manifest as jank in performance profiles.
 ---
 
 ## Overview
 
-JavaScript is a garbage-collected language, meaning you don't manually free memory. The engine automatically reclaims memory that is no longer reachable. But "automatic" doesn't mean "invisible" — GC pauses can cause jank, slow response times, and unpredictable latency spikes in both browser and Node.js applications.
+JavaScript is a garbage-collected language — you don't manually free memory. The engine automatically reclaims memory that is no longer reachable. But "automatic" doesn't mean "invisible" — GC pauses can cause jank, slow response times, and unpredictable latency spikes in both browser and Node.js applications.
 
 Understanding when garbage collection runs, what triggers it, and how to minimize its impact is critical for building high-performance apps — especially long-running Node.js servers and animation-heavy frontends.
 
@@ -13,221 +13,284 @@ Understanding when garbage collection runs, what triggers it, and how to minimiz
 
 ## How It Works
 
-V8 (the engine behind Node.js and Chrome) uses a **generational garbage collector** with two main regions:
+V8 (the engine behind Chrome and Node.js) uses a **generational garbage collector** with two main heap regions:
 
-- **Young generation (Scavenger):** New, short-lived objects are allocated here. GC runs frequently but quickly on this space. Most objects die young and are collected cheaply.
-- **Old generation (Mark-Sweep / Mark-Compact):** Objects that survive multiple young-generation collections get promoted here. GC runs less often but is more expensive — this is where long pauses come from.
+**Young generation (Minor GC / Scavenger):** New, short-lived objects are allocated here in a region called "semi-space." GC runs frequently but quickly — on the order of 1–5ms. Most objects die young ("infant mortality") and are collected cheaply. Objects that survive two scavenge cycles are promoted to the old generation.
 
-V8 also uses **incremental marking** and **concurrent GC** to spread collection work across multiple small steps rather than one large stop-the-world pause. Still, heavy allocation pressure can force a full GC cycle at an unpredictable moment.
+**Old generation (Major GC / Mark-Sweep-Compact):** Long-lived objects live here. GC runs less often but takes far longer — tens to hundreds of milliseconds on large heaps. Major GC is the source of noticeable jank.
 
-**Analogy:** Think of the young generation as a whiteboard — fast to erase. The old generation is a filing cabinet — reorganizing it takes real time.
+**Analogy:** The young generation is a whiteboard — fast to erase. The old generation is a filing cabinet — reorganising it takes real time.
 
-### What triggers GC?
+### Phases of Major GC
 
-- Allocating beyond the heap size limit
-- Explicit calls via `--expose-gc` flag (dev/testing only)
-- V8's internal heuristics based on allocation rate and heap pressure
+1. **Marking:** Starting from GC roots (`window`, active stack frames, module-level variables), the collector traverses every reachable reference and marks objects as live.
+2. **Sweeping:** Unmarked objects are freed. Their memory is added to a free-list for reuse.
+3. **Compacting:** Optionally, live objects are moved together to reduce heap fragmentation. Compacting is more expensive but improves allocation locality.
 
-You cannot control _when_ GC runs — but you can control _how much pressure you put on the allocator_.
+### Incremental Marking and Concurrent GC
+
+A pure stop-the-world major GC would pause JavaScript execution for the duration of marking a large heap. V8 avoids this with:
+
+**Incremental marking:** Breaking the marking phase into small increments interleaved with JavaScript execution. Each increment runs for a bounded time slice (~1ms), then yields back to JS.
+
+**Concurrent marking:** Moving marking work to background threads in parallel with the main JS thread. The main thread still needs a short stop-the-world pause for the "final remark" phase to handle mutations during concurrent marking.
+
+**Parallel sweeping/compacting:** Sweep and compact phases also run on worker threads where possible.
+
+The result: major GC pauses in V8 are typically 5–20ms for average heap sizes, rather than hundreds of milliseconds.
+
+### Oilpan — DOM Node GC
+
+In Chromium, DOM nodes are not managed by V8's JavaScript heap — they're managed by **Oilpan**, a separate C++ garbage collector. Oilpan and V8 cooperate at their boundary: when a JS object holding a reference to a DOM node becomes unreachable in V8, Oilpan can collect the DOM node. This is why detached DOM nodes may appear to leak in heap snapshots even after JS references are cleared — Oilpan collection cycles run independently.
 
 ---
 
 ## Code Examples
 
-### Measuring GC impact in Node.js with `PerformanceObserver`
+### Measuring GC Impact in Node.js
 
 ```ts
 // server/gc-observer.ts
-import { PerformanceObserver, performance } from "node:perf_hooks";
+import { PerformanceObserver } from "node:perf_hooks";
 
 const obs = new PerformanceObserver((list) => {
   for (const entry of list.getEntries()) {
-    // 'gc' entries report kind, duration, and startTime
+    const detail = (entry as any).detail;
     console.log(
-      `GC event | kind: ${(entry as any).detail?.kind} | duration: ${entry.duration.toFixed(2)}ms`,
+      `GC | kind: ${detail?.kind ?? "unknown"} | duration: ${entry.duration.toFixed(2)}ms`,
     );
+    // GC kinds: 1=Scavenge (minor), 2=MarkSweepCompact (major), 4=IncrementalMarking
+    if (entry.duration > 50) {
+      console.warn("⚠ Major GC pause exceeded 50ms — check heap pressure");
+    }
   }
 });
 
-// Subscribe to GC performance entries
 obs.observe({ type: "gc" });
-
-// Simulate allocation pressure
-function leakPressure() {
-  const sink: Buffer[] = [];
-  for (let i = 0; i < 5000; i++) {
-    sink.push(Buffer.allocUnsafe(1024)); // allocate 1KB chunks rapidly
-  }
-  // sink goes out of scope — young gen will collect these
-}
-
-leakPressure();
 ```
 
 <Callout type="info">
   `PerformanceObserver` with `type: 'gc'` is the production-safe way to measure
-  GC timing. It requires no flags and works in Node.js 16+.
+  GC timing in Node.js 16+. No flags required.
 </Callout>
 
 ---
 
-### Reducing allocations in a hot loop (before vs. after)
+### Reducing Allocations in Hot Paths
 
 ```ts
-// ❌ Before: creates a new object on every request tick
+// ❌ Creates a new object on every call — constant young-gen pressure
 function buildPayload(userId: string, role: string) {
-  return { userId, role, timestamp: Date.now() }; // new object every call
+  return { userId, role, timestamp: Date.now() };
 }
 
-// ✅ After: reuse a single object — safe only when consumed synchronously
-const sharedPayload = { userId: "", role: "", timestamp: 0 };
+// ✅ Reuse a single object for synchronously consumed payloads only
+// WARNING: only safe if the caller consumes the result before the next call
+const _shared: { userId: string; role: string; timestamp: number } = {
+  userId: "",
+  role: "",
+  timestamp: 0,
+};
 
 function buildPayloadReused(userId: string, role: string) {
-  sharedPayload.userId = userId;
-  sharedPayload.role = role;
-  sharedPayload.timestamp = Date.now();
-  return sharedPayload; // caller must not hold a reference across ticks
+  _shared.userId = userId;
+  _shared.role = role;
+  _shared.timestamp = Date.now();
+  return _shared;
 }
 ```
 
-<Callout type="warn">
-  Object reuse is only safe when the returned reference is consumed immediately
-  and never stored. Storing it will cause stale data bugs.
-</Callout>
-
 ---
 
-### Avoiding closure-based memory retention
+### Avoiding Closure-Based Memory Retention Across `await`
 
 ```ts
-// ❌ This keeps the entire `rawData` buffer alive as long as the closure exists
-function processLater(rawData: Buffer) {
-  const summary = rawData.slice(0, 10).toString(); // we only need this small slice
+// ❌ rawData is referenced across the await boundary — cannot be GC'd
+// until the entire async function resolves
+async function processPayload(rawData: Buffer) {
+  const summary = rawData.slice(0, 10).toString();
 
-  setTimeout(() => {
-    // rawData is still referenced in scope — V8 cannot collect it
-    console.log(summary, rawData.length);
-  }, 5000);
+  await writeToDatabase(summary);
+
+  // rawData is still in scope here — V8 conservatively keeps it alive
+  console.log("done", rawData.length); // unnecessary reference
 }
 
-// ✅ Extract only what you need before the async boundary
-function processLaterFixed(rawData: Buffer) {
+// ✅ Extract primitives before the await boundary — drop the large reference
+async function processPayloadFixed(rawData: Buffer) {
   const summary = rawData.slice(0, 10).toString();
   const length = rawData.length; // copy the primitive
 
-  // rawData is no longer referenced — eligible for GC
-  setTimeout(() => {
-    console.log(summary, length);
-  }, 5000);
+  // rawData is no longer referenced — eligible for GC during the await
+  await writeToDatabase(summary);
+
+  console.log("done", length); // uses the copied primitive, not the buffer
 }
 ```
 
 ---
 
-### Checking heap usage programmatically
+### Bounded Cache with TTL Eviction
 
 ```ts
-// server/heap-check.ts
-import { memoryUsage } from "node:process";
+// ❌ Module-level Map grows forever — everything stored is a GC root
+const cache = new Map<string, { value: unknown; created: number }>();
 
-function logHeapPressure() {
-  const { heapUsed, heapTotal, rss } = memoryUsage();
+// ✅ Bounded cache with TTL eviction
+class BoundedCache<K, V> {
+  private readonly store = new Map<K, { value: V; expires: number }>();
+  private readonly ttlMs: number;
+  private readonly maxSize: number;
 
-  const usedMB = (heapUsed / 1024 / 1024).toFixed(1);
-  const totalMB = (heapTotal / 1024 / 1024).toFixed(1);
-  const rssMB = (rss / 1024 / 1024).toFixed(1);
+  constructor(ttlMs: number, maxSize: number) {
+    this.ttlMs = ttlMs;
+    this.maxSize = maxSize;
+  }
 
-  console.log(`Heap: ${usedMB}MB / ${totalMB}MB | RSS: ${rssMB}MB`);
+  set(key: K, value: V): void {
+    this.evict();
+    if (this.store.size >= this.maxSize) {
+      // Evict the oldest entry (first inserted, since Map preserves insertion order)
+      this.store.delete(this.store.keys().next().value);
+    }
+    this.store.set(key, { value, expires: Date.now() + this.ttlMs });
+  }
+
+  get(key: K): V | undefined {
+    const entry = this.store.get(key);
+    if (!entry) return undefined;
+    if (Date.now() > entry.expires) {
+      this.store.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
+
+  private evict(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.store) {
+      if (now > entry.expires) this.store.delete(key);
+    }
+  }
 }
 
-// Log heap every 10 seconds during load testing
-setInterval(logHeapPressure, 10_000);
+// Usage
+const apiCache = new BoundedCache<string, Response>(60_000, 500);
+```
+
+---
+
+### `FinalizationRegistry` — Post-Collection Hooks
+
+`FinalizationRegistry` lets you run a callback after an object has been collected by the GC:
+
+```ts
+// Useful for: releasing external resources (file handles, native buffers)
+// when a corresponding JS wrapper is GC'd
+const registry = new FinalizationRegistry((heldValue: string) => {
+  console.log(`Object with token "${heldValue}" was garbage collected`);
+  // Release the external resource associated with this token
+  releaseNativeHandle(heldValue);
+});
+
+function createManagedResource(id: string) {
+  const resource = { id, data: new Uint8Array(1_000_000) }; // large object
+
+  // Register: when `resource` is GC'd, run the callback with "handle:id"
+  registry.register(resource, `handle:${id}`);
+
+  return resource;
+}
+
+let res = createManagedResource("abc");
+res = null as any; // drop the reference — GC can now collect it
+// At some future GC cycle: "Object with token 'handle:abc' was garbage collected"
+```
+
+<Callout type="warn">
+  `FinalizationRegistry` callbacks are not guaranteed to run synchronously, at a
+  specific time, or at all if the page navigates away. Never rely on them for
+  critical cleanup — use explicit `dispose()` patterns for deterministic
+  resource release. Use `FinalizationRegistry` only as a safety net for external
+  resource cleanup.
+</Callout>
+
+---
+
+### Monitoring Heap Pressure in Node.js
+
+```ts
+// server/heap-monitor.ts
+import { memoryUsage } from "node:process";
+
+function logHeapPressure(label: string) {
+  const { heapUsed, heapTotal, external, rss } = memoryUsage();
+  console.log(
+    `[${label}] heap: ${mb(heapUsed)}/${mb(heapTotal)} MB | external: ${mb(external)} MB | RSS: ${mb(rss)} MB`,
+  );
+}
+
+function mb(bytes: number) {
+  return (bytes / 1_048_576).toFixed(1);
+}
+
+// Log every 10s during load testing
+const monitor = setInterval(() => logHeapPressure("heartbeat"), 10_000);
+
+// Clean up on shutdown
+process.on("SIGTERM", () => clearInterval(monitor));
 ```
 
 ---
 
 ## Real-World Use Case
 
-**In a Next.js API route handling high-frequency webhook events:**
-
-A payment processor sends thousands of webhook payloads per minute. Each handler parses JSON, builds a response object, and writes to a database. If each handler allocates large intermediate objects (e.g., full parsed bodies held in closures across `await` boundaries), old-generation heap pressure climbs fast.
-
-The fix: parse what you need immediately, drop references before any `await`, and avoid caching raw payloads in module-level variables.
-
-```ts
-// app/api/webhook/route.ts
-export async function POST(req: Request) {
-  const body = await req.json();
-
-  // Extract only needed fields — let the full body be GC'd
-  const eventType = body.type as string;
-  const customerId = body.data?.customer_id as string;
-
-  // body is no longer referenced after this point
-  await processWebhookEvent(eventType, customerId);
-
-  return new Response("ok", { status: 200 });
-}
-
-async function processWebhookEvent(type: string, customerId: string) {
-  // work with primitives only — no large objects retained
-  console.log(`Processing ${type} for ${customerId}`);
-}
-```
+**Next.js Route Handler under high webhook traffic.** A payment processor sends 2,000 webhook events per minute. Each handler parses a JSON body (~4KB), transforms it, and writes to Postgres. If handlers retain the full parsed body in closures across `await` boundaries, old-generation heap pressure grows steadily. GC pauses start appearing in P99 latency every 30–60 seconds. Fix: extract only the needed fields (primitives) before the first `await`, drop the large body reference. The `gc` `PerformanceObserver` shows major GC pauses drop from ~80ms at peak to &lt;10ms after the fix.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-### 1. Holding references across `await` boundaries
+**1. Holding large objects across `await` boundaries.** V8 conservatively keeps all referenced variables alive until the async function fully resolves. Extract primitives before awaiting.
 
-When you `await` inside a function, V8 cannot collect objects still referenced in the surrounding scope. Always extract primitives or small values before awaiting if you don't need the full object after.
+**2. Unbounded module-level caches.** `Map`/`Set` at module scope are GC roots — entries are never collected unless explicitly deleted. Implement TTL eviction or use `WeakMap` when keys are objects.
 
-### 2. Using global caches without eviction
+**3. Ignoring GC under load.** A route that passes benchmarks at 10 RPS may exhibit GC jank at 500 RPS when old-gen pressure accumulates. Always measure GC timing during realistic load tests.
 
-```ts
-// ❌ This grows forever — old entries are never collected
-const cache = new Map<string, object>();
+**4. Assuming `null`ing a variable immediately frees memory.** Setting a variable to `null` removes the reference; the object is collected only at the next GC cycle. You cannot force immediate collection in production.
 
-// ✅ Use a bounded cache or WeakMap where applicable
-const weakCache = new WeakMap<object, ProcessedResult>();
-```
-
-Module-level `Map` and `Set` objects are GC roots — anything stored in them lives as long as the module. Always implement TTL eviction or use `WeakMap`/`WeakRef` when keys are objects.
-
-### 3. Ignoring GC during load testing
-
-Benchmarks run in isolation often miss GC pauses because heap pressure is low. Run load tests with realistic concurrency _and_ monitor GC timing with `PerformanceObserver`. A route that handles 10 RPS fine may jank at 500 RPS once old-gen GC kicks in.
-
-### 4. Assuming `null`ing a variable immediately frees memory
-
-Setting a variable to `null` removes the reference, but the object is only collected when V8 schedules the next GC cycle. You cannot force immediate collection in production code.
-
-<Callout type="warn">
-  `global.gc()` only works when Node.js is started with `--expose-gc`. Never
-  rely on this in production — it exists for testing and profiling only.
-</Callout>
-
-### 5. Event listeners as hidden memory roots
-
-```ts
-// ❌ Each call adds a new listener — previous closures are never released
-function setupHandler(emitter: EventEmitter, data: LargeObject) {
-  emitter.on("data", () => {
-    process(data); // data is retained as long as the listener exists
-  });
-}
-
-// ✅ Remove listeners when no longer needed
-function setupHandlerFixed(emitter: EventEmitter, data: LargeObject) {
-  const handler = () => process(data);
-  emitter.on("data", handler);
-  return () => emitter.off("data", handler); // return cleanup function
-}
-```
+**5. Using `FinalizationRegistry` for critical cleanup.** Callbacks are not deterministic and may never run. Use explicit `dispose()` / cleanup functions for resources that must be released.
 
 ---
 
 ## Summary
 
-JavaScript GC is generational: short-lived objects are cheap to collect, long-lived ones are expensive. You can't control when GC runs, but you can reduce how often the expensive old-generation cycle is needed by minimizing allocations in hot paths and releasing references before async boundaries. Use `PerformanceObserver` with `type: 'gc'` to measure real GC impact in Node.js. The most common production issues come from accidental long-lived references — in closures, event listeners, and unbounded caches. Write code that lets objects die young, and GC becomes nearly invisible.
+V8's generational GC separates short-lived objects (young generation, fast minor GC) from long-lived objects (old generation, expensive major GC). Incremental marking and concurrent GC reduce stop-the-world pauses for typical heap sizes to 5–20ms. Oilpan manages DOM node memory independently from V8's JavaScript heap. You can't control when GC runs, but you can reduce old-generation pressure by: extracting primitives before `await` boundaries, implementing TTL eviction on caches, avoiding module-level maps that grow indefinitely, and releasing event listener and timer references on cleanup. Use `PerformanceObserver` with `type: 'gc'` to measure real GC timing in Node.js. Use `FinalizationRegistry` only as a safety net for external resource cleanup — never as primary lifecycle management.
+
+---
+
+## Interview Questions
+
+**Q1. What is a generational garbage collector and why does it improve performance for typical web workloads?**
+
+A generational collector exploits the observation that most objects die young — they're allocated for a single function call, a render pass, or a network response, and become unreachable quickly. V8 divides the heap into a young generation (new objects) and an old generation (survivors). The young generation is collected frequently but cheaply via a "scavenge" algorithm: live objects are copied to a new semi-space, the old semi-space is discarded entirely, and the copy serves as compaction. Because most young objects are dead, only a small fraction is copied. Objects that survive multiple scavenges are promoted to the old generation, which is collected infrequently but more expensively with mark-sweep-compact. The result: most allocations pay only the cheap young-gen cost; the expensive old-gen cycle runs rarely.
+
+**Q2. How does V8 avoid stop-the-world pauses during major GC?**
+
+A naive major GC would pause all JavaScript execution while it marks the entire reachable object graph — potentially hundreds of milliseconds on large heaps. V8 uses three techniques to reduce pause time: incremental marking breaks the marking phase into small ~1ms increments interleaved with normal JS execution; concurrent marking runs marking on background threads in parallel with JS, requiring only a short "final remark" stop-the-world pause to handle objects mutated during concurrent marking; parallel sweeping and compaction use background threads for the sweep and compact phases. Together, these reduce major GC pauses to typically 5–20ms for average web app heaps, making them largely imperceptible at 60fps.
+
+**Q3. What is Oilpan and why can detached DOM nodes sometimes appear to leak even after JS references are cleared?**
+
+Oilpan is Chromium's C++ garbage collector that manages the memory of DOM nodes, layout objects, and other Blink (rendering engine) objects. V8 manages JavaScript heap objects; Oilpan manages the backing C++ objects. The two GC systems cooperate at their boundary: when a JS wrapper object (e.g., an `HTMLDivElement` JS binding) becomes unreachable in V8, Oilpan can eventually collect the underlying C++ DOM node. However, they run on independent schedules. If a JS reference is cleared, V8 may collect the JS wrapper, but Oilpan's next collection cycle hasn't run yet, so the C++ DOM node remains in memory temporarily. This is why `performance.measureUserAgentSpecificMemory()` or a second DevTools heap snapshot taken immediately after clearing a reference may still show DOM memory — Oilpan hasn't swept yet.
+
+**Q4. What is `FinalizationRegistry` and what are its limitations?**
+
+`FinalizationRegistry` allows you to register a callback that runs after a specific object is garbage collected. You call `registry.register(target, heldValue)` — when `target` is GC'd, the callback is called with `heldValue`. It's useful as a safety net for releasing external resources (file handles, native buffers, WebAssembly memory) associated with a JS wrapper. Limitations: the timing of the callback is not guaranteed — it may run long after the object is collected, or not at all if the tab closes or the engine decides not to run finalizers. The specification explicitly says "the callback may not be called." The `heldValue` must not be a reference to `target` itself (to avoid preventing collection). `FinalizationRegistry` is appropriate as a last-resort cleanup safety net; explicit `dispose()` calls, `using` declarations (TC39 Explicit Resource Management proposal), or `finally` blocks are always the correct primary mechanism.
+
+**Q5. Why does holding a large object reference across an `await` boundary prevent garbage collection?**
+
+When an async function suspends at an `await`, V8 saves the function's entire execution context — including all variables in scope — as a "continuation" object so it can resume later. Variables in scope at the `await` point are referenced by this continuation, making them GC roots for the duration of the suspension. If `rawData` is a 10MB buffer in scope when you `await writeToDatabase(summary)`, it cannot be collected until the async function fully resolves, even if no code after the `await` uses it. V8's escape analysis can sometimes elide this retention for variables that are demonstrably unused after the `await`, but this is not guaranteed. The explicit fix is to extract needed values into primitives or smaller structures before the `await`, then allow the large object to go out of scope.
+
+**Q6. What triggers a major GC cycle and how can you reduce its frequency in a high-throughput Node.js server?**
+
+Major GC is triggered when the old generation heap grows beyond V8's dynamic threshold (which adjusts based on allocation rate and available system memory) or when an allocation request fails ("AllocationFailure"). You can't control the exact trigger point, but you can reduce frequency by: (1) minimising object promotion — short-lived objects that die before two scavenge cycles never enter the old generation; (2) reusing objects in hot paths instead of creating new ones per request; (3) releasing references to large objects before `await` boundaries so they stay in the young generation; (4) using bounded caches with TTL eviction so cached objects are reclaimed before they age into the old generation; (5) profiling allocation with Node.js's `--heap-prof` or `v8.writeHeapSnapshot()` to identify which code paths are responsible for sustained old-generation growth.

@@ -14,26 +14,24 @@ A curated reference of frontend concepts built to understand the _why_ behind th
 
 ## What's inside
 
-Documentation is organized into **16 categories** under `/docs/frontend`:
+Documentation is organized into **14 categories** under `/docs/frontend`:
 
-| Category                             | Topics                                                                              |
-| ------------------------------------ | ----------------------------------------------------------------------------------- |
-| **Rendering & Browser Pipeline**     | Hydration, SSR, concurrent rendering, critical path, compositing, render waterfalls |
-| **Component & UI Architecture**      | Server Components, Suspense, edge rendering, Shadow DOM, error boundaries           |
-| **State Management & Data Patterns** | Race conditions, optimistic UI, derived state, URL as state                         |
-| **JavaScript Runtime & Async**       | Event loop, macrotasks/microtasks, AbortController, WebSockets vs SSE               |
-| **Bundling & Code Delivery**         | Tree shaking, code splitting, module federation, monorepo tooling                   |
-| **Caching & Storage**                | HTTP caching, IndexedDB, service workers, cache invalidation                        |
-| **Networking & Protocols**           | HTTP/3 & QUIC, CORS, SameSite cookies, auth flows                                   |
-| **Security**                         | CSP, Trusted Types, CSRF/XSS, dependency supply chain                               |
-| **CSS & Layout**                     | Containment, layout thrashing, design tokens, responsive strategies                 |
-| **Browser Observation APIs**         | IntersectionObserver, MutationObserver, PerformanceObserver, Long Tasks             |
-| **Performance & Core Web Vitals**    | LCP, INP, CLS, FID, Lighthouse CI, RUM vs synthetic                                 |
-| **Memory & Garbage Collection**      | Leak detection, detached DOM, GC timing                                             |
-| **Concurrency & Workers**            | Web Workers vs Service Workers                                                      |
-| **Accessibility**                    | Accessibility tree, ARIA live regions, focus management, keyboard patterns          |
-| **DevX & Delivery**                  | Feature flags, CI/CD, error tracking, i18n, design systems                          |
-| **Architecture & Decision Making**   | ADRs, API contracts, framework selection, technical debt                            |
+| Category                             | Topics                                                                                          |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| **JavaScript Runtime & Async**       | Event loop, macrotasks/microtasks, promise combinators, async/await, AbortController, concurrency vs parallelism, Web Workers vs Service Workers |
+| **Rendering & Browser Pipeline**     | Critical path, compositing, hydration strategies, streaming SSR, SSR vs SSG vs ISR, RSC model, concurrent rendering, fiber, reconciliation, View Transitions, image & font optimization, React 19 & React Compiler |
+| **CSS & Layout**                     | CSS architecture, containment, container queries, layout thrashing, animation performance, design tokens, responsive strategies, scroll-driven animations |
+| **Component & UI Architecture**      | Server Components, Suspense, error boundaries, compound components, headless UI, portals |
+| **State Management & Data Patterns** | Derived vs redundant state, immutability, memoization pitfalls, URL as state, data fetching, race conditions, optimistic UI, idempotent UI actions, offline conflict resolution |
+| **Bundling & Code Delivery**         | Tree shaking, code splitting, bundle analysis, preload/prefetch/priority hints, monorepo tooling |
+| **Caching & Storage**                | HTTP caching, cache invalidation, CDN purging, service worker lifecycle, IndexedDB |
+| **Networking & Protocols**           | HTTP/3 & QUIC, CORS & preflight, SameSite cookies, auth flows, REST vs GraphQL vs tRPC, WebSockets vs SSE vs long polling, client-side rate limiting, Navigation API |
+| **Security**                         | CSRF/XSS mitigation, CSP, Trusted Types, secrets management, prototype pollution, dependency supply chain |
+| **Performance & Core Web Vitals**    | LCP, CLS, INP, third-party scripts, RUM vs synthetic, performance budgets, Lighthouse CI, IntersectionObserver, MutationObserver, PerformanceObserver, Long Tasks API, Speculation Rules API |
+| **Memory & Garbage Collection**      | GC timing, memory leak detection, detached DOM nodes, Chrome DevTools profiling                  |
+| **Accessibility**                    | Accessibility tree, ARIA live regions, focus management, keyboard navigation, color contrast & motion |
+| **DevX & Delivery**                  | CI/CD pipelines, feature flags, error tracking & observability, design system versioning, i18n architecture |
+| **Architecture & Decision Making**   | Framework selection, API contract design, ADRs, technical debt identification & prioritization   |
 
 Content is written in **MDX** and driven by Fumadocs (search, sidebar, and docs layout included).
 

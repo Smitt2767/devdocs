@@ -1,31 +1,27 @@
 ---
 title: CI/CD Pipelines for Frontend
-description: A practical guide to setting up continuous integration and deployment pipelines for modern frontend applications using GitHub Actions.
+description: A complete frontend CI/CD pipeline — lint, typecheck, unit tests, matrix Node testing, bundle size gating with size-limit, Lighthouse CI, preview deployments, post-deploy smoke tests, dependency caching, OIDC authentication, and turbo remote caching for monorepos.
 ---
 
 ## Overview
 
-CI/CD stands for Continuous Integration and Continuous Deployment. In a frontend context, it means every code change you push automatically gets linted, tested, built, and deployed — without manual steps.
+CI/CD stands for Continuous Integration and Continuous Deployment. Every code change pushed automatically gets linted, type-checked, tested, built, and deployed — without manual steps.
 
-For a Next.js app, this translates to: push to `main` → run checks → deploy to production. Push to a feature branch → run checks → deploy a preview URL.
-
-This removes "it works on my machine" problems, catches regressions early, and makes shipping fast and repeatable.
+For a Next.js app: push to `main` → run checks → deploy to production. Push to a feature branch → run checks → deploy a unique preview URL. This removes "it works on my machine" problems, catches regressions early, and makes shipping fast and repeatable.
 
 ---
 
 ## How It Works
 
-A CI/CD pipeline is a series of automated steps (called **jobs**) that run on a remote server (called a **runner**) whenever a trigger fires — usually a `git push` or a pull request.
-
-Think of it like an assembly line in a factory. Raw material (your code) enters one end. Each station (lint, test, build, deploy) does one job. Only a passing product exits the other end into production.
+A CI/CD pipeline is a sequence of automated **jobs** that run on a **runner** (a temporary Linux VM) whenever a trigger fires — usually a `git push` or pull request event.
 
 The three phases:
 
-- **CI (Continuous Integration):** Validate the code. Run linters, type checks, and tests. Fail fast if something is broken.
-- **Build:** Compile the application into optimized static or server-rendered output.
-- **CD (Continuous Deployment):** Ship the built output to a hosting platform automatically.
+- **CI (Continuous Integration):** Validate the code. Run linters, type checks, unit tests, and quality gates. Fail fast.
+- **Build:** Compile the application into optimized output. Run bundle size checks and Lighthouse audits against the build artifact.
+- **CD (Continuous Deployment):** Ship the built output to hosting. Deploy previews for PRs; promote to production on merge.
 
-GitHub Actions is the most common tool for this because it's tightly integrated with GitHub, free for public repos, and uses a simple YAML config.
+GitHub Actions is the standard tool for this — YAML-configured, tightly integrated with GitHub, and free for public repos.
 
 ---
 
@@ -37,193 +33,347 @@ GitHub Actions is the most common tool for this because it's tightly integrated 
 your-app/
 ├── .github/
 │   └── workflows/
-│       └── ci-cd.yml   # Pipeline definition lives here
+│       ├── ci.yml       # lint, typecheck, test, size, lighthouse
+│       └── deploy.yml   # preview + production deploy
 ├── app/
-├── components/
 ├── package.json
 └── next.config.ts
 ```
 
-### Basic GitHub Actions Pipeline
+---
 
-This pipeline runs on every push to `main` and on all pull requests.
+### Full CI Pipeline
 
 ```yaml
-# .github/workflows/ci-cd.yml
-
-name: CI/CD Pipeline
+# .github/workflows/ci.yml
+name: CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
 
 jobs:
-  ci:
-    name: Lint, Typecheck & Test
+  # ── Lint & Type Check ─────────────────────────────────────────────────────
+  quality:
+    name: Lint & Typecheck
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm" # caches ~/.npm keyed to package-lock.json hash
+
+      - run: npm ci # deterministic install from lockfile — never npm install
+
+      - run: npm run lint
+
+      - run: npx tsc --noEmit # type-check without producing build output
+
+  # ── Unit Tests ────────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: quality # only run if lint/typecheck passes
+
+    strategy:
+      matrix:
+        node-version: [18, 20, 22] # test across supported Node.js versions
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: "npm"
+
+      - run: npm ci
+
+      - run: npm test -- --coverage --passWithNoTests
+        env:
+          CI: true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-node-${{ matrix.node-version }}
+          path: coverage/
+
+  # ── Build + Bundle Size Gate ──────────────────────────────────────────────
+  build:
+    name: Build & Bundle Size
+    runs-on: ubuntu-latest
+    needs: quality
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: "npm"
 
-      - name: Install dependencies
-        run: npm ci # Use ci instead of install — faster, uses lockfile exactly
+      - run: npm ci
 
-      - name: Run ESLint
-        run: npm run lint
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
+          # Never prefix server-only secrets with NEXT_PUBLIC_ —
+          # doing so embeds them in the client-side JS bundle
 
-      - name: Run TypeScript type check
-        run: npx tsc --noEmit # Checks types without emitting build output
+      - name: Check bundle size
+        run: npx size-limit
+        # size-limit config lives in package.json — fails if any chunk exceeds limit
 
-      - name: Run tests
-        run: npm test -- --passWithNoTests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: next-build
+          path: .next/
+          retention-days: 1 # short TTL — only needed for subsequent jobs
 
-  deploy:
-    name: Deploy to Vercel
+  # ── Lighthouse CI ─────────────────────────────────────────────────────────
+  lighthouse:
+    name: Lighthouse CI
     runs-on: ubuntu-latest
-    needs: ci # Only runs if the ci job passes
-    if: github.ref == 'refs/heads/main' # Only deploy from main branch
+    needs: build
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Deploy to Vercel
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: next-build
+          path: .next/
+
+      - run: npx lhci autorun
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+```
+
+---
+
+### `size-limit` Configuration
+
+```json
+// package.json
+{
+  "size-limit": [
+    {
+      "path": ".next/static/chunks/main-*.js",
+      "limit": "80 kB"
+    },
+    {
+      "path": ".next/static/chunks/pages/index-*.js",
+      "limit": "50 kB"
+    }
+  ],
+  "scripts": {
+    "size": "size-limit"
+  }
+}
+```
+
+`size-limit` reports gzipped sizes by default. It exits with a non-zero code if any chunk exceeds its limit, failing the CI step and blocking the PR.
+
+---
+
+### Deploy Pipeline — Preview + Production
+
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write # required for OIDC token exchange
+  contents: read
+  pull-requests: write
+
+jobs:
+  preview:
+    name: Preview Deploy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy Preview to Vercel
+        uses: amondnet/vercel-action@v25
+        id: deploy
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Comment preview URL on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `✅ Preview: ${{ steps.deploy.outputs.preview-url }}`
+            })
+
+  production:
+    name: Production Deploy
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production # gates on GitHub environment protection rules
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Vercel (Production)
         uses: amondnet/vercel-action@v25
         with:
           vercel-token: ${{ secrets.VERCEL_TOKEN }}
           vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
           vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          vercel-args: "--prod" # Promotes to production environment
+          vercel-args: "--prod"
+
+  # ── Post-Deploy Smoke Test ─────────────────────────────────────────────────
+  smoke:
+    name: Post-Deploy Smoke Test
+    runs-on: ubuntu-latest
+    needs: production
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run smoke tests against production
+        run: npx playwright test --project=chromium tests/smoke/
+        env:
+          BASE_URL: https://myapp.com # test against live production URL
 ```
 
-<Callout type="info">
-  Store sensitive values like `VERCEL_TOKEN` in **GitHub → Settings → Secrets
-  and variables → Actions**. Never hardcode tokens in your YAML file.
-</Callout>
+---
 
-### Adding a Preview Deployment for Pull Requests
+### Monorepo — Turbo Remote Caching
 
-```yaml
-# Add this as a separate job inside the same ci-cd.yml
-
-preview:
-  name: Deploy Preview
-  runs-on: ubuntu-latest
-  needs: ci
-  if: github.event_name == 'pull_request' # Only runs on PRs, not pushes to main
-
-  steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Deploy Preview to Vercel
-      uses: amondnet/vercel-action@v25
-      id: vercel-deploy
-      with:
-        vercel-token: ${{ secrets.VERCEL_TOKEN }}
-        vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
-        vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-        # No --prod flag here, so it creates a preview URL
-
-    - name: Comment preview URL on PR
-      uses: actions/github-script@v7
-      with:
-        script: |
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: `✅ Preview deployed: ${{ steps.vercel-deploy.outputs.preview-url }}`
-          })
-```
-
-### Caching Dependencies for Faster Runs
-
-Without caching, `npm ci` downloads all packages on every run. With caching, subsequent runs skip the download if `package-lock.json` hasn't changed.
+In a Turbo monorepo, cache task outputs remotely so unchanged packages skip re-running:
 
 ```yaml
-- name: Setup Node.js with cache
-  uses: actions/setup-node@v4
+# add to the build job, after checkout
+- name: Setup Turbo remote cache
+  uses: dtinth/setup-turbo-remote-cache@v1
   with:
-    node-version: 20
-    cache: "npm" # Caches ~/.npm based on package-lock.json hash
+    server: https://turborepo-cache.mycompany.internal
+    token: ${{ secrets.TURBO_TOKEN }}
+
+- name: Build affected packages
+  run: npx turbo build --filter="...[origin/main]"
+  # --filter runs only packages changed since origin/main
+  # Cache hits skip the build entirely — often 10× faster on large monorepos
 ```
 
-This alone can cut pipeline time from 2–3 minutes to under 30 seconds on a warm cache.
+---
 
-### Environment Variables at Build Time
+### Lighthouse CI Config
 
-For Next.js, public environment variables (prefixed with `NEXT_PUBLIC_`) need to be available during the build step.
-
-```yaml
-- name: Build Next.js app
-  run: npm run build
-  env:
-    NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
-    # Server-only vars don't need NEXT_PUBLIC_ prefix
-    DATABASE_URL: ${{ secrets.DATABASE_URL }}
+```js
+// lighthouserc.js
+export default {
+  ci: {
+    collect: {
+      staticDistDir: "./.next",
+      numberOfRuns: 3,
+    },
+    assert: {
+      preset: "lighthouse:no-pwa",
+      assertions: {
+        "categories:performance": ["error", { minScore: 0.85 }],
+        "categories:accessibility": ["error", { minScore: 0.9 }],
+        "largest-contentful-paint": ["error", { maxNumericValue: 2500 }],
+        "cumulative-layout-shift": ["error", { maxNumericValue: 0.1 }],
+        "total-blocking-time": ["warn", { maxNumericValue: 300 }],
+      },
+    },
+    upload: { target: "temporary-public-storage" },
+  },
+};
 ```
-
-<Callout type="warn">
-  Never prefix server-only secrets with `NEXT_PUBLIC_`. Doing so exposes them in
-  the client-side JavaScript bundle.
-</Callout>
 
 ---
 
 ## Real-World Use Case
 
-You're building a SaaS dashboard with a team of five developers. Every developer opens a pull request for their feature. The pipeline automatically:
-
-1. Runs ESLint to catch code style issues before code review.
-2. Runs TypeScript checks to catch type errors.
-3. Deploys a unique preview URL (e.g., `my-app-pr-42.vercel.app`) so teammates and designers can review the feature in a real browser without pulling the branch locally.
-
-When the PR merges into `main`, the deploy job fires automatically and the new code is live in production within 2 minutes — no manual deployment commands, no FTP uploads, no SSH sessions.
+A SaaS team of five pushes 15 PRs per week. Every PR gets: linting (catches style issues before review), type checking (catches interface drift), unit tests on Node 18/20/22 (prevents version-specific regressions), a bundle size check (blocked a 40 kB accidental moment.js import last quarter), Lighthouse CI (catches LCP regressions from new images), and a preview URL posted to the PR for design review. Merges to `main` auto-deploy to production in under 3 minutes, followed by a smoke test that verifies the homepage, login, and checkout routes return 200 OK.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Using `npm install` instead of `npm ci` in pipelines**
+**1. Using `npm install` instead of `npm ci`.** `npm install` can silently update packages and doesn't guarantee a reproducible build. `npm ci` installs exactly from `package-lock.json` and fails on mismatch.
 
-`npm install` can silently update packages and doesn't guarantee a reproducible build. `npm ci` installs exactly what's in `package-lock.json` and fails if there's a mismatch. Always use `npm ci` in CI environments.
+**2. Missing `needs` between jobs.** Without `needs: ci`, the deploy job can run in parallel with failing tests — deploying broken code. Always chain jobs with `needs`.
 
-**2. Running jobs in parallel when they have dependencies**
+**3. Prefixing server secrets with `NEXT_PUBLIC_`.** This embeds the value in the client-side JS bundle. Server-only secrets must not have the `NEXT_PUBLIC_` prefix.
 
-If your `deploy` job runs at the same time as your `ci` job, you can deploy broken code. Use `needs: ci` to enforce job ordering — deploy only runs after `ci` passes.
+**4. No branch guard on production deploys.** Without `if: github.ref == 'refs/heads/main'`, every PR branch can trigger a production deployment.
 
-**3. Forgetting to set secrets for all environments**
-
-A pipeline that works in CI can fail silently in production because an environment variable exists locally but wasn't added to GitHub Secrets. Audit your `.env.example` file and make sure every variable it lists has a corresponding secret in GitHub.
-
-**4. Not scoping deployments by branch**
-
-Without `if: github.ref == 'refs/heads/main'`, your deploy job runs on every PR branch — potentially overwriting production. Always guard production deploys with a branch condition.
-
-**5. Committing large build artifacts**
-
-Never commit `.next/`, `dist/`, or `out/` directories. Add them to `.gitignore`. The pipeline builds these fresh from source on every run. Committing them bloats the repo and causes merge conflicts.
-
-<Callout type="warn">
-  If your pipeline takes longer than 5 minutes, it's a signal to profile which
-  step is slow. Usually it's missing dependency caching or running too many
-  tests sequentially that could be parallelized.
-</Callout>
+**5. Committing build artifacts.** Never commit `.next/`, `dist/`, or `out/`. These are generated by the pipeline from source.
 
 ---
 
 ## Summary
 
-CI/CD pipelines automate the process of validating, building, and deploying your frontend app on every code change. GitHub Actions is the standard tool for this, configured via YAML files in `.github/workflows/`. A well-structured pipeline separates concerns into distinct jobs — lint/test, build, and deploy — with `needs` dependencies to enforce order. Preview deployments on pull requests give teams a fast feedback loop without touching production. The most common mistakes are skipping dependency caching, missing branch guards on deploy jobs, and leaking secrets through `NEXT_PUBLIC_` prefixes.
+A complete frontend pipeline has five distinct concerns: code quality (lint, typecheck), correctness (unit tests, matrix Node versions), build verification (bundle size, Lighthouse CI), deployment (preview for PRs, production on merge), and post-deploy confidence (smoke tests). Dependency caching with `actions/setup-node@v4` `cache: "npm"` alone cuts install time from minutes to seconds on warm cache. Gate production deployments on GitHub Environments for manual approval workflows. In monorepos, Turbo remote caching skips unchanged package builds — crucial for keeping CI times under 5 minutes at scale.
+
+---
+
+## Interview Questions
+
+**Q1. What is the difference between `npm ci` and `npm install`, and why does it matter in a CI pipeline?**
+
+`npm install` reads `package.json` and updates `package-lock.json` as needed — it may install newer versions of packages within the semver range, producing non-deterministic builds across runs. It also adds any missing packages and continues if there's a lockfile mismatch. `npm ci` reads `package-lock.json` exclusively and installs exactly those versions — if `package.json` and `package-lock.json` disagree, it fails. It also deletes `node_modules` before installing to guarantee a clean slate. In CI, you always want `npm ci` because it produces a reproducible build: the same dependency tree on every run, on every machine, with no surprises from silent package upgrades.
+
+**Q2. What is the purpose of `needs` in a GitHub Actions workflow and what happens without it?**
+
+`needs` declares a job dependency — a job with `needs: ci` will not start until the `ci` job completes successfully. Without it, all jobs in a workflow start in parallel. The consequence in a CI/CD pipeline: the `deploy` job starts at the same time as `test`. If tests fail, the deployment has already started (or completed). You ship broken code to production. `needs` enforces the assembly-line ordering: quality gates must pass before the build runs; the build must succeed before deployment; deployment must complete before smoke tests run. If any upstream job fails, all downstream jobs are skipped automatically.
+
+**Q3. How does `size-limit` work and what does it prevent?**
+
+`size-limit` analyzes your production build output, computes the gzipped and parsed sizes of specified chunks or entry points, and compares them against limits defined in `package.json` (or `.size-limit.json`). If any file exceeds its limit, it exits with a non-zero code, failing the CI step. It's a budget gate: you define the maximum acceptable cost for a chunk, and the pipeline enforces it on every PR. It prevents "accidental import" regressions — a developer adds `import moment from "moment"` (520 kB minified), which would inflate the bundle, but the PR fails because the `main-*.js` chunk now exceeds its 80 kB limit. Without this gate, bundle bloat accumulates silently across many PRs until it's noticed by a performance alert in production.
+
+**Q4. What is a post-deploy smoke test and why should it run against the live production URL rather than a staging environment?**
+
+A post-deploy smoke test is a minimal automated test suite that runs immediately after a production deployment completes, verifying that the most critical user journeys work in the live environment. Typically: homepage returns 200, the login page renders, a key authenticated route loads without error. Running against production (not staging) is important because staging often diverges from production: different database state, different environment variables, different CDN behaviour, different third-party API endpoints. A smoke test that passes in staging but fails in production provides false confidence. Running against the actual deployed URL after every production release catches deployment failures, configuration mistakes, and environment-specific bugs within minutes of the deploy completing — before users encounter them.
+
+**Q5. What is a GitHub Actions `environment` and how does it add safety to production deployments?**
+
+A GitHub Actions `environment` (configured in the repository's Settings → Environments) adds required protection rules to a job before it runs. The two most important: **required reviewers** (named individuals who must manually approve the deployment before the job starts) and **wait timer** (a configurable delay before proceeding, useful for observing metrics after a staging deploy). The `production` environment also has its own secrets vault — secrets scoped to that environment are only available to jobs targeting it, preventing accidental use of production credentials in PR preview pipelines. Using `environment: production` on your deploy job means merges to `main` still trigger the workflow, but the production deployment step is gated behind manual approval from a senior engineer, preventing accidental or automated deploys when the approval process is intentional.
+
+**Q6. How does Turbo remote caching work and why is it significant in a monorepo CI pipeline?**
+
+Turbo (Turborepo) gives every build task a content hash based on its inputs — source files, dependencies, and environment variables. When a task runs, its output (compiled files, test results) is stored in a cache keyed by this hash. On subsequent runs, if the hash matches (inputs haven't changed), Turbo restores the cached output instead of re-running the task. Remote caching stores these cache entries on a shared server (Vercel's remote cache, a self-hosted endpoint, or Buildkite) so that the cache is shared across all CI runners and all developers. In a monorepo with 20 packages, a PR that changes only `packages/checkout` skips rebuilding all other 19 packages (their hashes are unchanged). Build time drops from 10 minutes to under a minute. Combined with `--filter="...[origin/main]"` (only run tasks for packages changed since the last merge), remote caching makes large-monorepo CI viable without splitting repositories.

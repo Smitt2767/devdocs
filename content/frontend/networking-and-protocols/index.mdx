@@ -1,26 +1,30 @@
 ---
 title: Overview
-description: The network layer between your frontend and the server — HTTP evolution, browser security policies, API design, and authentication flows.
+description: The network layer between your frontend and the server — HTTP evolution, browser security policies, authentication flows, API design paradigms, and client-side resilience patterns.
 ---
 
 ## Networking & Protocols
 
 Frontend engineers interact with the network constantly but often treat it as a black box. Understanding the protocols, security boundaries, and authentication models at this layer is essential for building reliable, secure applications — and for diagnosing the class of bugs that only appear in production.
 
-The section moves from the transport layer up through browser security policy, identity, API design, and finally resilience.
+The section moves from the transport layer upward through browser security policy, identity, API design, and client resilience.
 
-## What's covered
+---
 
-**HTTP/3 & QUIC** — How HTTP/3 eliminates head-of-line blocking by running over QUIC (UDP-based) instead of TCP, and what this means for connection setup latency and multiplexed streams.
+## What's Covered
 
-**CORS & Preflight** — Why cross-origin requests are restricted, how the browser's preflight handshake works, and the exact `Access-Control-*` headers needed to configure it correctly.
+**HTTP/3 & QUIC** — How HTTP/3 eliminates transport-layer head-of-line blocking by running streams independently over QUIC (UDP-based) rather than TCP's single ordered byte stream. QUIC's 1-RTT connection setup, 0-RTT session resumption for returning clients (and its replay-vulnerability requiring idempotent-only use), Connection IDs enabling seamless IP migration, and BBR congestion control outperforming CUBIC on lossy mobile links. `Alt-Svc` header-based HTTP/3 discovery vs HTTPS DNS SVCB records for first-request HTTP/3. UDP firewall detection and automatic TCP fallback. Verifying protocol usage with `PerformanceResourceTiming.nextHopProtocol` in RUM pipelines.
 
-**SameSite Cookie Modes** — `Strict`, `Lax`, and `None` — how each affects when cookies are sent in cross-site requests, and how this interacts with CSRF protection.
+**CORS & Preflight** — The Same-Origin Policy as the underlying browser rule and CORS as its server-controlled relaxation. Simple vs non-simple request classification (the `Content-Type: application/json` and `Authorization` header triggers). The preflight `OPTIONS` handshake with `Access-Control-Allow-Origin`, `Allow-Methods`, `Allow-Headers`, and `Max-Age` for caching. Credentialed requests (`credentials: 'include'`) and why wildcards are forbidden with credentials. `Access-Control-Expose-Headers` for custom response header access. Chrome's Private Network Access additional preflight for public→private address requests. The `null` origin from sandboxed iframes and why reflecting it is dangerous. A DevTools debugging workflow for CORS errors.
 
-**Authentication Flows** — Session cookies, JWTs, OAuth 2.0, and OpenID Connect — how each flow works mechanically and where each is the right fit.
+**SameSite Cookie Modes** — `Strict`, `Lax`, and `None` mode comparison with the full cross-site request matrix. The eTLD+1 same-site calculation and why `app.example.com` and `api.example.com` are same-site. Chrome 80's Lax-by-default change and how it broke unattributed third-party cookies. `__Host-` and `__Secure-` cookie prefixes as browser-enforced security guarantees. CHIPS (Partitioned cookies) for third-party iframe contexts that survive third-party cookie deprecation. Safari ITP restrictions on `SameSite=None` cookies and the Storage Access API. Why `Strict` breaks OAuth redirect flows and password manager links.
 
-**API Paradigms** — REST, GraphQL, tRPC, and their trade-offs for type safety, client flexibility, caching, and team ergonomics.
+**Authentication Flows** — OAuth 2.0 Authorization Code Flow with PKCE: `code_verifier`/`code_challenge` generation, state parameter CSRF protection, back-channel token exchange. `id_token` vs `access_token` vs `refresh_token` — what each is for and who should see it. JWT structure (header.payload.signature), `httpOnly` cookie storage vs `localStorage` (XSS risk matrix). Refresh token rotation with reuse detection — detecting token theft by recognizing a used token being presented again and revoking the entire token family. Silent refresh with in-flight deduplication to prevent the rotation race condition. Auth.js v5 setup for Next.js App Router.
 
-**Rate Limiting on the Client** — Implementing exponential backoff, jitter, and request queuing to handle rate limit responses gracefully without hammering an API.
+**REST vs GraphQL vs tRPC** — REST with `zod-openapi` for automatic OpenAPI spec generation. URL vs header API versioning tradeoffs (cacheability, discoverability, client configuration). GraphQL N+1 prevention with DataLoader (batching + deduplication within a tick). Persisted queries for production security and performance. tRPC with `createCallerFactory` for direct procedure calls in Server Components without HTTP round-trips. tRPC subscriptions over WebSocket/SSE. Decision framework: REST for public/multi-consumer APIs, GraphQL for diverse-consumer query flexibility, tRPC for internal TypeScript monorepos.
 
-**WebSockets vs SSE vs Long Polling** — The three approaches to real-time server-to-client communication, with their respective trade-offs in connection overhead, browser support, and infrastructure complexity.
+**WebSockets vs SSE vs Long Polling** — Three real-time communication strategies compared at the protocol level. Long polling: hold-and-release HTTP cycle with server-side timeout (20–30s under proxy limits), exponential backoff with jitter on failure, `lastId`-based resumption. SSE: persistent `text/event-stream` connection with the four SSE fields (`data:`, `event:`, `id:`, `retry:`), `Last-Event-ID` auto-reconnection for gap-free resumption, named events for multiplexing streams over a single `EventSource`, and the HTTP/1.1 six-connection-per-origin limit (solved by HTTP/2 multiplexing). WebSockets: HTTP `Upgrade` handshake with `Sec-WebSocket-Key`/`Accept` verification, frame types (text `0x1`, binary `0x2`, close `0x8`, ping `0x9`, pong `0xA`), client-to-server frame masking to prevent proxy cache poisoning, server-side heartbeat (ping/pong) for dead connection detection. AI token streaming as the dominant SSE use case (OpenAI-style `text/event-stream`). Reusable `useWebSocket` hook with auto-reconnect and exponential backoff. Decision framework: default to SSE for server-push, WebSockets only for bidirectional high-frequency communication, long polling only as a proxy-constrained fallback.
+
+**Client-Side Rate Limiting** — Parsing `429` responses: `Retry-After` as both number-of-seconds and HTTP-date formats, `X-RateLimit-Reset` Unix timestamp. Exponential backoff with full jitter (`random(0, min(cap, base × 2^n))`) vs equal jitter for minimum wait guarantees. Retryable vs non-retryable status codes (only `429` and `5xx`). In-flight request deduplication via a Promise map to prevent quota waste from concurrent identical requests. Token bucket proactive throttling — burst-allowing, rate-enforcing. Priority queue pattern for protecting user-initiated actions from background traffic. Live countdown UI with automatic re-enable after the rate window resets.
+
+**Navigation API** — The purpose-built browser API for SPA navigation, replacing `History.pushState`/`popstate` which was designed for session history, not client-side routing. `navigation.navigate()` with `state` and `info` options, the `NavigateEvent` with `intercept({ handler })` for async transitions, `navigation.entries()` for full history inspection (unlike History API which only exposes `length`), `NavigationHistoryEntry` with stable `key` for deterministic `traverseTo()`. Back/forward detection via entry index comparison — impossible with the History API. Transition tracking with `navigation.transition.finished`. Chromium-only (Chrome 102+); progressive enhancement with History API fallback.

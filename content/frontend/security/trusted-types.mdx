@@ -1,202 +1,343 @@
 ---
 title: Trusted Types
-description: A browser security API that prevents DOM-based XSS attacks by enforcing safe handling of dangerous sinks like innerHTML and eval.
+description: The browser API that prevents DOM-based XSS by requiring all strings assigned to dangerous sinks to pass through a named policy — createHTML, createScript, createScriptURL, the nextjs policy name, @types/trusted-types, and a Report-Only migration workflow.
 ---
 
 ## Overview
 
-Trusted Types is a browser security API that locks down the most common vectors for DOM-based cross-site scripting (XSS). It does this by requiring that values assigned to "dangerous sinks" — like `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `eval`, and `document.write` — pass through a developer-defined policy before use.
+Trusted Types is a browser security API that prevents the most common class of DOM-based XSS: raw string injection into dangerous sinks like `innerHTML`, `eval`, `new Function`, `script.src`, and `document.write`.
 
-Without Trusted Types, any string in your JavaScript can be written directly into the DOM, which means a single unsanitized variable can execute attacker-controlled HTML. Trusted Types makes that category of bug impossible at the browser level, not just the linting level.
+Without Trusted Types, any JavaScript string can be written into these sinks directly. A single unsanitized variable flowing to `innerHTML` becomes a stored XSS vector. Trusted Types makes this category of bug impossible at the browser level: sinks now require typed wrappers (`TrustedHTML`, `TrustedScript`, `TrustedScriptURL`) that can only be created by named, developer-defined policies.
 
-It is enforced via a Content Security Policy (CSP) header and is natively supported in Chromium-based browsers. It also integrates cleanly with sanitization libraries like DOMPurify.
+It's enforced via a CSP directive, supported in all Chromium-based browsers (Chrome, Edge, Opera), and is a defence-in-depth layer on top of sanitization and CSP.
 
 ---
 
 ## How It Works
 
-The browser maintains a registry of **Trusted Types policies**. A policy is an object with methods (`createHTML`, `createScript`, `createScriptURL`) that accept a raw string and return a typed wrapper (`TrustedHTML`, `TrustedScript`, `TrustedScriptURL`).
+The browser maintains a **policy registry**. A policy is an object with optional methods:
 
-When you attempt to assign a value to a dangerous sink:
+- `createHTML(input: string) → string` — wraps sanitized HTML for `innerHTML` / `outerHTML`
+- `createScript(input: string) → string` — wraps script content for `eval` / `new Function`
+- `createScriptURL(input: string) → string` — wraps a URL for `script.src` / `import()`
 
-1. The browser checks if the value is already a Trusted Type.
-2. If it's a plain string, and Trusted Types enforcement is active, the browser throws a `TypeError`.
-3. If it's a `TrustedHTML` (for example), the assignment proceeds.
+When a script attempts to assign a plain string to a dangerous sink with enforcement active, the browser throws a `TypeError`. When it assigns a `TrustedHTML` / `TrustedScript` / `TrustedScriptURL` object, the assignment proceeds.
 
-Think of it like TypeScript for your DOM: the type system prevents you from accidentally passing unsafe values into sensitive positions — except this check runs in the browser at runtime, not at compile time.
-
-Enforcement is activated by sending this CSP header from your server:
+Enforcement is activated by the CSP directive:
 
 ```
 Content-Security-Policy: require-trusted-types-for 'script'
 ```
 
-You can also define an allowlist of named policies:
+You can also restrict which policy names are valid:
 
 ```
-Content-Security-Policy: require-trusted-types-for 'script'; trusted-types myPolicy dompurify
+Content-Security-Policy: require-trusted-types-for 'script'; trusted-types sanitize-html nextjs
 ```
+
+Only policies named `sanitize-html` and `nextjs` can be created; any other name throws.
 
 ---
 
 ## Code Examples
 
-### Defining and Using a Trusted Types Policy
+### Install TypeScript Support
+
+```bash
+npm install --save-dev @types/trusted-types
+```
+
+This adds `TrustedHTML`, `TrustedScript`, `TrustedScriptURL`, and `TrustedTypePolicyFactory` types to TypeScript.
+
+---
+
+### `createHTML` — Sanitized HTML for `innerHTML`
 
 ```ts
-// trusted-types-policy.ts
+// lib/trusted-types.ts
+import DOMPurify from "dompurify";
 
-// Create a named policy — this should be done once and reused
-const sanitizePolicy = trustedTypes.createPolicy("sanitize-html", {
-  createHTML(rawHTML: string): string {
-    // Use DOMPurify to strip any malicious tags/attributes
-    return DOMPurify.sanitize(rawHTML);
+// Create the policy once at module init — not per-render
+const htmlPolicy = trustedTypes.createPolicy("sanitize-html", {
+  createHTML(input: string): string {
+    // DOMPurify strips malicious tags, attributes, and event handlers
+    return DOMPurify.sanitize(input, {
+      ALLOWED_TAGS: ["p", "b", "i", "em", "strong", "a", "ul", "li", "br"],
+      ALLOWED_ATTR: ["href", "rel"],
+      FORCE_HTTPS: true, // reject javascript: and data: hrefs
+    });
   },
 });
 
-// Usage: assign sanitized HTML to an element
-const userContent = '<b>Hello</b><script>alert("xss")</script>';
-const container = document.getElementById("user-content");
+export function safeInnerHTML(element: Element, html: string): void {
+  // TypeScript: TrustedHTML is the return type — assignment accepted
+  element.innerHTML = htmlPolicy.createHTML(html) as unknown as string;
+  // The `as unknown as string` cast is a TypeScript workaround — the DOM API type
+  // declarations haven't fully integrated Trusted Types yet in all versions
+}
+```
 
-if (container) {
-  // Without Trusted Types, this would be a raw string assignment — dangerous.
-  // With the policy, DOMPurify runs first, and the browser accepts the TrustedHTML object.
-  container.innerHTML = sanitizePolicy.createHTML(userContent);
+```tsx
+// components/RichContent.tsx
+"use client";
+import { useEffect, useRef } from "react";
+import { safeInnerHTML } from "@/lib/trusted-types";
+
+export function RichContent({ html }: { html: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (ref.current) {
+      // ✅ Goes through DOMPurify policy — plain string assignment would throw
+      safeInnerHTML(ref.current, html);
+    }
+  }, [html]);
+
+  return <div ref={ref} />;
+}
+```
+
+---
+
+### `createScript` — Trusted Script Content
+
+The `createScript` sink governs `eval()`, `new Function()`, and similar execution contexts:
+
+```ts
+// lib/trusted-types.ts
+const scriptPolicy = trustedTypes.createPolicy("safe-eval", {
+  createScript(input: string): string {
+    // Validate the script is from a known safe source before allowing eval
+    // In practice, you should almost never use eval — this is for legacy migration
+    if (!input.startsWith("/* SAFE-EVALUATED */")) {
+      throw new TypeError(`createScript: untrusted script content`);
+    }
+    return input;
+  },
+});
+
+// Usage — instead of eval(expression):
+function safeEval(code: string): unknown {
+  // This will throw if Trusted Types is enforced and the code doesn't pass the policy
+  return eval(
+    scriptPolicy.createScript(
+      `/* SAFE-EVALUATED */ ${code}`,
+    ) as unknown as string,
+  );
 }
 ```
 
 <Callout type="warn">
-  Never call `trustedTypes.createPolicy` with `'default'` as the policy name in
-  production unless you fully understand the implications. A `default` policy
-  acts as a global fallback for all string-to-sink assignments, which can
-  inadvertently re-open the XSS surface you're trying to close.
+  `eval()` and `new Function()` are dangerous by nature and should be avoided
+  entirely in new code. The `createScript` policy exists primarily to help
+  migrate legacy code that uses them. If your codebase uses `eval`, the correct
+  goal is to eliminate it — not just gate it behind a policy.
 </Callout>
 
 ---
 
-### Enforcing Trusted Types in a Next.js App Router Project
+### `createScriptURL` — Trusted Script URLs
 
-In Next.js App Router, you control CSP headers via `next.config.ts` or middleware.
-
-```ts
-// middleware.ts
-import { NextResponse } from "next/server";
-import type { NextRequest } from "next/server";
-
-export function middleware(request: NextRequest) {
-  const response = NextResponse.next();
-
-  response.headers.set(
-    "Content-Security-Policy",
-    // Enforce Trusted Types for all script sinks
-    // Allow only explicitly named policies
-    "require-trusted-types-for 'script'; trusted-types sanitize-html dompurify",
-  );
-
-  return response;
-}
-
-export const config = {
-  // Apply to all routes
-  matcher: "/:path*",
-};
-```
-
-<Callout type="info">
-  Next.js's built-in script injection (e.g., `<Script>` component, React hydration) uses its own internal mechanisms. You may need to add `nextjs` to your `trusted-types` allowlist if the browser reports policy violations from framework internals. Check your browser console for `TrustedTypes` violation reports during development.
-</Callout>
-
----
-
-### Handling a `ScriptURL` Sink
+Governs `script.src`, `new Worker(url)`, `import(url)`, and `ServiceWorkerRegistration.register(url)`:
 
 ```ts
-// When dynamically loading scripts, use createScriptURL — not raw strings
+// lib/trusted-types.ts
+const ALLOWED_SCRIPT_ORIGINS = new Set([
+  "https://js.stripe.com",
+  "https://cdn.example.com",
+  location.origin,
+]);
+
 const urlPolicy = trustedTypes.createPolicy("safe-script-url", {
   createScriptURL(url: string): string {
-    const parsed = new URL(url);
+    const parsed = new URL(url, location.origin);
 
-    // Only allow scripts from your own origin or a known CDN
-    const allowedOrigins = ["https://cdn.yourdomain.com", location.origin];
-    if (!allowedOrigins.includes(parsed.origin)) {
-      throw new Error(`Blocked untrusted script URL: ${url}`);
+    if (!ALLOWED_SCRIPT_ORIGINS.has(parsed.origin)) {
+      throw new TypeError(
+        `createScriptURL: blocked URL from untrusted origin: ${parsed.origin}`,
+      );
     }
 
     return url;
   },
 });
 
-const script = document.createElement("script");
-// Assign a TrustedScriptURL, not a plain string
-script.src = urlPolicy.createScriptURL(
-  "https://cdn.yourdomain.com/analytics.js",
-) as unknown as string;
-document.head.appendChild(script);
+// Usage — dynamically loading a script
+export function loadScript(src: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    // ✅ Validated against allowlist — plain string assignment would throw
+    script.src = urlPolicy.createScriptURL(src) as unknown as string;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`Failed to load: ${src}`));
+    document.head.appendChild(script);
+  });
+}
+```
+
+---
+
+### Checking for Trusted Types Support
+
+Trusted Types is Chromium-only. Always guard before calling:
+
+```ts
+// lib/trusted-types.ts
+
+// Type guard — checks both existence and that it's the full factory, not a stub
+export function isTrustedTypesSupported(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    "trustedTypes" in window &&
+    typeof window.trustedTypes?.createPolicy === "function"
+  );
+}
+
+// Helper: create policy if supported, otherwise return a pass-through
+export function createSafePolicy(
+  name: string,
+  options: TrustedTypePolicyOptions,
+): TrustedTypePolicy | null {
+  if (!isTrustedTypesSupported()) return null;
+  return trustedTypes.createPolicy(name, options);
+}
+
+// Typed utility for innerHTML assignment with fallback
+export function assignHTML(
+  element: Element,
+  html: string,
+  policy: TrustedTypePolicy | null,
+): void {
+  if (policy) {
+    element.innerHTML = (policy as any).createHTML(html);
+  } else {
+    // Fallback for non-Chromium: still sanitize, just without the policy wrapper
+    element.innerHTML = DOMPurify.sanitize(html);
+  }
+}
+```
+
+---
+
+### Next.js Framework Policy Name
+
+Next.js injects inline scripts for hydration, routing, and image optimization. When Trusted Types enforcement is active, these scripts must be produced through a policy. Next.js internally uses a policy named `"nextjs"`. Include it in your CSP:
+
+```ts
+// middleware.ts
+const csp = [
+  `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
+  "require-trusted-types-for 'script'",
+  // Allow both your app's policy and Next.js's internal policy
+  "trusted-types sanitize-html safe-script-url nextjs",
+].join("; ");
+```
+
+<Callout type="info">
+  If you see `TrustedTypes` violation reports in the console mentioning
+  `"nextjs"` as the blocked policy name, it means Next.js's framework code is
+  trying to create a policy that isn't on your allowlist. Add `nextjs` to the
+  `trusted-types` CSP directive value.
+</Callout>
+
+---
+
+### Report-Only Migration Workflow
+
+Never enable Trusted Types enforcement on a codebase that hasn't been audited:
+
+```ts
+// Phase 1: Report-Only — log violations, block nothing
+// middleware.ts
+const csp = [
+  // Report-Only: violations logged but NOT blocked
+  "Content-Security-Policy-Report-Only",
+  "require-trusted-types-for 'script'",
+  "trusted-types sanitize-html nextjs",
+  "report-uri /api/csp-report",
+].join("; ");
+
+// In the response:
+response.headers.set(
+  "Content-Security-Policy-Report-Only",
+  "require-trusted-types-for 'script'; trusted-types sanitize-html nextjs; report-uri /api/csp-report",
+);
+```
+
+```ts
+// Phase 2: Review violations from /api/csp-report
+// Each violation shows:
+// - source-file: which JS file triggered it
+// - line-number: the exact line
+// - violated-directive: which sink was used
+
+// Common violations to fix:
+// 1. element.innerHTML = string  → wrap with createHTML policy
+// 2. eval(code)                  → refactor to avoid eval
+// 3. script.src = url            → wrap with createScriptURL policy
+// 4. document.write(html)        → refactor entirely (never use document.write)
+```
+
+```ts
+// Phase 3: Fix all violations, then switch to enforcement
+response.headers.set(
+  "Content-Security-Policy",
+  "require-trusted-types-for 'script'; trusted-types sanitize-html nextjs; report-uri /api/csp-report",
+);
 ```
 
 ---
 
 ## Real-World Use Case
 
-Imagine you're building a SaaS product where users can write rich-text comments that are stored in a database and rendered on other users' screens. Your frontend fetches the comment HTML from an API and renders it with `innerHTML`.
+**SaaS rich-text editor.** Users write formatted content stored as HTML. The frontend fetches this HTML and renders it with `innerHTML` in a preview pane. Without Trusted Types, a stored XSS payload in the database executes the moment any user views the content.
 
-Without Trusted Types, a stored XSS attack is one unsanitized response away. With Trusted Types enforced via CSP:
-
-1. Any direct `innerHTML = apiResponse` call throws at runtime and is caught in development immediately.
-2. All rendering goes through your `sanitize-html` policy, which runs DOMPurify.
-3. Even if a developer bypasses your sanitization utility and writes raw `innerHTML` code in a future PR, the browser blocks it.
-
-The policy becomes a hard architectural guardrail, not a documentation guideline that gets ignored under deadline pressure.
+With Trusted Types: (1) `require-trusted-types-for 'script'` is enforced. (2) All `innerHTML` assignments must go through the `sanitize-html` policy backed by DOMPurify. (3) A developer who writes `element.innerHTML = apiResponse` directly gets an immediate `TypeError` in both development and production — not a silent XSS. (4) The policy centralises the sanitization logic: change DOMPurify's allowed tags in one place and it applies everywhere. (5) Report-Only mode surfaced three legacy `innerHTML` assignments in old utility files that weren't caught in code review.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Activating enforcement before auditing existing sinks**
+**1. Enabling enforcement before auditing.** `require-trusted-types-for 'script'` will immediately break any existing code that uses `innerHTML`, `eval`, `script.src`, or `document.write` with plain strings. Use Report-Only for at least a week before enforcing.
 
-Turning on `require-trusted-types-for 'script'` on a codebase that already uses `innerHTML` throughout will immediately break the app. Before enforcing, use Report-Only mode to find all violations:
+**2. Creating a `default` policy that passes strings through.** A `default` policy is a global fallback — any string-to-sink assignment without a policy creates an implicit trusted value via `default`. This nullifies the protection. The `default` policy exists only as an emergency migration escape hatch, not a permanent solution.
 
-```
-Content-Security-Policy-Report-Only: require-trusted-types-for 'script'; report-uri /csp-report
-```
+**3. Thinking Trusted Types is cross-browser.** As of 2025, Trusted Types enforcement is only in Chromium-based browsers. Firefox and Safari silently ignore the CSP directives. Server-side sanitization and output encoding remain essential for full coverage.
 
-This logs violations without blocking them, giving you a migration path.
+**4. Not adding `nextjs` to the policy allowlist.** Next.js creates an internal `"nextjs"` policy for its own script injections. Without it in `trusted-types <policylist>`, Next.js hydration and routing scripts throw errors.
 
----
-
-**2. Treating the `default` policy as a safe catch-all**
-
-Some developers create a `default` policy that passes strings through unchanged, just to silence browser errors:
-
-```ts
-// ❌ This defeats the entire purpose of Trusted Types
-trustedTypes.createPolicy("default", {
-  createHTML: (s) => s,
-});
-```
-
-This is equivalent to disabling the feature. The `default` policy exists as an escape hatch for legacy code migration, not as a permanent solution.
-
----
-
-**3. Forgetting that `eval` and `Function()` are also covered**
-
-Trusted Types also governs `eval()`, `new Function()`, and similar JavaScript execution sinks when the `'script'` directive is active. Third-party libraries that use `eval` internally (some template engines, older build outputs) will start throwing. Audit your dependencies before full enforcement.
-
----
-
-**4. Only testing in Chrome**
-
-Trusted Types is a Chromium-only feature as of mid-2025. Firefox and Safari do not enforce it. Your CSP header will be silently ignored in those browsers. This means Trusted Types is a defense-in-depth layer, not a complete cross-browser solution — you still need server-side output encoding and input validation.
-
-<Callout type="warn">
-  Do not rely on Trusted Types as your only XSS defense. It is a powerful
-  browser-level mitigation, but it must complement — not replace — server-side
-  sanitization and output encoding.
-</Callout>
+**5. Forgetting that Workers also need `createScriptURL`.** `new Worker('/worker.js')` requires `createScriptURL` when Trusted Types is enforced. If you use web workers, service workers, or `SharedWorker`, wrap their URLs through a `createScriptURL` policy.
 
 ---
 
 ## Summary
 
-Trusted Types is a browser API that prevents DOM-based XSS by requiring all values assigned to dangerous sinks (`innerHTML`, `eval`, `script.src`, etc.) to pass through an explicit, developer-defined policy. Enforcement is activated via a `require-trusted-types-for 'script'` CSP directive, and violations are caught at runtime in supporting browsers. Policies should wrap a sanitization library like DOMPurify for HTML sinks and enforce allowlists for script URL sinks. Use Report-Only mode before full enforcement to surface existing violations in your codebase. Trusted Types is a defense-in-depth tool — it does not replace server-side sanitization or input validation.
+Trusted Types prevents DOM-based XSS at the browser level by requiring all assignments to dangerous sinks to pass through a named, validated policy. `createHTML` wraps DOMPurify-sanitized content for `innerHTML`; `createScript` gates `eval()` and `new Function()`; `createScriptURL` validates dynamic script loading and worker registration. Enforcement is Chromium-only — always keep server-side sanitization as the primary defence. Use Report-Only mode to surface all sink violations before enforcing. Include `nextjs` in your `trusted-types` CSP directive for Next.js framework compatibility. Install `@types/trusted-types` for TypeScript support. Trusted Types is a defence-in-depth layer that turns XSS injection into an immediate visible error instead of a silent data exfiltration.
+
+---
+
+## Interview Questions
+
+**Q1. What is a Trusted Types policy and what are the three types of trusted values it can produce?**
+
+A Trusted Types policy is an object created via `trustedTypes.createPolicy(name, options)`. It has up to three methods: `createHTML(input)` produces a `TrustedHTML` object for assignment to sinks like `innerHTML`, `outerHTML`, and `insertAdjacentHTML`; `createScript(input)` produces a `TrustedScript` for `eval()` and `new Function()`; `createScriptURL(input)` produces a `TrustedScriptURL` for `script.src`, `new Worker()`, `import()`, and `ServiceWorkerRegistration.register()`. The policy function receives the raw string and must return a string (optionally modified/validated). If the policy throws, the assignment is blocked. The browser only accepts these typed wrappers at enforced sinks — a plain string throws a `TypeError`.
+
+**Q2. What is the `default` Trusted Types policy and why should you avoid it in production?**
+
+When Trusted Types is enforced, any string assignment to a dangerous sink that doesn't use a named policy throws. The `default` policy is a special fallback: if `trustedTypes.createPolicy("default", ...)` exists, any string-to-sink assignment that would otherwise throw instead goes through the `default` policy's handler. This prevents breakage on legacy code during migration. The danger: a `default` policy that returns its input unchanged — `createHTML: (s) => s` — effectively re-enables the raw string assignment for all sinks in the entire application. It nullifies Trusted Types protection while making enforcement appear to be on. Use `default` only as a temporary migration tool with logging to identify violations, then eliminate it.
+
+**Q3. Why is Trusted Types described as a defence-in-depth layer rather than a standalone XSS defence?**
+
+Trusted Types enforcement is only supported in Chromium-based browsers (Chrome, Edge). Firefox and Safari silently ignore `require-trusted-types-for`. This means all users of non-Chromium browsers receive no Trusted Types protection. Additionally, Trusted Types only catches DOM sink assignments that occur in JavaScript — it doesn't protect against server-side reflected or stored XSS where the script content is injected directly into the HTML response. Server-side sanitization (sanitize-html, DOMPurify on the server), output encoding, and CSP `script-src` allowlists remain essential for full protection. Trusted Types is highly effective as an additional layer on top of these: in Chromium browsers it makes injection immediately visible as a runtime error rather than silent data exfiltration.
+
+**Q4. What is the `nextjs` policy name and why does Next.js need it?**
+
+Next.js generates inline scripts for hydration state, client-side routing, image optimization, and other framework internals. When Trusted Types enforcement is active and `trusted-types <policylist>` restricts which policy names can be created, Next.js must create a policy named `"nextjs"` to produce the `TrustedHTML`/`TrustedScript` values for its own injections. If `"nextjs"` is not in the CSP `trusted-types` value, Next.js's `trustedTypes.createPolicy("nextjs", ...)` call throws, breaking hydration and routing. You must include `nextjs` in `trusted-types`: `trusted-types sanitize-html nextjs`. The same applies to other frameworks — Angular uses `"angular"`, React currently doesn't require a specific named policy but may in future versions.
+
+**Q5. How do you handle `new Worker(url)` and `new SharedWorker(url)` when Trusted Types is enforced?**
+
+Worker constructors take a URL string for the worker script. When `require-trusted-types-for 'script'` is active, passing a plain string to `new Worker()` throws — it requires a `TrustedScriptURL`. You must wrap the URL through a `createScriptURL` policy that validates the origin: `ts const workerPolicy = trustedTypes.createPolicy("safe-worker", { createScriptURL: (url) => { const origin = new URL(url, location.origin).origin; if (origin !== location.origin) throw new Error("Blocked"); return url; }}); new Worker(workerPolicy.createScriptURL("/workers/compute.js") as unknown as string)`. The same applies to `new SharedWorker()` and `navigator.serviceWorker.register()`. Always validate that worker URLs are same-origin unless you explicitly need cross-origin workers.
+
+**Q6. How does the Report-Only workflow for Trusted Types differ from the enforcement workflow?**
+
+In Report-Only mode, `Content-Security-Policy-Report-Only: require-trusted-types-for 'script'` logs all violations to the `report-uri` endpoint but does not block any assignments. The application continues to function normally. Each violation report contains the source file and line number where the unsafe sink assignment occurred, the violated directive (`require-trusted-types-for`), and the document URI. This lets you audit all existing `innerHTML`, `eval`, `script.src` usages across your codebase without breaking production. Once you've wrapped each legitimate sink in an appropriate policy and eliminated illegitimate ones, switch to enforcement mode with `Content-Security-Policy`. Keep `report-uri` active in enforcement mode — new violations in production may indicate either a missed sink during migration or a genuine injection attempt.
