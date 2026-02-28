@@ -1,125 +1,208 @@
 ---
 title: Authentication Flows
-description: A practical guide to implementing OAuth 2.0, JWT, and session cookie authentication in modern Next.js applications using the App Router.
+description: OAuth 2.0 Authorization Code Flow with PKCE, JWT structure and storage tradeoffs, session cookies, refresh token rotation with reuse detection, silent refresh, and Auth.js v5 integration in Next.js App Router.
 ---
 
 ## Overview
 
-Authentication is the process of verifying who a user is. In web applications, three patterns dominate: **OAuth 2.0** (delegating login to a third party like Google), **JWTs** (JSON Web Tokens — stateless, self-contained tokens), and **session cookies** (server-managed state tied to a browser cookie).
+Authentication is the process of verifying who a user is. Three patterns dominate web applications: **OAuth 2.0** (delegating login to Google, GitHub, etc.), **JWTs** (stateless, self-contained tokens), and **session cookies** (server-managed state). In practice, most applications combine all three — OAuth for the login handshake, a session cookie for the web app, and JWTs for API access.
 
-Each solves a slightly different problem. Understanding when to use which — and how they interact — is critical to building secure, scalable apps.
+Understanding each flow mechanically — not just how to configure a library — is essential for diagnosing auth bugs, making correct security decisions, and integrating systems that don't share a database.
 
 ---
 
 ## How It Works
 
-### OAuth 2.0
+### OAuth 2.0 Authorization Code Flow with PKCE
 
-OAuth 2.0 is an _authorization framework_ that lets users grant your app limited access to their account on another service (Google, GitHub, etc.) without sharing their password.
-
-The standard flow (Authorization Code Flow) works like this:
-
-1. Your app redirects the user to the provider's login page with a `client_id` and `redirect_uri`.
-2. The user authenticates with the provider and grants permission.
-3. The provider redirects back to your app with a short-lived **authorization code**.
-4. Your server exchanges the code for an **access token** (and optionally a **refresh token**) via a back-channel request.
-5. Your server uses the access token to fetch the user's profile and creates a local session.
-
-<Callout type="info">
-  OAuth 2.0 is for *authorization*, not authentication by itself. OpenID Connect
-  (OIDC) is the identity layer built on top of OAuth 2.0 that gives you an
-  `id_token` with user identity claims.
-</Callout>
-
-### JWTs (JSON Web Tokens)
-
-A JWT is a Base64-encoded, cryptographically signed token with three parts: **header**, **payload**, and **signature**. The server signs it with a secret (HMAC) or private key (RSA/ECDSA). Any service with the secret/public key can verify it without a database lookup — making JWTs _stateless_.
-
-Structure:
+OAuth 2.0 is an authorization framework — it delegates login to a trusted third-party provider. The Authorization Code Flow is the correct flow for web applications. **PKCE** (Proof Key for Code Exchange) is a required extension for public clients (SPAs, mobile apps) where the `client_secret` cannot be stored securely.
 
 ```
-eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiIxMjMiLCJleHAiOjE3MDAwMDB9.SIGNATURE
-header              .payload                                      .signature
+1. Client generates:
+   code_verifier  = random 43–128 char string
+   code_challenge = BASE64URL(SHA256(code_verifier))
+
+2. Client redirects to provider:
+   GET /authorize?
+     client_id=...
+     redirect_uri=https://app.example.com/api/auth/callback
+     response_type=code
+     scope=openid email profile
+     state=<random nonce>
+     code_challenge=<BASE64URL(SHA256(verifier))>
+     code_challenge_method=S256
+
+3. User authenticates with provider; provider redirects back:
+   GET /api/auth/callback?code=<auth_code>&state=<nonce>
+
+4. Server exchanges code for tokens (back-channel):
+   POST /token
+     code=<auth_code>
+     code_verifier=<original verifier>
+     client_id=...
+     redirect_uri=...
+   ← { access_token, id_token, refresh_token, expires_in }
+
+5. Server validates id_token, upserts user, creates local session
 ```
 
-The payload can include claims like `userId`, `role`, `exp` (expiry), and `iat` (issued at).
+PKCE prevents authorization code interception attacks: if the code is stolen in transit, the attacker can't exchange it without the `code_verifier` — which only the original client holds.
 
-<Callout type="warn">
-  JWTs cannot be invalidated before expiry unless you maintain a token denylist
-  — which defeats their stateless benefit. Keep JWT expiry short (15–60 minutes)
-  and use refresh tokens for long-lived sessions.
-</Callout>
+---
 
-### Session Cookies
+### `id_token` vs `access_token` vs `refresh_token`
 
-The server creates a session record (in memory, Redis, or a database) and sends the browser a cookie containing only the **session ID**. On every request, the browser sends the cookie, and the server looks up the session.
+These are frequently conflated:
 
-This is _stateful_ — the server must store session data — but it gives you easy, instant revocation (just delete the session record).
+| Token           | Purpose                                   | Audience         | Expiry            |
+| --------------- | ----------------------------------------- | ---------------- | ----------------- |
+| `id_token`      | Prove user identity (who they are)        | Your app         | Short (1h)        |
+| `access_token`  | Call APIs on behalf of the user           | Resource servers | Short (15m–1h)    |
+| `refresh_token` | Obtain new access tokens without re-login | Auth server only | Long (days–weeks) |
+
+The `id_token` is a JWT containing identity claims (`sub`, `email`, `name`). Your server verifies its signature and uses the `sub` (subject) as a stable user identifier. The `access_token` is passed to resource APIs as `Bearer <token>` — it should not be stored long-term. The `refresh_token` is used server-side to silently refresh the access token — it must never be exposed to client-side JavaScript.
+
+---
+
+### JWTs — Structure and Storage
+
+A JWT has three parts, base64url-encoded and joined by dots:
+
+```
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9   ← Header: algorithm + type
+.eyJ1c2VySWQiOiJ1c3JfMTIzIiwiZXhwIjoxNzAwMDAwfQ  ← Payload: claims
+.HMAC_SHA256_signature                              ← Signature: integrity proof
+```
+
+The server verifies the signature using a secret (HMAC) or public key (RSA/ECDSA). Valid signature means the token wasn't tampered with. No database lookup required — JWTs are stateless.
+
+**JWT storage options and tradeoffs:**
+
+| Storage              | XSS risk                | CSRF risk            | Notes                                  |
+| -------------------- | ----------------------- | -------------------- | -------------------------------------- |
+| `localStorage`       | ⚠️ High (JS readable)   | ✅ None              | JS can steal on XSS                    |
+| `sessionStorage`     | ⚠️ High                 | ✅ None              | Lost on tab close                      |
+| `httpOnly` cookie    | ✅ None (JS can't read) | ⚠️ Requires SameSite | Best option for web apps               |
+| Memory (React state) | ✅ None                 | ✅ None              | Lost on refresh — needs silent refresh |
+
+`httpOnly` cookies are the correct storage for web apps: JavaScript cannot read them (mitigates XSS token theft), and `SameSite=Lax` prevents CSRF.
 
 ---
 
 ## Code Examples
 
-### 1. OAuth 2.0 — GitHub Login with Route Handlers
+### OAuth 2.0 with PKCE — Route Handlers
 
-```tsx
-// app/api/auth/github/route.ts
-// Step 1: Redirect user to GitHub
-export async function GET() {
-  const params = new URLSearchParams({
-    client_id: process.env.GITHUB_CLIENT_ID!,
-    redirect_uri: process.env.GITHUB_REDIRECT_URI!,
-    scope: "read:user user:email",
-  });
-
-  return Response.redirect(
-    `https://github.com/login/oauth/authorize?${params.toString()}`,
-  );
-}
-```
-
-```tsx
-// app/api/auth/github/callback/route.ts
-// Step 2: Handle the callback and exchange code for token
+```ts
+// app/api/auth/login/route.ts
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const code = searchParams.get("code");
+export async function GET() {
+  // Generate PKCE verifier and challenge
+  const verifier = generateCodeVerifier(); // 43–128 random chars
+  const challenge = await generateCodeChallenge(verifier); // BASE64URL(SHA256(verifier))
+  const state = crypto.randomUUID();
 
-  if (!code) {
-    return new Response("Missing authorization code", { status: 400 });
-  }
+  const cookieStore = await cookies();
 
-  // Exchange code for access token (back-channel — never expose client_secret to browser)
-  const tokenResponse = await fetch(
-    "https://github.com/login/oauth/access_token",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        client_id: process.env.GITHUB_CLIENT_ID,
-        client_secret: process.env.GITHUB_CLIENT_SECRET,
-        code,
-        redirect_uri: process.env.GITHUB_REDIRECT_URI,
-      }),
-    },
-  );
-
-  const { access_token } = await tokenResponse.json();
-
-  // Fetch the user's profile using the access token
-  const userResponse = await fetch("https://api.github.com/user", {
-    headers: { Authorization: `Bearer ${access_token}` },
+  // Store verifier and state server-side — never expose verifier to client JS
+  cookieStore.set("pkce_verifier", verifier, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "lax",
+    maxAge: 60 * 10, // 10 minutes to complete the flow
+    path: "/api/auth",
+  });
+  cookieStore.set("oauth_state", state, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "lax",
+    maxAge: 60 * 10,
+    path: "/api/auth",
   });
 
-  const githubUser = await userResponse.json();
+  const params = new URLSearchParams({
+    client_id: process.env.GITHUB_CLIENT_ID!,
+    redirect_uri: `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/callback`,
+    response_type: "code",
+    scope: "openid email profile",
+    state,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+  });
 
-  // Upsert user in your database (pseudocode replaced with real structure)
+  redirect(`https://github.com/login/oauth/authorize?${params}`);
+}
+
+// Helpers
+function generateCodeVerifier(): string {
+  const array = new Uint8Array(32);
+  crypto.getRandomValues(array);
+  return btoa(String.fromCharCode(...array))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
+}
+
+async function generateCodeChallenge(verifier: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(verifier);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return btoa(String.fromCharCode(...new Uint8Array(digest)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
+}
+```
+
+```ts
+// app/api/auth/callback/route.ts
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { db } from "@/lib/db";
+
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const code = searchParams.get("code");
+  const returnedState = searchParams.get("state");
+
+  const cookieStore = await cookies();
+  const storedState = cookieStore.get("oauth_state")?.value;
+  const codeVerifier = cookieStore.get("pkce_verifier")?.value;
+
+  // Validate state parameter — prevents CSRF on the OAuth flow itself
+  if (!returnedState || returnedState !== storedState) {
+    return new Response("Invalid state — possible CSRF attack", {
+      status: 403,
+    });
+  }
+  if (!code || !codeVerifier) {
+    return new Response("Missing code or verifier", { status: 400 });
+  }
+
+  // Exchange code for tokens (back-channel — client_secret never leaves server)
+  const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({
+      client_id: process.env.GITHUB_CLIENT_ID,
+      client_secret: process.env.GITHUB_CLIENT_SECRET,
+      code,
+      redirect_uri: `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/callback`,
+      code_verifier: codeVerifier, // PKCE: proves we initiated the request
+    }),
+  });
+
+  const { access_token } = await tokenRes.json();
+
+  // Fetch user identity
+  const userRes = await fetch("https://api.github.com/user", {
+    headers: { Authorization: `Bearer ${access_token}` },
+  });
+  const githubUser = await userRes.json();
+
+  // Upsert user and create local session
   const user = await db.user.upsert({
     where: { githubId: String(githubUser.id) },
     create: {
@@ -130,14 +213,17 @@ export async function GET(request: Request) {
     update: { name: githubUser.name },
   });
 
-  // Create a session cookie
-  const cookieStore = await cookies();
-  cookieStore.set("session_id", user.id, {
-    httpOnly: true, // not accessible via JS
-    secure: process.env.NODE_ENV === "production",
+  // Clear PKCE cookies — single-use
+  cookieStore.delete("pkce_verifier");
+  cookieStore.delete("oauth_state");
+
+  // Set session cookie
+  cookieStore.set("__Host-session", user.id, {
+    httpOnly: true,
+    secure: true,
     sameSite: "lax",
-    maxAge: 60 * 60 * 24 * 7, // 7 days
     path: "/",
+    maxAge: 60 * 60 * 24 * 7, // 7 days
   });
 
   redirect("/dashboard");
@@ -146,202 +232,348 @@ export async function GET(request: Request) {
 
 ---
 
-### 2. JWT — Issuing and Verifying Tokens
+### JWT Issuance and Verification
 
 ```ts
 // lib/jwt.ts
-import { SignJWT, jwtVerify } from "jose"; // jose is edge-compatible, unlike jsonwebtoken
+import { SignJWT, jwtVerify } from "jose"; // jose: pure JS JWT library
 
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET!);
+const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET!);
 
-export interface SessionPayload {
+export interface JwtPayload {
   userId: string;
   role: "user" | "admin";
 }
 
-export async function signToken(payload: SessionPayload): Promise<string> {
+// Sign a short-lived access token
+export async function signAccessToken(payload: JwtPayload): Promise<string> {
   return new SignJWT(payload)
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
-    .setExpirationTime("15m") // short-lived access token
-    .sign(SECRET);
+    .setExpirationTime("15m") // 15-minute access token
+    .setAudience("api.example.com")
+    .setIssuer("auth.example.com")
+    .sign(JWT_SECRET);
 }
 
-export async function verifyToken(token: string): Promise<SessionPayload> {
-  const { payload } = await jwtVerify(token, SECRET);
-  return payload as unknown as SessionPayload;
-}
-```
-
-```tsx
-// app/api/auth/login/route.ts
-import { signToken } from "@/lib/jwt";
-import { cookies } from "next/headers";
-
-export async function POST(request: Request) {
-  const { email, password } = await request.json();
-
-  const user = await db.user.findUnique({ where: { email } });
-
-  const isValid = user && (await bcrypt.compare(password, user.hashedPassword));
-
-  if (!isValid) {
-    return Response.json({ error: "Invalid credentials" }, { status: 401 });
-  }
-
-  const token = await signToken({ userId: user.id, role: user.role });
-
-  const cookieStore = await cookies();
-  cookieStore.set("access_token", token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    maxAge: 60 * 15, // 15 minutes, matching token expiry
-    path: "/",
+// Verify and decode — throws on invalid/expired token
+export async function verifyAccessToken(token: string): Promise<JwtPayload> {
+  const { payload } = await jwtVerify(token, JWT_SECRET, {
+    audience: "api.example.com",
+    issuer: "auth.example.com",
   });
-
-  return Response.json({ success: true });
+  return payload as unknown as JwtPayload;
 }
-```
-
-```tsx
-// middleware.ts
-// Protect routes by verifying the JWT on every request
-import { NextRequest, NextResponse } from "next/server";
-import { verifyToken } from "@/lib/jwt";
-
-export async function middleware(request: NextRequest) {
-  const token = request.cookies.get("access_token")?.value;
-
-  if (!token) {
-    return NextResponse.redirect(new URL("/login", request.url));
-  }
-
-  try {
-    const payload = await verifyToken(token);
-    // Forward user identity to Server Components via headers
-    const headers = new Headers(request.headers);
-    headers.set("x-user-id", payload.userId);
-    headers.set("x-user-role", payload.role);
-
-    return NextResponse.next({ request: { headers } });
-  } catch {
-    // Token expired or invalid
-    return NextResponse.redirect(new URL("/login", request.url));
-  }
-}
-
-export const config = {
-  matcher: ["/dashboard/:path*", "/account/:path*"],
-};
 ```
 
 ---
 
-### 3. Session Cookie — Reading Session in a Server Component
+### Refresh Token Rotation with Reuse Detection
 
-```tsx
-// lib/session.ts
-import { cookies } from "next/headers";
-import { cache } from "react";
+Short-lived access tokens require a refresh mechanism. Refresh token rotation issues a new refresh token on every use — and detects reuse (a sign of theft):
 
-export const getSession = cache(async () => {
-  const cookieStore = await cookies();
-  const sessionId = cookieStore.get("session_id")?.value;
+```ts
+// lib/auth/refresh.ts
+import { db } from "@/lib/db";
+import { signAccessToken } from "@/lib/jwt";
 
-  if (!sessionId) return null;
-
-  // Fetch session from database/Redis
-  const session = await db.session.findUnique({
-    where: { id: sessionId },
+export async function rotateRefreshToken(incomingToken: string) {
+  const stored = await db.refreshToken.findUnique({
+    where: { token: incomingToken },
     include: { user: true },
   });
 
-  // Treat expired sessions as invalid
-  if (!session || session.expiresAt < new Date()) return null;
+  // Token not found — already used or never existed
+  if (!stored) {
+    throw new Error("Invalid refresh token");
+  }
 
-  return session;
+  if (stored.used) {
+    // Reuse detected — a token that was already consumed is being presented again.
+    // This indicates the token family was compromised. Revoke ALL tokens for this user.
+    await db.refreshToken.deleteMany({ where: { userId: stored.userId } });
+    throw new Error("Refresh token reuse detected — all sessions revoked");
+  }
+
+  if (new Date() > stored.expiresAt) {
+    await db.refreshToken.delete({ where: { id: stored.id } });
+    throw new Error("Refresh token expired");
+  }
+
+  // Mark old token as used (invalidate it)
+  await db.refreshToken.update({
+    where: { id: stored.id },
+    data: { used: true },
+  });
+
+  // Issue new refresh token
+  const newRefreshToken = crypto.randomUUID();
+  await db.refreshToken.create({
+    data: {
+      token: newRefreshToken,
+      userId: stored.userId,
+      used: false,
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+    },
+  });
+
+  // Issue new access token
+  const accessToken = await signAccessToken({
+    userId: stored.userId,
+    role: stored.user.role,
+  });
+
+  return { accessToken, refreshToken: newRefreshToken };
+}
+```
+
+```ts
+// app/api/auth/refresh/route.ts
+import { cookies } from "next/headers";
+import { NextResponse } from "next/server";
+import { rotateRefreshToken } from "@/lib/auth/refresh";
+
+export async function POST() {
+  const cookieStore = await cookies();
+  const refreshToken = cookieStore.get("__Host-refresh")?.value;
+
+  if (!refreshToken) {
+    return NextResponse.json({ error: "No refresh token" }, { status: 401 });
+  }
+
+  try {
+    const { accessToken, refreshToken: newRefreshToken } =
+      await rotateRefreshToken(refreshToken);
+
+    // Rotate the refresh token cookie
+    cookieStore.set("__Host-refresh", newRefreshToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax",
+      path: "/api/auth", // only sent to auth endpoints
+      maxAge: 30 * 24 * 60 * 60,
+    });
+
+    // Access token returned in response body — stored in memory by the client
+    return NextResponse.json({ accessToken });
+  } catch (err) {
+    // Reuse detected or token invalid — clear cookies and force re-login
+    cookieStore.delete("__Host-refresh");
+    cookieStore.delete("__Host-session");
+    return NextResponse.json(
+      { error: (err as Error).message },
+      { status: 401 },
+    );
+  }
+}
+```
+
+---
+
+### Silent Refresh — Keeping Access Tokens Fresh
+
+The client stores the access token in memory (React state or a module variable) and silently refreshes it before expiry:
+
+```ts
+// lib/auth/token-manager.ts
+"use client"; // this module only runs in the browser
+
+let accessToken: string | null = null;
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+const REFRESH_BEFORE_EXPIRY_MS = 60_000; // refresh 1 minute before expiry
+
+export function setAccessToken(token: string, expiresInSeconds: number) {
+  accessToken = token;
+
+  if (refreshTimer) clearTimeout(refreshTimer);
+
+  // Schedule silent refresh before the token expires
+  const refreshIn = expiresInSeconds * 1000 - REFRESH_BEFORE_EXPIRY_MS;
+  if (refreshIn > 0) {
+    refreshTimer = setTimeout(silentRefresh, refreshIn);
+  }
+}
+
+export function getAccessToken(): string | null {
+  return accessToken;
+}
+
+async function silentRefresh(): Promise<void> {
+  try {
+    const res = await fetch("/api/auth/refresh", { method: "POST" });
+    if (!res.ok) {
+      // Refresh failed — redirect to login
+      accessToken = null;
+      window.location.href = "/login";
+      return;
+    }
+    const { accessToken: newToken } = await res.json();
+    setAccessToken(newToken, 15 * 60); // new 15-minute token
+  } catch {
+    accessToken = null;
+    window.location.href = "/login";
+  }
+}
+
+// Authenticated fetch — automatically attaches the in-memory access token
+export async function authFetch(
+  url: string,
+  init?: RequestInit,
+): Promise<Response> {
+  const token = getAccessToken();
+  return fetch(url, {
+    ...init,
+    headers: {
+      ...init?.headers,
+      ...(token && { Authorization: `Bearer ${token}` }),
+    },
+  });
+}
+```
+
+---
+
+### Auth.js v5 — Next.js App Router Integration
+
+Auth.js (formerly NextAuth) v5 is the standard library for authentication in Next.js App Router applications:
+
+```bash
+npm install next-auth@beta
+```
+
+```ts
+// auth.ts — root of the repo, next to app/
+import NextAuth from "next-auth";
+import GitHub from "next-auth/providers/github";
+import Google from "next-auth/providers/google";
+import { PrismaAdapter } from "@auth/prisma-adapter";
+import { db } from "@/lib/db";
+
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  adapter: PrismaAdapter(db),
+  providers: [
+    GitHub({
+      clientId: process.env.AUTH_GITHUB_ID!,
+      clientSecret: process.env.AUTH_GITHUB_SECRET!,
+    }),
+    Google({
+      clientId: process.env.AUTH_GOOGLE_ID!,
+      clientSecret: process.env.AUTH_GOOGLE_SECRET!,
+    }),
+  ],
+  session: { strategy: "database" }, // or "jwt" for stateless
+  callbacks: {
+    session({ session, user }) {
+      session.user.id = user.id; // extend session with user.id
+      return session;
+    },
+  },
 });
 ```
 
+```ts
+// app/api/auth/[...nextauth]/route.ts
+import { handlers } from "@/auth";
+export const { GET, POST } = handlers;
+```
+
 ```tsx
-// app/dashboard/page.tsx
-// Server Component — no 'use client' needed
-import { getSession } from "@/lib/session";
+// app/dashboard/page.tsx — Server Component
+import { auth } from "@/auth";
 import { redirect } from "next/navigation";
 
 export default async function DashboardPage() {
-  const session = await getSession();
+  const session = await auth();
 
-  if (!session) {
-    redirect("/login");
-  }
+  if (!session) redirect("/login");
 
-  return (
-    <main>
-      <h1>Welcome, {session.user.name}</h1>
-      <p>Your role: {session.user.role}</p>
-    </main>
+  return <h1>Welcome, {session.user?.name}</h1>;
+}
+```
+
+```tsx
+// components/SignInButton.tsx — Client Component
+"use client";
+import { signIn, signOut } from "next-auth/react";
+
+export function SignInButton({ isLoggedIn }: { isLoggedIn: boolean }) {
+  return isLoggedIn ? (
+    <button onClick={() => signOut()}>Sign Out</button>
+  ) : (
+    <button onClick={() => signIn("github")}>Sign In with GitHub</button>
   );
 }
 ```
 
 <Callout type="info">
-  `cache()` from React deduplicates `getSession()` calls within a single render
-  pass, so you can call it in multiple Server Components without hitting the
-  database repeatedly.
+  Auth.js v5 uses the `AUTH_SECRET` environment variable (replacing
+  `NEXTAUTH_SECRET`) and works natively in Edge Runtime. Always set
+  `AUTH_SECRET` to a random 32-byte secret generated with `openssl rand -base64
+  32`.
 </Callout>
 
 ---
 
 ## Real-World Use Case
 
-In a SaaS project management app:
-
-- **OAuth 2.0** handles "Sign in with Google" — users don't want another password, and you want their verified email address.
-- After OAuth completes, your server issues a **session cookie** tied to a database record. This gives you instant revocation if a user is banned or logs out from another device.
-- For your **public API** (used by CLI tools or mobile apps), you issue **JWTs** — these clients can't use cookies reliably, and stateless verification scales across multiple API servers without a shared session store.
+**Multi-tenant SaaS.** GitHub OAuth handles login (Authorization Code + PKCE). Auth.js manages the OAuth dance, user upsert, and database session. A 15-minute JWT access token is issued for API calls — stored in memory on the client, never in `localStorage`. The refresh token (30-day expiry) lives in an `httpOnly; SameSite=Lax; __Host-refresh` cookie. Silent refresh runs 60 seconds before expiry. Refresh token rotation with reuse detection catches stolen tokens — if a refresh token is used twice, all sessions for that user are revoked immediately and they're redirected to login. Admin routes use a separate short-lived `__Host-admin` token issued after 2FA verification, `Strict` SameSite to prevent it from being carried on any cross-site request.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Storing JWTs in `localStorage`**
+**1. Storing JWTs in `localStorage`.** XSS can steal tokens from `localStorage`. Use `httpOnly` cookies — JavaScript can't read them even if XSS code runs.
 
-`localStorage` is accessible to any JavaScript on the page, making it vulnerable to XSS attacks. Always store tokens in `httpOnly` cookies, which are invisible to JavaScript.
+**2. Not validating the `state` parameter.** Skipping state validation on the OAuth callback opens a CSRF vector where an attacker tricks a user into completing an OAuth flow with the attacker's account (account takeover). Always validate.
 
-**2. Long-lived JWTs without a refresh strategy**
+**3. Long-lived access tokens without rotation.** A 24-hour JWT cannot be revoked. If stolen, the attacker has 24 hours. Keep access tokens at 15 minutes. Use refresh token rotation to maintain session length without long access token lifetimes.
 
-A JWT with a 30-day expiry can't be revoked if the user's account is compromised. Use short-lived access tokens (15 minutes) paired with a `httpOnly` refresh token cookie. When the access token expires, the client silently calls a `/api/auth/refresh` endpoint to get a new one.
-
-**3. Not validating the `state` parameter in OAuth**
-
-The `state` parameter is a random nonce you generate before redirecting to the OAuth provider and verify when the callback returns. Skipping this check opens your app to CSRF attacks where a malicious site tricks a user into completing your OAuth flow with the attacker's account.
+**4. Not handling the silent refresh race condition.** If the access token expires and two concurrent API calls trigger `silentRefresh` simultaneously, you'll get two refresh requests. The second will fail (the first already rotated the token). Use a single in-flight refresh promise:
 
 ```ts
-// Before redirect — store state in session
-const state = crypto.randomUUID();
-cookieStore.set("oauth_state", state, { httpOnly: true, maxAge: 60 * 10 });
+let refreshPromise: Promise<void> | null = null;
 
-// In callback — verify it matches
-const returnedState = searchParams.get("state");
-const storedState = cookieStore.get("oauth_state")?.value;
-
-if (!returnedState || returnedState !== storedState) {
-  return new Response("Invalid state parameter", { status: 403 });
+async function silentRefresh(): Promise<void> {
+  if (refreshPromise) return refreshPromise; // deduplicate concurrent refresh calls
+  refreshPromise = doRefresh().finally(() => {
+    refreshPromise = null;
+  });
+  return refreshPromise;
 }
 ```
 
-**4. Forgetting to set `sameSite` on cookies**
-
-Without `sameSite: "lax"` or `"strict"`, your session cookies are sent on cross-site requests, enabling CSRF. `"lax"` is a safe default — it blocks cookies on cross-site POST requests but allows them on top-level navigations (e.g., OAuth redirects back to your site).
-
-**5. Conflating authentication with authorization**
-
-OAuth gives you _who the user is_. What they're _allowed to do_ is a separate concern. After OAuth, always check the user's roles/permissions in your own database before granting access to protected resources.
+**5. Conflating authentication with authorization.** OAuth tells you who the user is. What they're allowed to do is a separate concern. After OAuth, check the user's roles in your own database.
 
 ---
 
 ## Summary
 
-OAuth 2.0 delegates login to a trusted provider and is best for social login; it should always use the Authorization Code Flow with PKCE for public clients. JWTs are stateless tokens ideal for APIs and distributed systems, but must be short-lived and stored in `httpOnly` cookies to stay secure. Session cookies are stateful, easy to revoke, and the right default for server-rendered web apps. In many production applications, all three patterns are used together: OAuth for login, a session cookie for the web app, and JWTs for API consumers. Always set `httpOnly`, `secure`, and `sameSite` on any auth cookie.
+OAuth 2.0 Authorization Code Flow with PKCE is the correct flow for web apps — it protects against authorization code interception and doesn't require storing `client_secret` on the client. JWTs should be short-lived (15 minutes) and stored in `httpOnly` cookies — never `localStorage`. Refresh tokens enable long sessions without long access token lifetimes; rotation with reuse detection provides automatic session revocation on token theft. Silent refresh keeps the in-memory access token fresh without user interaction. Auth.js v5 handles the OAuth dance, user upsert, session management, and database adapter integration for Next.js App Router applications.
+
+---
+
+## Interview Questions
+
+**Q1. What is PKCE and why is it required for OAuth in public clients?**
+
+PKCE (Proof Key for Code Exchange) prevents authorization code interception attacks. A public client — a browser-based SPA or mobile app — cannot securely store a `client_secret` (it's in the source code or the binary, accessible to attackers). Without PKCE, an intercepted authorization code could be exchanged for tokens by anyone. With PKCE, the client generates a random `code_verifier`, computes `code_challenge = SHA256(verifier)`, and sends the challenge in the authorization request. When exchanging the code for tokens, it sends the original `verifier`. The authorization server verifies that `SHA256(verifier) === challenge` — only the original requester possesses the verifier, making a stolen code useless to an attacker who doesn't have it.
+
+**Q2. What is refresh token rotation and how does reuse detection work?**
+
+Refresh token rotation issues a new refresh token every time an old one is used to obtain a new access token. The old token is immediately invalidated. If a refresh token is presented that has already been used (marked as consumed in the database), it indicates the token family was compromised — either the original legitimate client's token was stolen and used, or the stolen token was used first and the legitimate client is now presenting the "used" token. The correct response to reuse detection is to revoke the entire token family — all refresh tokens for that user — forcing re-authentication. This limits the damage of a stolen refresh token: the attacker gets at most one new access token before the legitimate client's next refresh attempt triggers detection and revokes everything.
+
+**Q3. What is the difference between `id_token`, `access_token`, and `refresh_token` in an OAuth/OIDC flow?**
+
+The `id_token` (OpenID Connect) is a JWT that proves user identity — it contains claims about who the user is (`sub`, `email`, `name`). Your server validates its signature and uses `sub` as the stable user identifier. It's for your application to consume, not to send to resource APIs. The `access_token` is a credential for calling APIs on the user's behalf — it's presented as `Bearer <token>` to resource servers. It should be short-lived. The `refresh_token` is a long-lived credential used only to obtain new access tokens from the authorization server — it must never leave your server, never be sent to resource APIs, and must be stored securely (in an `httpOnly` cookie or encrypted server-side store).
+
+**Q4. Why should JWTs be stored in `httpOnly` cookies rather than `localStorage`?**
+
+`localStorage` is readable by any JavaScript running on the same origin. If your application has an XSS vulnerability — even via a third-party script, a compromised dependency, or a DOM injection bug — an attacker can execute `localStorage.getItem("token")` and exfiltrate the JWT. The attacker then has the token until it expires, regardless of what the user does. `httpOnly` cookies cannot be read by JavaScript — the `document.cookie` API and `localStorage` API have no access to them. The browser attaches them automatically to requests to the matching domain. An XSS attacker cannot read the token, only trigger requests that carry it — a much narrower attack surface, further constrained by `SameSite=Lax`.
+
+**Q5. What is the silent refresh race condition and how do you prevent it?**
+
+When an access token expires, the client's silent refresh fires. If two concurrent API calls both detect the expired token and both call the refresh endpoint, the first call succeeds and rotates the refresh token. The second call presents the now-invalid old refresh token — rotation's reuse detection kicks in, revokes all sessions, and logs the user out. The fix: deduplicate concurrent refresh calls using a shared promise. When the first refresh starts, store the in-flight promise in a module-level variable. Any subsequent refresh call checks if a refresh is already in flight and awaits the existing promise instead of starting a new one. Once the promise resolves, all callers get the new token from the single successful refresh.
+
+**Q6. How does Auth.js v5 differ from NextAuth v4 for Next.js App Router?**
+
+Auth.js v5 is a complete rewrite designed for the App Router's server-first model. Key differences: the configuration is in a root `auth.ts` file that exports `auth()`, `signIn()`, `signOut()`, and `handlers` — instead of v4's `[...nextauth]/route.ts` configuration. `auth()` can be called directly in Server Components, Server Actions, Route Handlers, and middleware without additional setup. It runs in Edge Runtime by default, making it suitable for Middleware-based session checks without cold start overhead. `AUTH_SECRET` replaces `NEXTAUTH_SECRET`. The session strategy defaults to `"database"` (Prisma/Drizzle adapter) or `"jwt"` for stateless deployments. Client-side `useSession()` and `signIn()`/`signOut()` from `next-auth/react` continue to work as before.

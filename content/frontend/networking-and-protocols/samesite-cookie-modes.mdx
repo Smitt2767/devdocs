@@ -1,152 +1,269 @@
 ---
 title: SameSite Cookie Modes
-description: A practical guide to the SameSite cookie attribute and how Strict, Lax, and None modes control cross-site request behavior.
+description: Strict, Lax, and None — how each mode controls cross-site cookie sending, the Partitioned (CHIPS) attribute for third-party contexts, __Host- and __Secure- cookie prefixes, the eTLD+1 same-site calculation, and how Chrome 80 and Safari ITP changed the defaults.
 ---
 
 ## Overview
 
-The `SameSite` attribute on HTTP cookies controls whether a cookie is sent along with cross-site requests. It's your primary defense against Cross-Site Request Forgery (CSRF) attacks and also affects how cookies behave in third-party contexts like embedded iframes or OAuth redirects.
+The `SameSite` attribute on HTTP cookies controls whether a cookie is sent on cross-site requests. It's the primary browser-level defense against Cross-Site Request Forgery (CSRF) and also determines how cookies behave in third-party contexts — embedded iframes, OAuth redirects, payment widgets.
 
-Every cookie you set should have an explicit `SameSite` value. Browsers apply a default (usually `Lax`) when it's missing, but relying on browser defaults is brittle and inconsistent across environments.
-
-There are three modes:
-
-- **Strict** — Cookie is never sent on cross-site requests.
-- **Lax** — Cookie is sent on top-level navigations (e.g. clicking a link) but not on subresource requests (images, iframes, fetch calls).
-- **None** — Cookie is always sent, including cross-site. Requires `Secure`.
+Three modes: `Strict` never sends cookies cross-site, `Lax` sends them on top-level navigations but not subresource requests, `None` always sends them (requires `Secure`). Every cookie you set should declare an explicit `SameSite` value — browser defaults have changed across versions and are not stable.
 
 ---
 
 ## How It Works
 
-When a browser makes a request, it checks the origin of the page that triggered the request against the origin of the cookie's domain. If they differ, the browser calls this a _cross-site_ request and applies `SameSite` rules.
+### "Same-Site" vs "Same-Origin"
 
-**Strict** is the most locked-down. If a user follows a link from an external site to your app, cookies marked `Strict` won't be included in that first request. This means a user arriving from Gmail by clicking a link to your dashboard won't be recognized as logged in on that initial load — they'll hit your app in an unauthenticated state until the page finishes loading and a same-site request fires.
-
-**Lax** is the browser default and a practical middle ground. Cookies are sent when the user _navigates_ to your site (GET requests via link clicks or address bar), but are withheld on cross-origin subrequests like `fetch`, `<img>`, or `<form>` POST from another domain. This blocks most CSRF vectors while preserving normal navigation UX.
-
-**None** opts the cookie out of SameSite protections entirely. You must also set `Secure`, meaning the cookie will only be transmitted over HTTPS. This is required for third-party use cases — payment widgets, embedded analytics, OAuth flows initiated from a different domain.
+These are frequently confused. Same-**origin** requires an exact match of scheme, host, and port. Same-**site** uses the **eTLD+1** (effective top-level domain + one label) — the registrable domain — and ignores subdomains and ports.
 
 ```
+eTLD+1 examples:
+  https://app.example.com     → eTLD+1 = example.com
+  https://api.example.com     → eTLD+1 = example.com  ← SAME SITE as above
+  https://example.co.uk       → eTLD+1 = example.co.uk (co.uk is an eTLD)
+  https://evil.example.com    → eTLD+1 = example.com  ← same site, different subdomain
 
-┌─────────────────────────────────────────────────────────────────┐
-│ Request Type              │ Strict │ Lax  │ None               │
-├───────────────────────────┼────────┼──────┼────────────────────┤
-│ Same-site (any)           │  ✅    │  ✅  │  ✅                │
-│ Cross-site top nav (GET)  │  ❌    │  ✅  │  ✅                │
-│ Cross-site fetch/POST     │  ❌    │  ❌  │  ✅                │
-│ Cross-site iframe/image   │  ❌    │  ❌  │  ✅                │
-└─────────────────────────────────────────────────────────────────┘
+Cross-site examples:
+  https://app.example.com  →  https://api.different.com  ← cross-site
+  https://app.example.com  →  https://example.io         ← cross-site (different TLD)
 ```
+
+`app.example.com` and `api.example.com` are **same-site** — `SameSite=Strict` cookies will be sent between them. Cross-origin (different port or subdomain) is not the same as cross-site.
+
+---
+
+### The Three Modes
+
+**`Strict`** — cookie is never sent on any cross-site request, including top-level navigations. A user arriving from an email link or a password manager redirect won't have the cookie attached on that first request — the app sees them as unauthenticated even if they just authenticated.
+
+**`Lax`** — cookie is sent on top-level same-site navigations (`GET` via link click, browser address bar) but withheld on cross-site subresource requests (`fetch`, `<img>`, `<form>` POST, iframes). This is the Chrome default for cookies without an explicit `SameSite` attribute since Chrome 80.
+
+**`None`** — cookie is always sent, including in cross-site iframes and `fetch` calls. Requires `Secure` — browsers silently drop `None` cookies without it.
+
+```
+Request Type                   Strict  Lax   None
+────────────────────────────── ──────  ───   ────
+Same-site (any)                  ✅    ✅     ✅
+Cross-site top nav GET           ❌    ✅     ✅
+Cross-site fetch / POST          ❌    ❌     ✅
+Cross-site iframe / image        ❌    ❌     ✅
+```
+
+---
+
+### Chrome 80 and the Lax-by-Default Change
+
+Before Chrome 80 (February 2020), cookies without `SameSite` were treated as `SameSite=None` — sent on all requests including cross-site. Chrome 80 changed the default to `SameSite=Lax`. Cookies without an explicit attribute are now treated as Lax in Chrome, Edge, and Firefox. Safari applies similar restrictions under ITP (see below).
+
+Practical impact: any third-party cookie (payment widget, chat embed, analytics) that relied on implicit cross-site sending broke unless explicitly updated to `SameSite=None; Secure`.
 
 ---
 
 ## Code Examples
 
-### Setting SameSite cookies in a Next.js Route Handler
+### Session Cookie — `Lax` (Correct Default)
 
 ```ts
 // app/api/auth/login/route.ts
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { createSessionToken } from "@/lib/auth";
 
-export async function POST(request: Request) {
-  const { email, password } = await request.json();
-
+export async function POST(req: Request) {
+  const { email, password } = await req.json();
   const token = await createSessionToken(email, password);
+
   if (!token) {
     return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
   }
 
   const cookieStore = await cookies();
-
-  // Auth session: Lax is appropriate here.
-  // Sent on top-level navigations so the user lands logged in,
-  // but withheld on cross-site POST/fetch to prevent CSRF.
   cookieStore.set("session", token, {
-    httpOnly: true, // JS cannot read this cookie
+    httpOnly: true, // inaccessible to JS — mitigates XSS theft
     secure: true, // HTTPS only
-    sameSite: "lax",
+    sameSite: "lax", // sent on top-level nav; blocked on cross-site POST/fetch
     path: "/",
-    maxAge: 60 * 60 * 24 * 7, // 1 week
+    maxAge: 60 * 60 * 24 * 7, // 7 days
   });
 
   return NextResponse.json({ ok: true });
 }
 ```
 
-### Setting a None cookie for a third-party widget
+`Lax` is the right default for auth session cookies — it blocks CSRF (cross-site form POST/fetch can't carry the cookie) while preserving usability (clicking an email link to your app lands authenticated).
+
+---
+
+### High-Privilege Token — `Strict`
 
 ```ts
-// app/api/widget/session/route.ts
-// Used when your service is embedded as an iframe on external sites.
+// app/api/admin/elevate/route.ts
+import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
-export async function GET() {
-  const response = NextResponse.json({ status: "initialized" });
+export async function POST(req: Request) {
+  const { mfaCode } = await req.json();
+  const elevationToken = await verifyMfaAndCreateToken(mfaCode);
 
-  // SameSite=None is required for cookies to work in cross-site iframes.
-  // Secure is mandatory when SameSite=None — browsers reject it otherwise.
+  const cookieStore = await cookies();
+  cookieStore.set("admin_token", elevationToken, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "strict", // NEVER sent cross-site, not even on link-click navigation
+    path: "/admin", // only sent on /admin/* paths
+    maxAge: 60 * 30, // 30-minute window
+  });
+
+  return NextResponse.json({ elevated: true });
+}
+```
+
+`Strict` is appropriate when even a top-level cross-site navigation shouldn't carry the cookie. A user clicking a link from an external site to `/admin` won't have `admin_token` attached — they'll need to re-authenticate within the admin section.
+
+---
+
+### Third-Party Widget — `None`
+
+```ts
+// app/api/widget/init/route.ts — embedded on external merchant sites
+export async function GET() {
+  const response = NextResponse.json({ initialized: true });
+
   response.cookies.set("widget_session", crypto.randomUUID(), {
     httpOnly: true,
-    secure: true, // Required with SameSite=None
-    sameSite: "none",
-    path: "/",
-    maxAge: 60 * 60, // 1 hour
+    secure: true, // mandatory with SameSite=None — browser rejects without it
+    sameSite: "none", // must be sent in cross-site iframe context
+    path: "/widget",
+    maxAge: 60 * 60,
   });
 
   return response;
 }
 ```
 
-### Setting a Strict cookie for sensitive operations
+<Callout type="warn">
+  `SameSite=None` without `Secure` is silently dropped by browsers — no error,
+  the cookie just doesn't exist. Always pair them. In local development, use
+  `https://localhost` (via `mkcert`) rather than `http://localhost` to test
+  `None` cookies.
+</Callout>
+
+---
+
+### Cookie Prefixes — `__Host-` and `__Secure-`
+
+Cookie prefixes are a browser-enforced security mechanism that prevents subdomain injection attacks — a subdomain setting a cookie that applies to the parent domain:
+
+**`__Secure-` prefix:**
+
+- Cookie must be set with `Secure` attribute
+- Must be set over HTTPS
+- Does not restrict `Domain` or `Path`
 
 ```ts
-// app/api/admin/impersonate/route.ts
-// Strict is ideal for high-privilege actions where you never
-// want the cookie attached from an external navigation.
-import { cookies } from "next/headers";
-import { NextResponse } from "next/server";
-
-export async function POST(request: Request) {
-  const { targetUserId } = await request.json();
-
-  const cookieStore = await cookies();
-
-  cookieStore.set("impersonation_token", targetUserId, {
-    httpOnly: true,
-    secure: true,
-    sameSite: "strict", // Never sent cross-site under any circumstance
-    path: "/admin",
-    maxAge: 60 * 30, // 30 minutes
-  });
-
-  return NextResponse.json({ impersonating: targetUserId });
-}
+cookieStore.set("__Secure-session", token, {
+  httpOnly: true,
+  secure: true, // required — browser rejects __Secure- without it
+  sameSite: "lax",
+  path: "/",
+});
 ```
 
-### Reading and clearing cookies in a Server Component
+**`__Host-` prefix (strongest):**
 
-```tsx
-// app/dashboard/page.tsx
-import { cookies } from "next/headers";
-import { redirect } from "next/navigation";
+- Must have `Secure`
+- Must NOT have a `Domain` attribute (bound to the exact host, not subdomains)
+- Must have `Path=/`
 
-export default async function DashboardPage() {
-  const cookieStore = await cookies();
-  const session = cookieStore.get("session");
+```ts
+cookieStore.set("__Host-csrf", csrfToken, {
+  httpOnly: true,
+  secure: true, // required
+  sameSite: "strict",
+  path: "/", // required — must be /
+  // domain: intentionally omitted — __Host- forbids it
+});
+```
 
-  if (!session?.value) {
-    redirect("/login");
+`__Host-` provides the strongest binding: the cookie is only sent to the exact origin that set it, preventing a compromised subdomain from hijacking the session by setting a same-named cookie on the parent domain.
+
+---
+
+### Partitioned Cookies (CHIPS)
+
+**CHIPS (Cookies Having Independent Partitioned State)** allows cross-site cookies in a third-party iframe context while preventing cross-site tracking by partitioning cookie storage by top-level site:
+
+```ts
+// Partitioned cookie: stored separately per top-level site
+// merchant-a.com embedding your widget gets a different cookie jar
+// than merchant-b.com embedding the same widget
+response.cookies.set("widget_state", sessionId, {
+  httpOnly: true,
+  secure: true,
+  sameSite: "none",
+  path: "/",
+  // Partitioned attribute: tells the browser to key this cookie by top-level site
+  // In Next.js, set it via the raw Set-Cookie header until framework support lands
+});
+
+// Set-Cookie: widget_state=abc; SameSite=None; Secure; Partitioned
+response.headers.set(
+  "Set-Cookie",
+  `widget_state=${sessionId}; SameSite=None; Secure; Partitioned; Path=/; HttpOnly`,
+);
+```
+
+Partitioned cookies solve the third-party cookie deprecation problem: they continue to work in iframes without enabling cross-site tracking because the same cookie cannot be read from different top-level contexts.
+
+---
+
+### Reading and Guarding Cookies in Middleware
+
+```ts
+// middleware.ts — validate session cookie before protected routes
+import { NextRequest, NextResponse } from "next/server";
+
+export function middleware(req: NextRequest) {
+  const session = req.cookies.get("__Host-session");
+
+  if (!session?.value && req.nextUrl.pathname.startsWith("/dashboard")) {
+    const url = req.nextUrl.clone();
+    url.pathname = "/login";
+    url.searchParams.set("next", req.nextUrl.pathname);
+    return NextResponse.redirect(url);
   }
 
-  return (
-    <main>
-      <h1>Dashboard</h1>
-      <p>Active session found.</p>
-    </main>
-  );
+  return NextResponse.next();
+}
+
+export const config = {
+  matcher: ["/dashboard/:path*", "/admin/:path*"],
+};
+```
+
+---
+
+### Safari ITP — `None` Cookies in Safari
+
+Safari's Intelligent Tracking Prevention (ITP) applies additional restrictions on top of `SameSite=None; Secure`:
+
+- In Safari, `SameSite=None` cookies in cross-site iframes are blocked by default (Storage Access API must be used to request access)
+- Cookies set by cross-site redirects may be partitioned or blocked after 7 days
+- `document.cookie` set from a first-party context may be capped at 7-day expiry if the domain has been identified as a potential tracker
+
+```ts
+// For iframes requiring cookie access in Safari, request Storage Access
+// This must be called from within the iframe on user gesture
+async function requestCookieAccess() {
+  if (!document.hasStorageAccess || !document.requestStorageAccess) {
+    return; // Not Safari — no-op
+  }
+
+  const hasAccess = await document.hasStorageAccess();
+  if (!hasAccess) {
+    // Requires user gesture (button click) — cannot be called silently
+    await document.requestStorageAccess();
+  }
 }
 ```
 
@@ -154,61 +271,52 @@ export default async function DashboardPage() {
 
 ## Real-World Use Case
 
-Consider a SaaS app with three cookie needs:
-
-1. **User auth session** → `SameSite=Lax`. The user can click a "Go to app" link from a marketing email and land authenticated. CSRF attacks on your API are still blocked because cross-origin fetches won't carry the cookie.
-
-2. **Admin privilege escalation token** → `SameSite=Strict`. Even if an attacker tricks an admin into clicking a crafted link, the cookie won't be attached on that navigation.
-
-3. **Embedded payment widget** → `SameSite=None; Secure`. Your checkout iframe loads on merchant sites across different origins. Without `None`, the browser silently drops the cookie and the iframe can't maintain state.
+**SaaS platform with three cookie types.** Main auth session (`__Host-session`, `Lax`) — sent on navigation from marketing pages, blocked on cross-site POST. Admin 2FA elevation token (`__Host-admin`, `Strict`, `Path=/admin`) — never carried on any external link, only sent on direct `/admin` navigations from the same origin. Embedded checkout widget (`widget_state`, `None; Secure; Partitioned`) — works in merchant iframes, partitioned per merchant site, survives Chrome's third-party cookie deprecation.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**1. Omitting `Secure` when using `SameSite=None`**
+**1. `SameSite=None` without `Secure`.** Silently dropped. No warning. The cookie never exists. Always pair with `Secure`.
 
-Browsers reject `SameSite=None` cookies that don't also have the `Secure` flag. The cookie is silently dropped — no error, just missing state. Always pair them.
+**2. Using `Strict` for the main auth session.** A user clicking your app link from an email, password manager, or OAuth redirect lands unauthenticated — the cookie isn't sent on that cross-site navigation. Use `Lax` for auth sessions.
 
-```ts
-// ❌ Broken — browser will ignore this cookie
-response.cookies.set("widget", "abc", { sameSite: "none" });
+**3. Confusing cross-site with cross-origin.** `app.example.com` and `api.example.com` are same-site (same eTLD+1). `SameSite=Strict` cookies flow freely between them. CORS is what restricts cross-origin reads — `SameSite` is a different axis entirely.
 
-// ✅ Correct
-response.cookies.set("widget", "abc", { sameSite: "none", secure: true });
-```
+**4. `Lax` doesn't prevent all CSRF.** `Lax` blocks cross-site `POST`/`fetch`, but cross-site `GET` navigations still carry the cookie. Never perform state mutations on `GET` endpoints.
 
-**2. Using `Strict` for your main session cookie**
-
-It feels maximally secure, but `Strict` means users arriving from password managers, email links, or external redirects after OAuth won't have their session cookie sent on that first request. Your app sees them as unauthenticated, even though they just logged in. Use `Lax` for auth sessions.
-
-<Callout type="warn">
-  OAuth flows that redirect back to your app (e.g. `?code=...` from GitHub) are
-  top-level navigations — `Lax` cookies *will* be sent. But if your app makes a
-  cross-origin `fetch` call before the redirect completes, `Strict` cookies
-  won't be attached.
-</Callout>
-
-**3. Assuming `Lax` prevents all CSRF**
-
-`Lax` blocks cross-site POST/fetch/image requests, but it does _not_ block cross-site GET navigations. Never use GET endpoints to perform state-mutating actions. If `POST /api/delete-account` were reachable via `GET`, `Lax` wouldn't save you.
-
-**4. Not setting `SameSite` explicitly**
-
-Browsers default to `Lax` for cookies without a `SameSite` attribute, but this is a browser heuristic, not a guarantee. Older browsers (Safari < 12, Chrome < 80) treat missing `SameSite` as `None`. Always be explicit.
-
-<Callout type="info">
-  When testing `SameSite=None` locally, use `https://localhost` or a tool like
-  `mkcert`. `http://localhost` won't satisfy the `Secure` requirement in most
-  browsers.
-</Callout>
-
-**5. Confusing "cross-site" with "cross-origin"**
-
-`SameSite` uses the registrable domain (eTLD+1) to determine "same site", not the full origin. `app.example.com` and `api.example.com` are considered _same-site_, so `SameSite=Strict` cookies _will_ be sent between them. Cross-origin (different port or subdomain) is not the same as cross-site.
+**5. Not using `__Host-` for CSRF tokens.** A CSRF token in a regular cookie can be overwritten by a subdomain if the `Domain` attribute is set. Using `__Host-csrf` prevents any subdomain from injecting a fake token.
 
 ---
 
 ## Summary
 
-The `SameSite` attribute gives you declarative control over when cookies are included in requests. Use `Lax` for most auth sessions — it balances usability with protection against CSRF. Reserve `Strict` for high-privilege tokens where you can tolerate the navigation UX tradeoff. Use `None` (always with `Secure`) only when cookies must work in genuinely cross-site contexts like embedded iframes or third-party widgets. Always set `SameSite` explicitly rather than relying on browser defaults, and never use GET requests for state-mutating operations regardless of which mode you choose.
+`SameSite=Lax` is the correct default for auth session cookies — it blocks cross-site CSRF while preserving navigation UX. `Strict` is appropriate for high-privilege tokens where cross-site navigation is explicitly not allowed. `None` (always with `Secure`) is for genuinely cross-site contexts like payment iframes and embedded widgets — pair with `Partitioned` to survive third-party cookie deprecation. `__Host-` prefix provides the strongest security binding: enforces `Secure`, prohibits `Domain`, and requires `Path=/`. Same-site is calculated by eTLD+1, not origin — `app.example.com` and `api.example.com` are same-site. Chrome 80 changed the no-attribute default to `Lax`; always set `SameSite` explicitly rather than relying on browser defaults.
+
+---
+
+## Interview Questions
+
+**Q1. What is the difference between "same-site" and "same-origin" in the context of cookies?**
+
+Same-**origin** requires an exact match of scheme, host, and port — `https://app.example.com` and `https://api.example.com` are different origins (different host). Same-**site** uses the eTLD+1 (effective top-level domain + one label), the registrable domain. `app.example.com` and `api.example.com` share the same eTLD+1 (`example.com`) — they are **same-site**. `SameSite` cookies flow freely between them. The distinction matters practically: CORS restricts cross-origin response reading, while `SameSite` restricts cross-site cookie sending. A request from `app.example.com` to `api.example.com` is cross-origin (CORS applies) but same-site (SameSite=Strict cookies are sent).
+
+**Q2. Why is `SameSite=Lax` the correct default for auth session cookies rather than `Strict`?**
+
+`Strict` means the cookie is never sent on any cross-site request — including top-level navigations from external sites. When a user clicks your app link in an email, a Slack message, or a password manager, that's a cross-site top-level navigation — `Strict` cookies are not sent. The server sees the user as unauthenticated and redirects to login, frustrating the user who was already logged in. OAuth redirect callbacks are also cross-site top-level navigations — `Strict` would break them. `Lax` sends cookies on top-level GET navigations but blocks cross-site subresource requests (the CSRF vectors). This preserves usability — users land authenticated from external links — while blocking the primary CSRF attack surface.
+
+**Q3. What is the `__Host-` cookie prefix and what security guarantee does it provide?**
+
+`__Host-` is a browser-enforced cookie name prefix. Cookies with this prefix are required by the browser to have: `Secure` (HTTPS only), no `Domain` attribute (bound to the exact host, not subdomains), and `Path=/`. If any of these requirements are missing, the browser silently rejects the cookie. The security guarantee: a cookie named `__Host-session` can only be set by the exact origin that owns it — not by a subdomain. This prevents a compromised subdomain from setting `__Host-session` on the parent domain to hijack sessions. For comparison, a regular `session` cookie with `Domain=example.com` can be set or overwritten by `evil.example.com` if that subdomain is ever compromised.
+
+**Q4. What is `SameSite=None; Partitioned` (CHIPS) and why was it introduced?**
+
+Third-party cookies (`SameSite=None; Secure`) allow a cross-site service (analytics, chat, checkout iframe) to maintain state across all sites that embed it — the same cookie jar is shared. This enables cross-site tracking: a tracker embedded on 100 sites can correlate the same user across all of them by reading the same cookie. Browsers are deprecating unpartitioned third-party cookies. CHIPS (Cookies Having Independent Partitioned State) partitions the cookie jar by top-level site: a `widget_session` cookie set when embedded on `merchant-a.com` is stored separately from the same cookie when embedded on `merchant-b.com`. The widget maintains state per embedding site but cannot correlate users across sites. The `Partitioned` attribute opts into this behavior.
+
+**Q5. What happened in Chrome 80 that broke many third-party cookies?**
+
+Before Chrome 80, cookies without an explicit `SameSite` attribute were treated as `SameSite=None` — sent on all requests including cross-site iframes and fetch calls. Chrome 80 (released February 2020) changed the default to `SameSite=Lax` for cookies without an explicit attribute. Any third-party service that relied on implicit cross-site cookie sending — payment widgets, social login buttons, analytics, embedded iframes — had their cookies silently blocked unless they were updated to explicitly declare `SameSite=None; Secure`. This broke a large number of third-party integrations, especially those that hadn't been actively maintained. The fix was straightforward: add `SameSite=None; Secure` — but it required coordination across all affected services.
+
+**Q6. How does Safari's ITP affect `SameSite=None` cookies and what is the Storage Access API?**
+
+Safari's Intelligent Tracking Prevention classifies domains it believes are tracking users and applies additional restrictions. Even with `SameSite=None; Secure`, cross-site cookies in iframes from classified tracker domains are blocked in Safari by default — the `SameSite=None` attribute alone is not sufficient to permit them. The **Storage Access API** (`document.requestStorageAccess()`) allows an iframe to request permission to access its first-party cookies in a cross-site context. It must be called in response to a user gesture (a button click inside the iframe), and the browser may show a permission prompt. Once granted, the iframe can read its cookies as if it were a first-party context. This is the intended path for legitimate cross-site embedded services — chat widgets, payment forms — that need cookie access in Safari.
