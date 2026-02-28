@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
   AudioPlayerProvider,
   AudioPlayerButton,
@@ -9,6 +11,7 @@ import {
   AudioPlayerSpeed,
   useAudioPlayer,
 } from "@/components/ui/audio-player";
+import { useDocsNavigation } from "@/components/contexts/docs-navigation";
 import { getAudio } from "./audios";
 
 type AudioProps = {
@@ -28,6 +31,7 @@ export function Audio({ src, title }: AudioProps) {
 
 function AudioPlayerUI({ src, title }: { src: string; title?: string }) {
   const player = useAudioPlayer();
+  const { previous, next } = useDocsNavigation();
   const item = { id: src, src };
 
   return (
@@ -61,6 +65,34 @@ function AudioPlayerUI({ src, title }: { src: string; title?: string }) {
           }
         }}
       />
+
+      {/* Row 3: Previous / Next navigation */}
+      {(previous || next) && (
+        <div className="flex items-center justify-between pt-1">
+          {previous ? (
+            <Link
+              href={previous.url}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <ChevronLeft className="size-3.5" />
+              <span className="truncate max-w-[150px]">{previous.name}</span>
+            </Link>
+          ) : (
+            <span />
+          )}
+          {next ? (
+            <Link
+              href={next.url}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <span className="truncate max-w-[150px]">{next.name}</span>
+              <ChevronRight className="size-3.5" />
+            </Link>
+          ) : (
+            <span />
+          )}
+        </div>
+      )}
     </div>
   );
 }
