@@ -138,7 +138,7 @@ The `ma` (max-age) parameter controls how long the browser caches the Alt-Svc en
 
 `Alt-Svc` requires a prior HTTP/1.1 or HTTP/2 response — the very first request to a new origin never uses HTTP/3. HTTPS DNS records (RFC 9460) solve this by advertising ALPN protocols in DNS:
 
-```dns
+```txt
 ; DNS zone file — HTTPS SVCB record advertising h3 and h2
 _https._tcp.example.com.  300  IN  HTTPS  1 . alpn=h3,h2
 ```
