@@ -1,283 +1,381 @@
 ---
 title: Pointer Events
-description: A comprehensive guide to the Pointer Events API for handling mouse, touch, and stylus input in modern web applications.
+description: How the Pointer Events API unifies mouse, touch, and stylus input — pointerId multi-touch tracking, setPointerCapture for drag reliability, touch-action CSS, pointercancel handling, hardware metadata (pressure, tiltX, tiltY), and the accessibility implications of touch-only patterns.
 ---
 
 ## Overview
 
-The Pointer Events API is a unified input model that handles mouse, touch, and stylus interactions through a single set of events. Instead of juggling `mousedown`, `touchstart`, and vendor-prefixed stylus events separately, you write one handler that works across all input types.
+Before the Pointer Events API, web developers maintained separate `mousedown`/`mousemove` and `touchstart`/`touchmove` handlers for every interactive element — duplicating logic and producing subtle behavioural differences across device types. The Pointer Events API unifies all input devices — mouse, touch, and stylus (pen) — into a single consistent event model.
 
-This matters because modern devices blur the line between pointer types — a laptop can have a touchscreen, a tablet can have a stylus and a mouse. The Pointer Events API gives you a single, consistent way to respond to all of them, with extra metadata (pressure, tilt, contact geometry) when the hardware supports it.
+Every contact point (a finger, mouse cursor, or pen tip) gets a unique `pointerId`. Events fire in a consistent sequence regardless of input type. Hardware metadata like `pressure`, `tiltX`, and `tiltY` is available when the device supports it.
+
+---
 
 ## How It Works
 
-Every pointer interaction — whether from a finger, mouse, or pen — fires a `PointerEvent`. This extends the base `MouseEvent`, so properties like `clientX`, `clientY`, and `button` still work exactly as you'd expect.
+### Event Sequence
 
-Each event carries a `pointerType` property (`"mouse"`, `"touch"`, or `"pen"`) so you can branch behavior when needed. Every active pointer also gets a unique `pointerId`, which lets you track multiple simultaneous touches independently.
+Every pointer interaction follows this lifecycle:
 
-Think of it like a universal adapter: the underlying hardware sends its signal, the browser normalizes it into a `PointerEvent`, and your handler receives a clean, consistent object regardless of the input source.
+```
+pointerdown  →  pointermove  →  pointerup
+                                pointercancel  (browser takeover — handle this)
+```
 
-**Core events:**
+| Event                           | When it fires                                                 |
+| ------------------------------- | ------------------------------------------------------------- |
+| `pointerdown`                   | Contact begins (mouse button down, finger touch, pen contact) |
+| `pointermove`                   | Pointer moves while in contact or hovering                    |
+| `pointerup`                     | Contact ends cleanly                                          |
+| `pointercancel`                 | Browser takes control (system gesture, scroll, screen lock)   |
+| `pointerenter` / `pointerleave` | Pointer enters/leaves element boundary (doesn't bubble)       |
+| `pointerover` / `pointerout`    | Like mouseenter/mouseleave but bubbles                        |
 
-| Event                                      | Fires when...                                                   |
-| ------------------------------------------ | --------------------------------------------------------------- |
-| `pointerdown`                              | A pointer makes contact with the element                        |
-| `pointermove`                              | A pointer moves while over or captured by the element           |
-| `pointerup`                                | A pointer is released                                           |
-| `pointerenter` / `pointerleave`            | A pointer enters or leaves the element boundary                 |
-| `pointercancel`                            | The browser cancels a pointer interaction (e.g., scroll starts) |
-| `gotpointercapture` / `lostpointercapture` | Pointer capture is acquired or released                         |
+### Key Properties
+
+| Property              | Type                          | Description                                                           |
+| --------------------- | ----------------------------- | --------------------------------------------------------------------- |
+| `pointerId`           | `number`                      | Unique ID for each contact point (finger, pen, mouse cursor)          |
+| `pointerType`         | `"mouse" \| "touch" \| "pen"` | Input device type                                                     |
+| `isPrimary`           | `boolean`                     | True for the first contact in a multi-touch sequence                  |
+| `pressure`            | `number`                      | 0–1; 0 = no contact, 0.5 = mouse button held, 1 = max pen pressure    |
+| `tiltX` / `tiltY`     | `number`                      | Pen tilt angle in degrees (−90 to 90)                                 |
+| `width` / `height`    | `number`                      | Contact area size in CSS pixels (finger pads are wider than pen tips) |
+| `clientX` / `clientY` | `number`                      | Position relative to viewport                                         |
 
 ### Pointer Capture
 
-Pointer capture is one of the most powerful (and underused) features. Calling `element.setPointerCapture(pointerId)` routes all future events from that pointer to your element — even if the pointer moves outside it. This is essential for drag interactions.
+`setPointerCapture(pointerId)` routes all subsequent events for that pointer to the capturing element — regardless of where the pointer physically moves. Critical for drag interactions: without capture, `pointermove` stops firing the moment the pointer leaves the element's bounding box.
+
+### `touch-action` CSS
+
+The browser intercepts touch events for its own pan/zoom gestures before firing `pointermove`. Setting `touch-action: none` on an element tells the browser to skip its own gesture handling and pass all touch events to the page's JavaScript. Without it, the browser may scroll instead of firing your `pointermove`, or fire `pointercancel` mid-gesture.
+
+---
 
 ## Code Examples
 
-### Basic Multi-Input Drawing Canvas
+### 1. Universal Drag Interaction
 
 ```tsx
+// components/DraggableCard.tsx
 "use client";
-
 import { useRef } from "react";
 
-export default function DrawingCanvas() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  // Track active strokes by pointerId so multi-touch works correctly
-  const activeStrokes = useRef<Map<number, { x: number; y: number }>>(
-    new Map(),
-  );
+export function DraggableCard({ children }: { children: React.ReactNode }) {
+  const cardRef = useRef<HTMLDivElement>(null);
+  const drag = useRef({
+    active: false,
+    startX: 0,
+    startY: 0,
+    origX: 0,
+    origY: 0,
+  });
 
-  function getContext() {
-    const canvas = canvasRef.current;
-    return canvas?.getContext("2d") ?? null;
+  function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    // Capture the pointer — ensures pointermove fires even outside the element
+    e.currentTarget.setPointerCapture(e.pointerId);
+
+    const rect = cardRef.current!.getBoundingClientRect();
+    drag.current = {
+      active: true,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: rect.left,
+      origY: rect.top,
+    };
   }
 
-  function handlePointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  function onPointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (!drag.current.active) return;
 
-    // Capture this pointer so we keep receiving events even if the
-    // cursor/finger moves outside the canvas boundary
-    canvas.setPointerCapture(e.pointerId);
+    const dx = e.clientX - drag.current.startX;
+    const dy = e.clientY - drag.current.startY;
 
-    const rect = canvas.getBoundingClientRect();
-    activeStrokes.current.set(e.pointerId, {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top,
+    cardRef.current!.style.transform = `translate(${dx}px, ${dy}px)`;
+  }
+
+  function onPointerUp(e: React.PointerEvent<HTMLDivElement>) {
+    drag.current.active = false;
+    // Capture releases automatically on pointerup, but explicit is clearer
+    e.currentTarget.releasePointerCapture(e.pointerId);
+  }
+
+  // pointercancel fires when the browser takes over (system gesture, scroll, etc.)
+  // Treat it identically to pointerup — reset state
+  function onPointerCancel(e: React.PointerEvent<HTMLDivElement>) {
+    drag.current.active = false;
+    cardRef.current!.style.transform = "";
+  }
+
+  return (
+    <div
+      ref={cardRef}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      style={{
+        touchAction: "none", // prevent browser scroll/zoom during drag
+        cursor: "grab",
+        userSelect: "none",
+        display: "inline-block",
+        padding: "1rem",
+        border: "1px solid #ccc",
+        borderRadius: "8px",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+```
+
+---
+
+### 2. Multi-Touch Tracking with `pointerId`
+
+```tsx
+// components/Canvas.tsx
+"use client";
+import { useRef } from "react";
+
+interface ActivePoint {
+  x: number;
+  y: number;
+  prevX: number;
+  prevY: number;
+}
+
+export function DrawingCanvas() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Map from pointerId → active stroke data
+  // Keying by pointerId is essential — each finger is a separate contact
+  const points = useRef(new Map<number, ActivePoint>());
+
+  function getCtx() {
+    return canvasRef.current?.getContext("2d");
+  }
+
+  function onPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    points.current.set(e.pointerId, {
+      x: e.clientX,
+      y: e.clientY,
+      prevX: e.clientX,
+      prevY: e.clientY,
     });
   }
 
-  function handlePointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
-    const ctx = getContext();
-    const canvas = canvasRef.current;
-    if (!ctx || !canvas) return;
+  function onPointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
+    const point = points.current.get(e.pointerId);
+    if (!point) return;
 
-    const stroke = activeStrokes.current.get(e.pointerId);
-    if (!stroke) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const ctx = getCtx();
+    if (!ctx) return;
 
     ctx.beginPath();
-    ctx.moveTo(stroke.x, stroke.y);
-    ctx.lineTo(x, y);
+    ctx.moveTo(point.prevX, point.prevY);
+    ctx.lineTo(e.clientX, e.clientY);
 
-    // Use pressure for line width when the hardware supports it (pen/touch).
-    // Mouse always reports pressure of 0.5, so we fall back to a fixed width.
-    ctx.lineWidth = e.pointerType === "mouse" ? 2 : e.pressure * 8;
-    ctx.lineCap = "round";
-    ctx.strokeStyle = e.pointerType === "pen" ? "#0ea5e9" : "#111827";
+    // Scale line width by pressure — works for stylus, approximated for touch
+    // Mouse always reports pressure=0.5 when button held, so ignore for mouse
+    ctx.lineWidth =
+      e.pointerType === "pen"
+        ? Math.max(1, e.pressure * 10) // pen pressure is meaningful
+        : 2; // fixed width for mouse and touch
+
+    ctx.strokeStyle = e.pointerType === "pen" ? "#1e293b" : "#3b82f6";
     ctx.stroke();
 
-    // Update the last known position for this pointer
-    activeStrokes.current.set(e.pointerId, { x, y });
+    // Update previous position
+    points.current.set(e.pointerId, {
+      x: e.clientX,
+      y: e.clientY,
+      prevX: e.clientX,
+      prevY: e.clientY,
+    });
   }
 
-  function handlePointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
-    activeStrokes.current.delete(e.pointerId);
+  function onPointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
+    points.current.delete(e.pointerId);
+  }
+
+  // pointercancel — browser took over, clean up this pointer's state
+  function onPointerCancel(e: React.PointerEvent<HTMLCanvasElement>) {
+    points.current.delete(e.pointerId);
   }
 
   return (
     <canvas
       ref={canvasRef}
       width={800}
-      height={500}
-      className="border border-gray-200 rounded-lg touch-none"
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      // Also clean up if the browser cancels the pointer (e.g., scroll gesture)
-      onPointerCancel={handlePointerUp}
+      height={600}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      style={{ touchAction: "none", border: "1px solid #e2e8f0" }}
     />
   );
 }
 ```
 
-<Callout type="warn">
-  Always add `touch-action: none` (or the Tailwind class `touch-none`) to
-  elements that handle pointer events manually. Without it, the browser may
-  intercept touch gestures (like scrolling) and fire `pointercancel` before your
-  handler gets meaningful data.
-</Callout>
+---
 
-### Draggable Element with Pointer Capture
+### 3. Pressure and Tilt (Stylus)
 
 ```tsx
+// components/StylusInfo.tsx
 "use client";
-
-import { useRef, useState } from "react";
-
-export default function DraggableCard() {
-  const cardRef = useRef<HTMLDivElement>(null);
-  const dragState = useRef<{
-    startX: number;
-    startY: number;
-    originX: number;
-    originY: number;
-  } | null>(null);
-  const [position, setPosition] = useState({ x: 0, y: 0 });
-
-  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
-    // Only drag on primary button (left mouse / single finger / pen tip)
-    if (!e.isPrimary) return;
-
-    cardRef.current?.setPointerCapture(e.pointerId);
-
-    dragState.current = {
-      startX: e.clientX,
-      startY: e.clientY,
-      originX: position.x,
-      originY: position.y,
-    };
-  }
-
-  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
-    if (!dragState.current) return;
-
-    const dx = e.clientX - dragState.current.startX;
-    const dy = e.clientY - dragState.current.startY;
-
-    setPosition({
-      x: dragState.current.originX + dx,
-      y: dragState.current.originY + dy,
-    });
-  }
-
-  function handlePointerUp() {
-    dragState.current = null;
-  }
-
-  return (
-    <div
-      ref={cardRef}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerUp}
-      style={{ transform: `translate(${position.x}px, ${position.y}px)` }}
-      className="w-48 p-4 bg-white rounded-xl shadow-lg cursor-grab active:cursor-grabbing select-none touch-none"
-    >
-      Drag me anywhere
-    </div>
-  );
-}
-```
-
-### Reading Pen/Stylus Metadata
-
-```tsx
-"use client";
-
 import { useState } from "react";
 
-interface PenStats {
+interface StylusStats {
   pressure: number;
   tiltX: number;
   tiltY: number;
-  twist: number;
-  width: number;
-  height: number;
+  pointerType: string;
 }
 
-export default function PenDebugger() {
-  const [stats, setStats] = useState<PenStats | null>(null);
+export function StylusInfo() {
+  const [stats, setStats] = useState<StylusStats | null>(null);
 
-  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
-    if (e.pointerType !== "pen") return;
-
+  function onPointerMove(e: React.PointerEvent<HTMLDivElement>) {
     setStats({
-      pressure: e.pressure, // 0–1, how hard the pen is pressed
-      tiltX: e.tiltX, // –90 to 90 degrees from vertical (X axis)
-      tiltY: e.tiltY, // –90 to 90 degrees from vertical (Y axis)
-      twist: e.twist, // 0–359 degrees rotation around its own axis
-      width: e.width, // contact area width in CSS pixels
-      height: e.height, // contact area height in CSS pixels
+      pressure: e.pressure,
+      tiltX: e.tiltX, // degrees from vertical in the X plane (−90 to 90)
+      tiltY: e.tiltY, // degrees from vertical in the Y plane (−90 to 90)
+      pointerType: e.pointerType,
     });
   }
 
   return (
     <div
-      className="w-full h-64 border-2 border-dashed border-gray-300 rounded-lg flex items-center justify-center touch-none"
-      onPointerMove={handlePointerMove}
+      onPointerMove={onPointerMove}
+      style={{ touchAction: "none", padding: "2rem", border: "1px solid #ccc" }}
     >
       {stats ? (
-        <pre className="text-sm text-gray-700">
-          {JSON.stringify(stats, null, 2)}
-        </pre>
+        <pre>{JSON.stringify(stats, null, 2)}</pre>
       ) : (
-        <p className="text-gray-400">Move a stylus over this area</p>
+        <p>Move a pointer (pen/touch/mouse) over this area</p>
       )}
     </div>
   );
 }
 ```
 
-## Real-World Use Cases
+---
 
-**Signature pad** — A legal or fintech app needs users to sign documents on a tablet. Using `pointerdown`/`pointermove` with `setPointerCapture` and pressure data from a stylus produces smooth, realistic signatures that work equally well with a finger or mouse on devices without a pen.
+### 4. Accessibility — Ensuring Touch-Only Interactions Have Keyboard Alternatives
 
-**Whiteboard / collaborative canvas** — A design tool like an online whiteboard needs to support multiple simultaneous touch points (two-finger zoom, each user drawing at once). The `pointerId` system makes tracking each contact trivial — no index juggling like with the Touch Events API.
+Touch-only interactions (swipe to delete, long-press for context, custom drag) are inaccessible to keyboard users and users of switch devices. Always provide a keyboard alternative:
 
-**Custom drag-and-drop** — When the native HTML Drag and Drop API is too constrained (no touch support, limited visual control), building drag with Pointer Events gives you consistent behavior across desktop and mobile without a library.
+```tsx
+// components/SwipeableListItem.tsx
+"use client";
 
-**Game controls** — A browser game that needs analog input (how hard is the player pressing?) or pen tilt for aiming can read `pressure` and `tiltX`/`tiltY` directly from `PointerEvent`.
+interface ListItemProps {
+  label: string;
+  onDelete: () => void;
+}
 
-## Common Mistakes / Gotchas
+export function SwipeableListItem({ label, onDelete }: ListItemProps) {
+  // Swipe gesture for touch users
+  let startX = 0;
 
-### 1. Forgetting `touch-action: none`
+  function onPointerDown(e: React.PointerEvent) {
+    startX = e.clientX;
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
 
-If you don't disable the browser's default touch handling, the browser may scroll or zoom instead of forwarding pointer events to your handler. Worse, it may fire `pointercancel` mid-gesture, silently killing your interaction. Always set `touch-action: none` on interactive elements that manage their own pointer input.
+  function onPointerUp(e: React.PointerEvent) {
+    const delta = e.clientX - startX;
+    if (delta < -80) onDelete(); // swipe left by 80px → delete
+  }
 
-```css
-.interactive-element {
-  touch-action: none; /* disable browser pan/zoom so pointer events fire cleanly */
+  return (
+    <div
+      style={{ display: "flex", alignItems: "center", gap: "1rem" }}
+      onPointerDown={onPointerDown}
+      onPointerUp={onPointerUp}
+    >
+      <span>{label}</span>
+
+      {/*
+       * ✅ Keyboard-accessible delete button alongside the swipe gesture.
+       * Touch users can swipe; keyboard/AT users use this button.
+       * Never rely solely on gesture interactions.
+       */}
+      <button type="button" onClick={onDelete} aria-label={`Delete ${label}`}>
+        Delete
+      </button>
+    </div>
+  );
 }
 ```
 
-### 2. Not using `setPointerCapture` for drag interactions
-
-Without pointer capture, `pointermove` events stop firing the moment the pointer leaves the element boundary. Users who drag quickly will "drop" their element mid-gesture. Always call `setPointerCapture(e.pointerId)` in your `pointerdown` handler for any drag or drawing scenario.
-
-### 3. Treating all pointers as primary
-
-When multiple fingers are on screen, only the first is `isPrimary === true`. If your handler unconditionally reads `e.clientX` without checking `pointerId`, simultaneous touches will corrupt each other's state. Use a `Map<number, ...>` keyed by `pointerId` to track each pointer independently.
-
-### 4. Assuming `pressure` is accurate for all devices
-
-A mouse always reports `pressure` as `0.5` when a button is held and `0` otherwise — it cannot actually measure pressure. Only genuine pen and touch hardware provides meaningful pressure values. Gate pressure-sensitive behavior on `e.pointerType !== 'mouse'` or check if `e.pressure > 0 && e.pointerType === 'pen'`.
-
-### 5. Ignoring `pointercancel`
-
-The browser fires `pointercancel` when it takes over — for example, a system gesture interrupts your interaction. If you only listen for `pointerup`, leaked state (active strokes, drag positions) will accumulate. Always handle `pointercancel` the same way you handle `pointerup`.
-
-<Callout type="info">
-  The Pointer Events API is supported in all modern browsers (Chrome, Firefox,
-  Safari, Edge). Safari added full support in version 13. You don't need a
-  polyfill for any current browser target.
+<Callout type="warn">
+  WCAG 2.1 SC 2.5.1 (Pointer Gestures) requires that all functionality using
+  multi-point or path-based gestures (swipe, pinch, drag) also be operable with
+  a single pointer via an alternative mechanism. Touch-only interactions without
+  keyboard equivalents are a WCAG failure.
 </Callout>
+
+---
+
+## Real-World Use Cases
+
+**Signature pad** — Legal or fintech apps need signatures on tablets. `pointerdown`/`pointermove` with `setPointerCapture` and pen `pressure` produces smooth, realistic signatures that work equally well with finger, mouse, or stylus.
+
+**Whiteboard** — A collaborative canvas needs simultaneous multi-touch (two-finger zoom, multiple users drawing). The `pointerId` system tracks each contact independently without index juggling.
+
+**Custom drag-and-drop** — When the native HTML DnD API is too constrained (no touch support, limited visual control), Pointer Events gives consistent cross-device drag without a library dependency.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Forgetting `touch-action: none`.** Without it, the browser's pan/zoom gesture handling fires before your `pointermove` or fires `pointercancel` mid-drag. Always set `touch-action: none` on elements that manage their own pointer input.
+
+**2. Not calling `setPointerCapture` for drag interactions.** Without capture, `pointermove` stops firing when the pointer leaves the element boundary. Fast drags silently "drop" the element. Always call `e.currentTarget.setPointerCapture(e.pointerId)` in `pointerdown`.
+
+**3. Treating all pointers as primary.** When multiple fingers are on screen, only the first contact is `isPrimary === true`. Using `e.clientX` unconditionally without keying by `pointerId` corrupts state when two fingers interact simultaneously. Always use a `Map<number, ...>` keyed by `pointerId`.
+
+**4. Assuming `pressure` is meaningful for mice.** A mouse always reports `pressure = 0.5` when a button is held and `0` otherwise — it has no pressure sensor. Only genuine pen and some touch hardware provides meaningful pressure values. Gate pressure-sensitive behaviour on `e.pointerType === "pen"`.
+
+**5. Ignoring `pointercancel`.** The browser fires `pointercancel` when a system gesture (back swipe, screen lock, notification) interrupts the interaction. If you only handle `pointerup`, leaked state (active drag positions, open contact IDs in your Map) accumulates. Always handle `pointercancel` identically to `pointerup`.
+
+---
 
 ## Summary
 
-The Pointer Events API unifies mouse, touch, and stylus input into a single, consistent event model — eliminating the need to maintain separate `mouse*` and `touch*` handlers. Each pointer gets a unique `pointerId` for independent multi-touch tracking, and hardware metadata like `pressure`, `tiltX`, and `tiltY` is available when the device supports it. Pointer capture (`setPointerCapture`) is critical for robust drag and drawing interactions, ensuring events continue firing even when the pointer leaves the element. Always pair pointer event listeners with `touch-action: none` to prevent the browser from intercepting gestures before your handlers can process them. Together, these features give you a production-grade input system that works across every modern device and input method.
+The Pointer Events API unifies mouse, touch, and stylus input into a single event model — eliminating separate `mouse*` and `touch*` handlers. Each contact gets a unique `pointerId` for independent multi-touch tracking, and hardware metadata like `pressure` and `tiltX/tiltY` is available when supported. `setPointerCapture` is essential for drag and drawing interactions to keep events firing outside element boundaries. Always set `touch-action: none` to prevent browser gesture interception. Handle `pointercancel` identically to `pointerup` to avoid leaked state. For accessibility: any touch gesture interaction must have a keyboard-accessible alternative per WCAG 2.1 SC 2.5.1.
+
+---
+
+## Interview Questions
+
+**Q1. What problem does the Pointer Events API solve, and how does it unify input handling?**
+
+Before Pointer Events, developers maintained duplicate event handler sets: `mousedown`/`mousemove`/`mouseup` for mouse users and `touchstart`/`touchmove`/`touchend` for touch users. These APIs have different shapes (touch events have a `touches` array; mouse events have single coordinates), different default browser behaviours, and different platform quirks. The Pointer Events API maps all input devices — mouse, capacitive touch, resistive touch, stylus/pen, and eye-tracking pointers — onto a single event type with a consistent property shape. `pointerdown`, `pointermove`, `pointerup`, and `pointercancel` fire for all device types. Device-specific information (pressure, tilt, contact size) is available via standard properties, and `pointerType` lets you branch on device type when needed. One set of handlers covers all input devices.
+
+**Q2. What is `setPointerCapture` and why is it critical for drag interactions?**
+
+`setPointerCapture(pointerId)` routes all subsequent events for the captured pointer to the element that called it, regardless of where the pointer physically moves on screen. Without capture: when a user drags an element and their pointer exits the element's bounding box (which happens instantly with fast mouse movements), the browser stops delivering `pointermove` and `pointerup` events to that element — the drag silently breaks. With capture: all events continue routing to the capturing element until `pointerup`, `pointercancel`, or explicit `releasePointerCapture` is called. Call `setPointerCapture(e.pointerId)` in `pointerdown`. Pointer capture releases automatically when the pointer is lifted, so `releasePointerCapture` is rarely needed explicitly.
+
+**Q3. What is `touch-action` and what happens if you forget to set it?**
+
+`touch-action` is a CSS property that tells the browser which touch gestures it should handle natively (pan, pinch-zoom) versus pass to the page's JavaScript. The default is `auto` — the browser handles its own gestures and may intercept touch input before your pointer event handlers fire. On a vertically scrollable page, a downward touch drag fires the browser's scroll behaviour rather than triggering `pointermove`. Worse: once the browser decides to scroll, it fires `pointercancel` on your element, cancelling any in-progress interaction. Setting `touch-action: none` disables all browser gesture handling on the element, ensuring all touch events flow to your handlers. `touch-action: pan-x` allows horizontal scrolling but not vertical; `touch-action: pan-y` does the opposite — useful when you want to intercept only one axis.
+
+**Q4. Why must you handle `pointercancel` and what triggers it?**
+
+`pointercancel` fires when the browser forcibly ends a pointer interaction — it does not fire if the user lifts their finger cleanly (that's `pointerup`). Common triggers: a system gesture interrupts (iOS back swipe, Android task switcher swipe, screen lock), the browser decides to scroll or zoom instead of passing events to the page (especially without `touch-action: none`), a touch contact is lost due to too many simultaneous touches, or the device orientation changes mid-interaction. If you only handle `pointerup`, `pointercancel` leaves your interaction in a broken state: the drag position is still "active" in your state, the captured pointer is released by the browser but your Map still has an entry, and the element may be visually stuck in its dragged position. Handle `pointercancel` identically to `pointerup`: release state, clear the `pointerId` from your Map, reset any in-progress visual changes.
+
+**Q5. What is the WCAG requirement for gesture-based interactions, and how do you satisfy it?**
+
+WCAG 2.1 Success Criterion 2.5.1 (Pointer Gestures, Level A) requires that all functionality that uses multi-point gestures (pinch-zoom, two-finger swipe) or path-based gestures (swipe to delete, drag to reorder) can also be operated with a single pointer via an alternative mechanism. "Single pointer" means a single tap, click, or simple drag — it does not require keyboard access specifically, but in practice the alternative is usually a button. For a swipe-to-delete list item: provide a "Delete" button alongside the swipe gesture. For pinch-to-zoom: provide + and − buttons. For drag-to-reorder: provide up/down arrow buttons or a handle with keyboard support. The gesture is not forbidden — the alternative is required. Additionally, SC 2.5.4 (Motion Actuation) requires that any function activated by device motion (shake to undo) also be available via a conventional UI control.
+
+**Q6. Why does a mouse always report `pressure = 0.5` and how should you handle pressure data for multi-device scenarios?**
+
+The `pressure` property in `PointerEvent` represents the normalised pressure (0–1) of the contact. For genuine pressure-sensitive hardware (stylus/pen, some touchscreens), this value varies continuously based on how hard the user presses. For a mouse, there is no pressure sensor — the spec defines that `pressure` is `0.5` when any mouse button is depressed and `0` when no button is pressed. This is a static value, not a measurement. If you build pressure-sensitive drawing where line width scales with `pressure`, mouse users always get exactly `0.5 * maxWidth` — which may be acceptable but is not variable. Gate pressure-sensitive behaviour on `e.pointerType === "pen"`, provide a fixed line width for `"mouse"` and `"touch"`, and document what hardware your feature requires. `tiltX` and `tiltY` similarly return `0` for non-pen devices — gate tilt-based brush angle on `e.pointerType === "pen"`.
