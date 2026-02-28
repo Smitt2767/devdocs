@@ -9,16 +9,18 @@ Caching is one of the highest-leverage performance tools available — and one o
 
 The section follows the request lifecycle outward: HTTP headers first, then CDN edge, then the client-side network proxy, then structured client storage, and finally what happens when the network disappears entirely.
 
-## What's covered
+---
 
-**HTTP Caching Strategies** — `Cache-Control` directives (`max-age`, `stale-while-revalidate`, `no-store`), `ETag` and `Last-Modified` for conditional requests, and how browser cache, service worker cache, and CDN cache layer on top of each other.
+## What's Covered
 
-**Cache Invalidation Strategies** — The hardest problem in caching. Versioned URLs, cache tags, surrogate keys, and the trade-offs of time-based vs event-based invalidation.
+**HTTP Caching Strategies** — `Cache-Control` directives in depth: `max-age` vs `s-maxage` for split browser/CDN TTLs, `stale-while-revalidate` for latency-free background refresh, `stale-if-error` for resilience under origin failure, `immutable` for content-hashed assets, and `no-cache` vs `no-store` — the most commonly confused directives. Also covers ETag conditional requests, the `Vary` header and why `Vary: Cookie` disables CDN caching, React `cache()` for request-level deduplication, and Next.js `fetch` cache options.
 
-**CDN Cache Purging** — How to reliably invalidate content at the edge after a deploy, without serving stale responses or triggering a thundering herd on the origin.
+**Cache Invalidation Strategies** — TTL, tag-based on-demand, event-driven webhooks, and stale-while-revalidate — each suited to different freshness requirements. Next.js `revalidateTag` vs `revalidatePath` and when to use each. Next.js 15's `use cache` directive with `cacheTag` and `cacheLife` presets. Thundering herd prevention with TTL jitter, CDN request coalescing, and proactive cache warming. Webhook HMAC signature verification before invalidation.
 
-**Service Worker Lifecycle Traps** — The confusing lifecycle states (installing, waiting, active) that cause developers to ship a new service worker and wonder why users still see old content.
+**CDN Cache Purging** — URL-based, wildcard, and tag/surrogate-key purging. Cloudflare `Cache-Tag` API and Fastly `Surrogate-Key` with soft vs hard purge semantics. Vercel Edge Network's integrated `revalidateTag` that purges both the Next.js Data Cache and edge layer simultaneously. Origin shields to prevent post-purge stampedes. Purge-on-deploy CI pipeline patterns. Browser cache as the layer CDN purging cannot reach.
 
-**IndexedDB** — The browser's built-in structured storage database — async, transactional, and indexed. When to use it over `localStorage`, and the API patterns that make it manageable.
+**Service Worker Lifecycle Traps** — The install → waiting → activating → controlling sequence and every phase's failure modes. `event.waitUntil()`, `self.clients.claim()`, and the `skipWaiting` + prompt-to-reload pattern. Workbox strategy classes (`CacheFirst`, `NetworkFirst`, `StaleWhileRevalidate`, `NetworkOnly`) as the production alternative to hand-rolled caching. Navigation preload for eliminating SW startup latency. Periodic Background Sync for keeping content fresh without user interaction.
 
-**Offline Conflict Resolution** — What happens when a user writes data offline and the network comes back. Last-write-wins, server-wins, CRDT-based merging, and UI patterns for surfacing conflicts.
+**IndexedDB** — The browser's structured storage database with async transactions, secondary indexes, compound indexes, and cursor-based pagination. The `idb` wrapper for Promises and TypeScript type safety. Transaction auto-commit trap with `await` inside a transaction. `versionchange` blocking handler. Storage mechanism comparison: `localStorage`, `sessionStorage`, IndexedDB, Cache API, OPFS, and cookies — when each is correct. `navigator.storage.estimate()` and `navigator.storage.persist()` for quota management.
+
+**Offline Conflict Resolution** — Storage-layer mechanics: IndexedDB write queue with `idb` (sequential flushing, put-based deduplication), Background Sync API for reconnection-triggered flush with `online` event fallback, `navigator.storage.persist()` to protect queue survival, and `BroadcastChannel` for SW-to-page conflict notification. Server-side optimistic locking with version numbers (409 conflict response). Three-way merge (`base + local + remote`) for auto-resolving non-overlapping field changes. Conflict resolution UI component for user-prompted resolution of overlapping edits.

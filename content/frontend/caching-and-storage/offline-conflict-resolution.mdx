@@ -1,123 +1,339 @@
 ---
 title: Offline Conflict Resolution
-description: How to detect, manage, and resolve data conflicts that arise when offline-capable web apps sync changes back to a server.
+description: The storage-layer mechanics of offline conflict resolution — IndexedDB write queues with the idb library, Background Sync API coordination, version-based conflict detection, per-field merge strategies, conflict UI patterns, and persistent queue survival.
 ---
 
 ## Overview
 
-When a web app supports offline usage, users can make changes while disconnected. When they reconnect, those local changes need to sync to the server — but the server may have already received conflicting updates from another client or session.
+When a web app supports offline usage, users write data without a live server connection. When they reconnect, that data must sync — but the server may have received conflicting updates from another client or session. Detecting, queuing, and resolving those conflicts is the core problem.
 
-**Offline conflict resolution** is the set of strategies and implementation patterns used to detect these conflicts and decide which version of data wins, or how to merge both.
+This article focuses on the **storage and caching layer**: how to build a reliable offline write queue in IndexedDB, how to coordinate flushing with the Background Sync API, how to detect conflicts at the server, and how to surface them to the user without silently discarding anyone's work.
 
-This affects any app using:
-
-- Service Workers + background sync
-- Local-first databases (PouchDB, IndexedDB, Replicache, TinyBase)
-- Optimistic UI updates
-- Collaborative editing features
+For CRDT-based merge algorithms and vector clock implementations, see the State Management section's Offline Conflict Resolution article — that article focuses on data structure approaches to auto-merging concurrent edits.
 
 ---
 
 ## How It Works
 
-At the core, every conflict involves three versions of a piece of data:
+Every conflict involves three versions of a record:
 
-| Version    | Description                                                 |
-| ---------- | ----------------------------------------------------------- |
-| **Base**   | The last known server state when the client went offline    |
-| **Local**  | What the client changed while offline                       |
-| **Remote** | What the server (or another client) changed in the meantime |
+| Version    | Description                                                   |
+| ---------- | ------------------------------------------------------------- |
+| **Base**   | The server state when the client last synced — stored locally |
+| **Local**  | What the client changed while offline                         |
+| **Remote** | What the server (or another client) changed in the meantime   |
 
-When a sync occurs, you compare all three. If local and remote both differ from the base, you have a conflict.
+A conflict exists when local and remote both differ from the base. The server detects this by comparing the client's reported `baseVersion` against the current server `version`. If they don't match, a write happened between the client's last sync and the current submission.
 
-**Resolution strategies:**
+Resolution strategies:
 
-- **Last Write Wins (LWW):** Whichever change has the latest timestamp wins. Simple but lossy.
-- **Server Wins:** Discard local changes entirely on conflict. Safe but frustrating to users.
-- **Client Wins:** Always apply local changes. Risk of overwriting valid server updates.
-- **Three-Way Merge:** Use the base + local + remote to compute a merged result. Most correct, most complex.
-- **User-Prompted Resolution:** Surface conflicts to the user and let them choose. Best for high-stakes data.
+- **Last Write Wins (LWW)**: latest timestamp wins — simple, lossy, wrong for user-authored content
+- **Server Wins**: discard local changes — safe, user-hostile
+- **Per-field merge**: non-overlapping field changes auto-merge; overlapping fields prompt the user
+- **User-prompted**: surface both versions and let the user choose — correct for high-stakes content
 
-Most real apps combine strategies: auto-merge where safe, prompt the user only when necessary.
-
-<Callout type="info">
-  CRDTs (Conflict-free Replicated Data Types) are a more advanced approach that
-  make certain data structures (counters, sets, text) mathematically
-  conflict-free by design. Libraries like Automerge and Yjs implement this.
-</Callout>
+Most real applications use per-field merge with a user-prompted fallback for genuinely overlapping edits.
 
 ---
 
 ## Code Examples
 
-### 1. Detecting a Conflict During Sync
+### IndexedDB Write Queue with `idb`
 
-Use a `version` or `updatedAt` field on every record to detect if the server state has diverged from the base the client knew about.
+The queue stores pending writes that survive page reloads. Each entry holds the write payload and the `baseVersion` the client was editing from:
 
 ```ts
-// lib/sync.ts
+// lib/offline/queue.ts
+import { openDB, type IDBPDatabase } from "idb";
 
-type SyncRecord = {
-  id: string;
-  data: Record<string, unknown>;
-  updatedAt: number; // Unix ms timestamp
-};
-
-type ConflictResult =
-  | { status: "ok"; resolved: SyncRecord }
-  | { status: "conflict"; local: SyncRecord; remote: SyncRecord };
-
-async function syncRecord(
-  localChange: SyncRecord,
-  baseUpdatedAt: number, // the updatedAt when the client last fetched this record
-): Promise<ConflictResult> {
-  const response = await fetch(`/api/records/${localChange.id}`);
-  const remote: SyncRecord = await response.json();
-
-  // If the server record changed after our last known base, we have a conflict
-  const hasConflict = remote.updatedAt > baseUpdatedAt;
-
-  if (!hasConflict) {
-    // Safe to apply local change
-    const saved = await applyChange(localChange);
-    return { status: "ok", resolved: saved };
-  }
-
-  return { status: "conflict", local: localChange, remote };
+interface PendingWrite {
+  id: string; // record ID (deduplication key)
+  type: "create" | "update" | "delete";
+  payload: Record<string, unknown>;
+  baseVersion: number; // server version client was editing from
+  queuedAt: number; // for ordering when flushing
 }
 
-async function applyChange(record: SyncRecord): Promise<SyncRecord> {
-  const res = await fetch(`/api/records/${record.id}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(record),
+interface QueueDB {
+  pendingWrites: {
+    key: string;
+    value: PendingWrite;
+    indexes: { "by-queuedAt": number };
+  };
+}
+
+let db: IDBPDatabase<QueueDB> | null = null;
+
+async function getQueueDB(): Promise<IDBPDatabase<QueueDB>> {
+  if (db) return db;
+  db = await openDB<QueueDB>("write-queue", 1, {
+    upgrade(database) {
+      const store = database.createObjectStore("pendingWrites", {
+        keyPath: "id",
+      });
+      store.createIndex("by-queuedAt", "queuedAt");
+    },
   });
-  return res.json();
+  return db;
+}
+
+// Enqueue a write — put() overwrites any existing entry for the same id
+// so rapid offline edits to the same record collapse to one pending write
+export async function enqueueWrite(write: PendingWrite): Promise<void> {
+  const database = await getQueueDB();
+  await database.put("pendingWrites", write);
+}
+
+export async function getPendingWrites(): Promise<PendingWrite[]> {
+  const database = await getQueueDB();
+  // getAllFromIndex returns records ordered by queuedAt ascending
+  return database.getAllFromIndex("pendingWrites", "by-queuedAt");
+}
+
+export async function removePendingWrite(id: string): Promise<void> {
+  const database = await getQueueDB();
+  await database.delete("pendingWrites", id);
+}
+
+export async function getPendingCount(): Promise<number> {
+  const database = await getQueueDB();
+  return database.count("pendingWrites");
 }
 ```
 
 ---
 
-### 2. Three-Way Merge for a Simple Object
+### Persisting Queue Survival Across Browser Cleanup
 
-For flat objects, a three-way merge applies whichever side changed a given field, and flags fields where both sides changed.
+Without persistent storage, browsers may evict IndexedDB data under storage pressure — silently dropping the queue:
 
 ```ts
-// lib/merge.ts
+// lib/offline/setup.ts
+export async function initOfflineStorage(): Promise<void> {
+  // Request persistent storage so the queue survives browser cache cleanup
+  if ("storage" in navigator && "persist" in navigator.storage) {
+    const isPersisted = await navigator.storage.persisted();
+    if (!isPersisted) {
+      const granted = await navigator.storage.persist();
+      console.log(`Persistent storage: ${granted ? "granted" : "denied"}`);
+    }
+  }
+}
+```
 
-type PlainRecord = Record<string, unknown>;
+Call `initOfflineStorage()` once on app boot. Installed PWAs typically receive persistence automatically.
 
-type MergeResult = {
-  merged: PlainRecord;
-  conflicts: string[]; // field names that couldn't be auto-resolved
-};
+---
+
+### Flushing the Queue — Sequential, Not Parallel
+
+Writes to the same record must flush in order. Parallel flushing creates races where a later edit arrives before an earlier one:
+
+```ts
+// lib/offline/flush.ts
+import { getPendingWrites, removePendingWrite } from "./queue";
+
+interface SyncResult {
+  status: "ok" | "conflict" | "error";
+  serverId: string;
+  conflict?: {
+    localPayload: Record<string, unknown>;
+    remotePayload: Record<string, unknown>;
+    baseVersion: number;
+  };
+}
+
+type FlushHandler = (
+  write: ReturnType<typeof getPendingWrites> extends Promise<(infer T)[]>
+    ? T
+    : never,
+) => Promise<SyncResult>;
+
+export async function flushWriteQueue(
+  handler: FlushHandler,
+  onConflict: (result: SyncResult) => void,
+): Promise<{ flushed: number; conflicts: number; errors: number }> {
+  const writes = await getPendingWrites();
+  let flushed = 0;
+  let conflicts = 0;
+  let errors = 0;
+
+  // Sequential — never parallel — preserves causal ordering per record
+  for (const write of writes) {
+    try {
+      const result = await handler(write);
+
+      if (result.status === "ok") {
+        await removePendingWrite(write.id);
+        flushed++;
+      } else if (result.status === "conflict") {
+        // Leave in queue; notify the UI to resolve
+        onConflict(result);
+        conflicts++;
+      }
+    } catch (err) {
+      console.error(`Flush error for write ${write.id}:`, err);
+      errors++;
+      // Don't remove — retry on next flush attempt
+    }
+  }
+
+  return { flushed, conflicts, errors };
+}
+```
+
+---
+
+### Background Sync API — Flush on Reconnect
+
+The Background Sync API registers a sync tag with the service worker. The browser calls the `sync` event when connectivity is restored — even if the tab is closed:
+
+```ts
+// src/registerSW.ts — register the sync tag when writes are queued
+export async function requestBackgroundSync(): Promise<void> {
+  if (!("serviceWorker" in navigator)) return;
+
+  const registration = await navigator.serviceWorker.ready;
+
+  if ("sync" in registration) {
+    try {
+      await (registration as any).sync.register("flush-write-queue");
+    } catch (err) {
+      // Background Sync not supported — fall back to online event listener
+      console.warn("Background Sync not available:", err);
+      registerOnlineFallback();
+    }
+  } else {
+    registerOnlineFallback();
+  }
+}
+
+function registerOnlineFallback(): void {
+  // Fallback for browsers without Background Sync support
+  window.addEventListener("online", () => triggerQueueFlush(), { once: true });
+}
+
+// Called from the app to notify the queue needs flushing
+async function triggerQueueFlush(): Promise<void> {
+  const registration = await navigator.serviceWorker.ready;
+  // Post a message to the SW to trigger flush
+  registration.active?.postMessage({ type: "FLUSH_QUEUE" });
+}
+```
+
+```js
+// public/sw.js — handle sync and message events
+import { flushWriteQueue } from "./offline/flush";
+
+// Background Sync event — fired by browser on reconnect (even if tab closed)
+self.addEventListener("sync", (event) => {
+  if (event.tag === "flush-write-queue") {
+    event.waitUntil(doFlush());
+  }
+});
+
+// Message from app tab — immediate flush trigger
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "FLUSH_QUEUE") {
+    doFlush();
+  }
+});
+
+async function doFlush(): Promise<void> {
+  await flushWriteQueue(
+    async (write) => {
+      const res = await fetch(`/api/${write.type}/${write.id}`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          payload:     write.payload,
+          baseVersion: write.baseVersion,
+        }),
+      });
+      return res.json();
+    },
+    (conflict) => {
+      // Notify the open tab about the conflict via BroadcastChannel
+      const channel = new BroadcastChannel("sync-events");
+      channel.postMessage({ type: "CONFLICT", conflict });
+    }
+  );
+}
+```
+
+---
+
+### Server-Side Conflict Detection
+
+The server detects conflicts using optimistic locking — rejecting writes whose `baseVersion` doesn't match the current record version:
+
+```ts
+// app/api/notes/[id]/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { db } from "@/lib/db";
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { id: string } },
+) {
+  const { payload, baseVersion } = await req.json();
+
+  const current = await db.note.findUnique({ where: { id: params.id } });
+
+  if (!current) {
+    // New record — no conflict possible
+    const created = await db.note.create({
+      data: { id: params.id, ...payload, version: 1 },
+    });
+    return NextResponse.json({ status: "ok", serverId: created.id });
+  }
+
+  if (current.version !== baseVersion) {
+    // Version mismatch — another write happened since the client last synced
+    return NextResponse.json(
+      {
+        status: "conflict",
+        serverId: params.id,
+        conflict: {
+          localPayload: payload, // what the client wants to write
+          remotePayload: current, // current server state
+          baseVersion: baseVersion, // version client was editing from
+        },
+      },
+      { status: 409 },
+    );
+  }
+
+  // No conflict — apply the write and increment version
+  const updated = await db.note.update({
+    where: { id: params.id },
+    data: { ...payload, version: { increment: 1 } },
+  });
+
+  return NextResponse.json({ status: "ok", serverId: updated.id });
+}
+```
+
+---
+
+### Per-Field Merge — Auto-Merge Non-Overlapping Fields
+
+Before prompting the user, attempt to auto-merge fields that didn't overlap:
+
+```ts
+// lib/offline/merge.ts
+
+interface MergeResult {
+  merged: Record<string, unknown>;
+  conflicts: string[]; // field names that need user resolution
+}
 
 export function threeWayMerge(
-  base: PlainRecord,
-  local: PlainRecord,
-  remote: PlainRecord,
+  base: Record<string, unknown>,
+  local: Record<string, unknown>,
+  remote: Record<string, unknown>,
 ): MergeResult {
-  const merged: PlainRecord = { ...base };
+  const merged: Record<string, unknown> = { ...base };
   const conflicts: string[] = [];
 
   const allKeys = new Set([...Object.keys(local), ...Object.keys(remote)]);
@@ -130,15 +346,22 @@ export function threeWayMerge(
     const localChanged = localVal !== baseVal;
     const remoteChanged = remoteVal !== baseVal;
 
-    if (localChanged && remoteChanged && localVal !== remoteVal) {
-      // Both sides changed this field to different values — true conflict
-      conflicts.push(key);
-      // Default to remote, but flag it for user review
+    if (!localChanged && !remoteChanged) {
+      // Neither changed — keep base
+      merged[key] = baseVal;
+    } else if (localChanged && !remoteChanged) {
+      // Only local changed — apply local
+      merged[key] = localVal;
+    } else if (!localChanged && remoteChanged) {
+      // Only remote changed — apply remote
       merged[key] = remoteVal;
-    } else if (localChanged) {
+    } else if (localVal === remoteVal) {
+      // Both changed to the same value — no conflict
       merged[key] = localVal;
     } else {
-      merged[key] = remoteVal;
+      // Both changed to different values — genuine conflict
+      conflicts.push(key);
+      merged[key] = remoteVal; // tentative: remote wins until user resolves
     }
   }
 
@@ -146,160 +369,109 @@ export function threeWayMerge(
 }
 ```
 
-Usage:
-
-```ts
-import { threeWayMerge } from "@/lib/merge";
-
-const base = { title: "Draft", status: "active" };
-const local = { title: "Final", status: "active" }; // user renamed
-const remote = { title: "Draft", status: "archived" }; // server archived
-
-const { merged, conflicts } = threeWayMerge(base, local, remote);
-// merged   → { title: "Final", status: "archived" }
-// conflicts → [] — no conflict, different fields changed
-```
-
 ---
 
-### 3. Server-Side Conflict Check with Optimistic Locking
-
-Use an `ETag` or version counter on the server to reject stale writes.
-
-```ts
-// app/api/records/[id]/route.ts
-import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/lib/db";
-
-export async function PUT(
-  req: NextRequest,
-  { params }: { params: { id: string } },
-) {
-  const body = await req.json();
-  const { data, expectedVersion } = body as {
-    data: Record<string, unknown>;
-    expectedVersion: number;
-  };
-
-  const current = await db.record.findUnique({ where: { id: params.id } });
-
-  if (!current) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
-
-  if (current.version !== expectedVersion) {
-    // Optimistic lock failed — client is working from a stale base
-    return NextResponse.json(
-      {
-        error: "conflict",
-        serverRecord: current, // send back the latest so client can merge
-      },
-      { status: 409 },
-    );
-  }
-
-  const updated = await db.record.update({
-    where: { id: params.id },
-    data: { ...data, version: current.version + 1 },
-  });
-
-  return NextResponse.json(updated);
-}
-```
-
-```ts
-// Client-side: handle 409 conflict response
-async function saveRecord(id: string, data: object, knownVersion: number) {
-  const res = await fetch(`/api/records/${id}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ data, expectedVersion: knownVersion }),
-  });
-
-  if (res.status === 409) {
-    const { serverRecord } = await res.json();
-    // Hand off to your merge/UI conflict resolution flow
-    return handleConflict(data, serverRecord);
-  }
-
-  return res.json();
-}
-```
-
----
-
-### 4. User-Prompted Conflict Resolution UI
+### Conflict Resolution UI
 
 ```tsx
 // components/ConflictResolver.tsx
 "use client";
 
 import { useState } from "react";
+import { threeWayMerge } from "@/lib/offline/merge";
 
-type ConflictField = {
-  key: string;
-  localValue: unknown;
-  remoteValue: unknown;
-};
+interface ConflictResolverProps {
+  localPayload: Record<string, unknown>;
+  remotePayload: Record<string, unknown>;
+  base: Record<string, unknown>;
+  onResolve: (resolved: Record<string, unknown>) => void;
+  onDiscard: () => void;
+}
 
-type Props = {
-  conflicts: ConflictField[];
-  onResolve: (resolutions: Record<string, unknown>) => void;
-};
-
-export function ConflictResolver({ conflicts, onResolve }: Props) {
-  const [choices, setChoices] = useState<Record<string, "local" | "remote">>(
-    Object.fromEntries(conflicts.map((c) => [c.key, "remote"])),
+export function ConflictResolver({
+  localPayload,
+  remotePayload,
+  base,
+  onResolve,
+  onDiscard,
+}: ConflictResolverProps) {
+  const { merged, conflicts } = threeWayMerge(
+    base,
+    localPayload,
+    remotePayload,
   );
+  const [resolved, setResolved] = useState<Record<string, unknown>>(merged);
 
-  function handleSubmit() {
-    const resolutions = Object.fromEntries(
-      conflicts.map((c) => [
-        c.key,
-        choices[c.key] === "local" ? c.localValue : c.remoteValue,
-      ]),
-    );
-    onResolve(resolutions);
+  if (conflicts.length === 0) {
+    // Auto-merged successfully — no user input needed
+    onResolve(merged);
+    return null;
   }
 
   return (
-    <div className="conflict-resolver">
-      <h2>Resolve Sync Conflicts</h2>
-      <p>
-        Some fields were changed in both places. Choose which version to keep.
-      </p>
+    <div className="rounded-lg border border-amber-300 bg-amber-50 p-4">
+      <h3 className="font-semibold text-amber-800">
+        Conflict detected — {conflicts.length} field
+        {conflicts.length > 1 ? "s" : ""} need resolution
+      </h3>
 
-      {conflicts.map((conflict) => (
-        <div key={conflict.key} className="conflict-field">
-          <strong>{conflict.key}</strong>
-          <label>
-            <input
-              type="radio"
-              name={conflict.key}
-              value="local"
-              checked={choices[conflict.key] === "local"}
-              onChange={() =>
-                setChoices((prev) => ({ ...prev, [conflict.key]: "local" }))
+      {conflicts.map((field) => (
+        <div key={field} className="mt-4">
+          <p className="text-sm font-medium text-gray-700">Field: {field}</p>
+          <div className="mt-2 grid grid-cols-2 gap-3">
+            <button
+              onClick={() =>
+                setResolved((prev) => ({
+                  ...prev,
+                  [field]: localPayload[field],
+                }))
               }
-            />
-            Your version: <code>{String(conflict.localValue)}</code>
-          </label>
-          <label>
-            <input
-              type="radio"
-              name={conflict.key}
-              value="remote"
-              checked={choices[conflict.key] === "remote"}
-              onChange={() =>
-                setChoices((prev) => ({ ...prev, [conflict.key]: "remote" }))
+              className={`rounded border p-2 text-left text-sm ${
+                resolved[field] === localPayload[field]
+                  ? "border-blue-500 bg-blue-50"
+                  : "border-gray-200"
+              }`}
+            >
+              <span className="block text-xs text-gray-500">Your version</span>
+              <span>{String(localPayload[field])}</span>
+            </button>
+
+            <button
+              onClick={() =>
+                setResolved((prev) => ({
+                  ...prev,
+                  [field]: remotePayload[field],
+                }))
               }
-            />
-            Server version: <code>{String(conflict.remoteValue)}</code>
-          </label>
+              className={`rounded border p-2 text-left text-sm ${
+                resolved[field] === remotePayload[field]
+                  ? "border-green-500 bg-green-50"
+                  : "border-gray-200"
+              }`}
+            >
+              <span className="block text-xs text-gray-500">
+                Server version
+              </span>
+              <span>{String(remotePayload[field])}</span>
+            </button>
+          </div>
         </div>
       ))}
 
-      <button onClick={handleSubmit}>Apply Resolutions</button>
+      <div className="mt-4 flex gap-3">
+        <button
+          onClick={() => onResolve(resolved)}
+          className="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
+        >
+          Save resolved version
+        </button>
+        <button
+          onClick={onDiscard}
+          className="rounded border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50"
+        >
+          Keep server version
+        </button>
+      </div>
     </div>
   );
 }
@@ -307,44 +479,87 @@ export function ConflictResolver({ conflicts, onResolve }: Props) {
 
 ---
 
+### Receiving Conflict Notifications from the Service Worker
+
+```tsx
+// hooks/useSyncEvents.ts
+"use client";
+
+import { useEffect } from "react";
+import { useConflictStore } from "@/lib/store";
+
+export function useSyncEvents() {
+  const addConflict = useConflictStore((s) => s.addConflict);
+
+  useEffect(() => {
+    // BroadcastChannel receives messages from the service worker
+    const channel = new BroadcastChannel("sync-events");
+
+    channel.addEventListener("message", (event) => {
+      if (event.data?.type === "CONFLICT") {
+        addConflict(event.data.conflict);
+      }
+    });
+
+    return () => channel.close();
+  }, [addConflict]);
+}
+```
+
+---
+
 ## Real-World Use Case
 
-A project management app lets users edit task descriptions and statuses while offline on mobile. When they regain connectivity:
+**Field inspection PWA.** Technicians complete inspection reports on tablets while offline on job sites. Reports contain 20+ fields — notes, photos, measurements, status flags.
 
-1. The app checks each dirty (locally modified) record against the server using version numbers.
-2. Non-conflicting changes (only one side modified a field) are auto-merged silently.
-3. A task where the user changed the title offline _and_ a teammate changed the status server-side gets auto-merged (different fields).
-4. A task where both the user and a teammate edited the description surfaces the `ConflictResolver` UI so the user consciously picks a version.
-5. Once resolved, the merged record is written back to the server with the latest version number.
+When a technician reconnects, the write queue flushes sequentially. The Background Sync API handles reconnection even if the technician closed the app. The server checks `baseVersion` — a supervisor editing the same report concurrently returns `409`. The `threeWayMerge` function auto-resolves non-overlapping fields (supervisor changed the status flag; technician added measurement data — both apply without prompting). Only the single field both parties edited shows the conflict UI. The technician selects their version for that field; the merged result is written with `version + 1`.
+
+Silent data loss never occurs — if the Background Sync event fires before the conflict UI is seen, the conflict is stored in Zustand and surfaced as a banner on next app open.
 
 ---
 
 ## Common Mistakes / Gotchas
 
-**Using timestamps alone for conflict detection**
+**1. Using timestamps as the sole version signal.** Clock skew between devices means a client with a 5-minute-ahead clock always wins LWW. Use monotonic server-assigned version numbers, not `Date.now()`.
 
-Wall-clock timestamps are unreliable — clocks on different devices drift. Use a server-assigned monotonic version counter or vector clock instead of `Date.now()` on the client.
+**2. Flushing the queue in parallel.** `Promise.all(writes.map(flush))` creates a race when two writes target the same record. The second write's `baseVersion` may not reflect the first write's server response. Always flush sequentially.
 
-**Silently overwriting with Last Write Wins on all fields**
+**3. Not storing the base snapshot.** Without the base, three-way merge is impossible — you can't distinguish "user changed this" from "this was always different." Store the last-synced server snapshot in IndexedDB alongside the pending write.
 
-LWW feels simple but destroys data. A user who spent 10 minutes writing a form while offline can have all their work silently discarded. Only use LWW for genuinely low-stakes, append-only data like analytics events.
+**4. Silently discarding conflicts.** "Server wins" feels safe but destroys user trust when they spent 20 minutes writing offline. Always surface conflicts. Silent data loss is worse than a visible merge conflict.
 
-**Not storing the base snapshot locally**
-
-To do any three-way merge, you need the _base_ — what the data looked like when the client last synced. Many developers store only the local current state and then can't distinguish "user changed this field" from "this field was always different." Store the last-synced snapshot in IndexedDB alongside the pending change.
-
-**Assuming the server is always the source of truth**
-
-In collaborative or local-first apps, blindly deferring to the server breaks user trust. Design a clear policy per data type: some fields (e.g., audit timestamps set by the server) should always come from the server; others (user-authored content) deserve the conflict resolution flow.
-
-<Callout type="warn">
-  Never silently discard user data. If you can't auto-merge, always surface the
-  conflict to the user or log it for later manual review. Silent data loss is
-  worse than a visible merge conflict.
-</Callout>
+**5. Expecting Background Sync to fire immediately.** The browser controls when `sync` fires — it may delay until the device has a reliable connection. Don't use it for latency-sensitive operations; use it for eventual consistency of write queues.
 
 ---
 
 ## Summary
 
-Offline conflict resolution is required any time users can modify data without a live server connection. The key is storing a base snapshot at sync time, comparing base + local + remote on reconnect, and applying an appropriate strategy per data type. Three-way merging handles most non-overlapping changes automatically. Optimistic locking with version numbers on the server prevents accidental overwrites. Reserve user-prompted resolution for high-value data where automated merging is unsafe. Libraries like Replicache, Automerge, and Yjs can handle much of this complexity for you in production apps.
+Offline conflict resolution requires three components working together: a persistent IndexedDB write queue that survives page reloads (and browser cleanup with `navigator.storage.persist()`), a flush mechanism that syncs sequentially on reconnect via Background Sync API and `online` event fallback, and a server that detects version mismatches and returns structured conflict data rather than silently overwriting. Three-way merge auto-resolves non-overlapping field changes; overlapping changes must surface to the user. Never discard user data silently — a visible conflict UI is always better than silent data loss.
+
+---
+
+## Interview Questions
+
+**Q1. Why is sequential queue flushing required and what goes wrong with `Promise.all`?**
+
+When a user edits a record multiple times while offline, the queue may contain multiple writes to the same record in order (edit at 10:00, edit at 10:05, edit at 10:10). `Promise.all` fires all three simultaneously — they arrive at the server in unpredictable order depending on network jitter. The server processes them in arrival order, not creation order. The 10:10 edit may arrive first and get applied; the 10:00 edit arrives second with a now-outdated `baseVersion`, generates a spurious conflict, and the 10:05 edit is rejected. Sequential flushing processes them in `queuedAt` order — each write's server response updates the version seen by the next write. `put()` in the IndexedDB queue also ensures multiple edits to the same record collapse to one pending entry (latest wins), further simplifying the flush.
+
+**Q2. What is optimistic locking in the context of offline conflict detection?**
+
+Optimistic locking is a concurrency control strategy where writes include the version of the record they were based on. The server checks whether that version matches the current record version — if it doesn't, another write happened in between and the request is rejected with a conflict response (typically `409`). "Optimistic" because it assumes conflicts are rare and doesn't lock the record preemptively (as pessimistic locking would). The client stores the `baseVersion` at the time it last synced from the server, includes it in every write, and handles `409` responses by presenting the conflict to the user. This is how the server distinguishes "the client is updating with full knowledge of the current state" from "the client is overwriting a record that changed while they were offline."
+
+**Q3. What is the three-way merge strategy and why does it require storing the base snapshot?**
+
+Three-way merge compares base, local, and remote to determine which fields changed where. For each field: if only local changed, apply local; if only remote changed, apply remote; if both changed to the same value, no conflict; if both changed to different values, it's a genuine conflict. The base is essential — without it, you can't distinguish "user changed this field" from "this field was already different before either side modified it." Storing only the local current state means that if the remote has `title: "New Title"` and the local also has `title: "New Title"` but via different edits, you'd see a false conflict. With the base, both can be reconciled as "same change from both sides — auto-merge." Store the server snapshot at last sync in IndexedDB alongside the pending write.
+
+**Q4. How does the Background Sync API differ from the `online` event for queue flushing?**
+
+`window.addEventListener("online", flush)` fires when the browser reports network connectivity — but only when the page is open. If the user closes the app while offline, queued writes aren't flushed until they open the app again and the `online` event fires. The Background Sync API registers a sync tag with the service worker. When the browser detects reliable connectivity (which it determines more accurately than a single `online` event — it tests actual reachability), it fires a `sync` event on the SW even if no page is open. For a write queue, this means: user fills a form offline, closes the app, reconnects to WiFi — the SW wakes up, flushes the queue, and the server receives the write before the user even reopens the app. Always provide an `online` event fallback for browsers that don't support Background Sync (Firefox, Safari as of 2025).
+
+**Q5. Why must you call `navigator.storage.persist()` for an offline write queue?**
+
+Without persistent storage, browsers treat IndexedDB as evictable — under storage pressure, the browser may clear it along with other cached data. On iOS/Safari, private browsing mode has very limited storage that can be cleared on session end. If the write queue lives in evictable storage, a user who edits data offline, switches apps (causing the browser to reclaim memory), and then reconnects will find the queue empty — their edits are gone silently. `navigator.storage.persist()` requests that the origin's storage be marked as persistent — excluded from browser storage cleanup. Installed PWAs typically receive persistence automatically. Always call it during app initialization and inform users if permission is denied, because they may be on a device where data loss is possible.
+
+**Q6. When should you auto-merge vs prompt the user for conflict resolution?**
+
+Auto-merge with three-way merge is safe when the conflicting edits are on different fields — the merge is mathematically unambiguous and users generally expect non-overlapping changes to both apply. Prompt the user when: both parties edited the same field (the merge is ambiguous — which version is "more correct"?), the field is a long-form text field where diff-based merge would produce mangled output, the data has business significance where an incorrect merge has real consequences (pricing, legal text, medical records), or when the user is likely to care about the remote change and should be made aware of it regardless. The heuristic: auto-merge where the correct answer is computable; surface to the user when human judgment is needed. Never silently apply server-wins for user-authored content.
