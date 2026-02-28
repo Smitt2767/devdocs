@@ -8,6 +8,7 @@
     "authentication-flows",
     "api-paradigms",
     "rate-limiting-client",
-    "websockets-vs-sse-vs-long-polling"
+    "websockets-vs-sse-vs-long-polling",
+    "navigation-api"
   ]
 }

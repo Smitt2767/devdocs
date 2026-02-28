@@ -15,10 +15,14 @@ The section opens with the architectural decision — which CSS approach to use 
 
 **CSS Containment** — The `contain` property declares a subtree as independent from the rest of the page, scoping layout and paint recalculations. `content-visibility: auto` skips rendering entirely for off-screen content. The side effects of `paint` containment (new stacking context, clipped overflow) and what `contain: style` does _not_ do (it doesn't scope CSS custom properties).
 
+**Container Queries** — Decoupling component responsiveness from the viewport. `container-type` (`inline-size`, `size`) establishes a containment context; `@container` rules query the nearest ancestor container's dimensions. `container-name` for targeting specific layout contexts. Container query length units (`cqi`, `cqb`, `cqw`, `cqh`, `cqmin`, `cqmax`) for component-relative sizing. Style queries (`@container style(--theme: dark)`) for custom property conditions. The implicit containment side effects and how container queries compose with CSS Containment.
+
 **Layout Thrashing** — What happens when JavaScript alternates between reading geometric properties and writing to the DOM, forcing the browser to synchronously recalculate layout repeatedly in a single frame. The full list of properties that force layout, the read-write batching fix, `ResizeObserver` as a replacement for polling, and the FastDOM scheduling pattern.
 
 **Animation Performance** — The three rendering phases (layout, paint, composite) and which CSS properties require which. Why `transform` and `opacity` are compositor-only and everything else causes main-thread work. The Web Animations API for programmatic animation, `@starting-style` for native CSS enter animations, and `prefers-reduced-motion` as an accessibility requirement.
 
 **Theming & Design Tokens** — The three-tier token hierarchy (primitives → semantic → component), why components must consume semantic tokens and never primitives, how CSS custom properties implement runtime theming via the cascade, preventing flash of wrong theme, and multi-brand token management with Style Dictionary.
+
+**Scroll-Driven Animations** — The CSS `scroll()` and `view()` timeline functions that replace JavaScript scroll listeners and `IntersectionObserver` for animation purposes, linking `@keyframes` to scroll progress or element visibility with compositor-thread performance. Named timelines, `animation-range` for controlling start/end points, the `ScrollTimeline` and `ViewTimeline` JavaScript APIs, and production fallback strategies for browsers without support.
 
 **Responsive Design Strategies** — Container queries (components responding to container size, not viewport), fluid typography with `clamp()` and the slope-intercept formula, logical properties for RTL/LTR internationalization, dynamic viewport units (`dvh`/`svh`/`lvh`) fixing the mobile browser chrome problem, and `:has()` for parent-aware component styles.

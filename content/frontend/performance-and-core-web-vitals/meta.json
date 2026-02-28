@@ -8,6 +8,11 @@
     "third-party-script-management",
     "rum-vs-synthetic-monitoring",
     "performance-budgets",
-    "lighthouse-ci-integration"
+    "lighthouse-ci-integration",
+    "intersection-observer-internals",
+    "mutation-observer-cost",
+    "performance-observer-api",
+    "long-tasks-api",
+    "speculation-rules-api"
   ]
 }

@@ -1,0 +1,361 @@
+---
+title: Speculation Rules API
+description: A declarative JSON-based API that enables browsers to prefetch or fully prerender future navigations ahead of time, replacing legacy link-rel-prefetch with fine-grained eagerness controls and CSS-selector-based document rules for near-instant page transitions.
+---
+
+## Overview
+
+The Speculation Rules API is a browser-native mechanism for declaring which future navigations should be speculatively loaded before the user clicks. You embed a `<script type="speculationrules">` block containing JSON that tells the browser which URLs to prefetch or prerender, how eagerly to do it, and which links on the page qualify. The browser handles the rest -- fetching resources, optionally creating a fully rendered hidden page, and swapping it in instantly when the user navigates.
+
+This API replaces the older `<link rel="prefetch">` and `<link rel="prerender">` hints, which were limited and unreliable. `<link rel="prefetch">` only fetched resources into the HTTP cache with no guarantee of priority or execution. `<link rel="prerender">` was deprecated in Chrome years ago and silently downgraded to a NoState Prefetch (which fetched subresources but never executed JavaScript or built the DOM). The Speculation Rules API provides what those hints promised but never fully delivered: true full-page prerendering with JavaScript execution, DOM construction, and layout -- all held in a hidden tab until activation.
+
+The performance impact is significant. A prerendered page activates with near-zero navigation latency -- the user sees the target page essentially instantly, because all the work (DNS, TLS, HTTP fetch, HTML parse, JS execution, layout, paint) already happened in the background. For prefetch-only speculations, the savings are smaller but still meaningful: the browser skips the network round-trip for the document, reducing Time to First Byte on navigation.
+
+---
+
+## How It Works
+
+### Prefetch vs Prerender
+
+The API supports two speculation actions, and the distinction matters for both performance and resource cost.
+
+**Prefetch** fetches the target document's HTTP response and stores it, but does not execute it. No JavaScript runs, no DOM is built, no subresources are fetched. The cost is one network request plus the response body in memory. When the user navigates, the browser uses the cached response instead of making a new request, saving the full round-trip and server processing time. This is appropriate for pages where you want to shave off TTFB but cannot afford the CPU and memory cost of full rendering.
+
+**Prerender** goes further: the browser creates a hidden top-level browsing context (conceptually a hidden tab), loads the target URL in it, and fully renders the page -- executing JavaScript, building the DOM tree, loading subresources, running layout, and painting. The result is a complete, interactive page held in memory. When the user navigates, the browser activates the prerendered page by swapping it into the visible tab. The perceived navigation time is effectively zero.
+
+The trade-off is resource consumption. A prerendered page uses real CPU time and memory -- potentially tens of megabytes depending on the page's complexity. Prerending multiple pages simultaneously multiplies this cost. The browser imposes limits (Chrome caps the number of concurrent prerenders) and will discard speculations under memory pressure, but careless use can still degrade the current page's performance by competing for main-thread time and memory.
+
+### The `<script type="speculationrules">` JSON Format
+
+Speculation rules are declared inline in a JSON object inside a script tag. The browser parses this JSON and begins speculating according to the rules:
+
+```json
+{
+  "prefetch": [
+    {
+      "source": "list",
+      "urls": ["/about", "/pricing"]
+    }
+  ],
+  "prerender": [
+    {
+      "source": "list",
+      "urls": ["/dashboard"],
+      "eagerness": "moderate"
+    }
+  ]
+}
+```
+
+The top-level keys are `prefetch` and `prerender`, each containing an array of rule objects. Each rule has a `source` that determines how target URLs are identified:
+
+- **`source: "list"`** -- you provide an explicit `urls` array of same-origin URLs to speculate on. This is straightforward but requires you to know the targets at render time.
+- **`source: "document"`** -- the browser scans the current document for matching `<a>` elements using CSS-selector-based `where` clauses and URL pattern matching via `href_matches`. This is dynamic: if new links are added to the DOM, matching rules apply automatically.
+
+### Eagerness Levels
+
+Each rule can specify an `eagerness` value that controls when the speculation is triggered:
+
+| Eagerness      | Trigger                                                                 | Use Case                              |
+| -------------- | ----------------------------------------------------------------------- | ------------------------------------- |
+| `immediate`    | As soon as the rules are parsed                                         | High-confidence targets (e.g., next step in a funnel) |
+| `eager`        | Currently behaves the same as `immediate`, reserved for future heuristics | Same as immediate                     |
+| `moderate`     | On hover for 200ms, or on `pointerdown` (whichever comes first)        | General navigation links              |
+| `conservative` | On `pointerdown` or `touchstart` only                                   | Lower-confidence or expensive targets |
+
+For `source: "list"` rules, the default eagerness is `immediate` -- the browser begins speculating as soon as it parses the script tag. For `source: "document"` rules, the default is `conservative`. The `moderate` level is typically the best balance: a 200ms hover is a strong signal of intent without the resource waste of speculating on every visible link.
+
+### Document Rules with `where` and `href_matches`
+
+Document rules let you target links declaratively without listing specific URLs. The `where` clause uses CSS selectors and URL pattern conditions:
+
+```json
+{
+  "prerender": [
+    {
+      "source": "document",
+      "where": {
+        "and": [
+          { "selector_matches": "a[href].main-content a" },
+          { "href_matches": "/products/*" }
+        ]
+      },
+      "eagerness": "moderate"
+    }
+  ]
+}
+```
+
+The `where` object supports `and`, `or`, and `not` combinators. `selector_matches` tests the `<a>` element against a CSS selector. `href_matches` tests the link's `href` against a URL pattern (following the URLPattern API syntax). You can also use `"where": { "href_matches": "/*" }` to match all same-origin links, or negate specific patterns with `not`.
+
+### Restrictions
+
+Not every page can be prerendered. The browser will skip or abort prerendering in these cases:
+
+- **Cross-origin URLs** -- by default, prerender only works for same-origin navigations. Cross-origin prefetch is supported with specific opt-in headers, but cross-origin prerender is not.
+- **`Cache-Control: no-store`** -- pages that set this header cannot be prerendered because the browser cannot cache the response as required for activation.
+- **Pages that use client-side authentication prompts** -- if the prerendered page triggers `window.prompt()`, `window.confirm()`, or HTTP authentication (401/407), the prerender is discarded.
+- **Pages with `unload` event handlers** -- pages that register `beforeunload` or `unload` handlers on the prerendered document cause the prerender to be discarded, because these handlers are inherently tied to user-visible navigation state.
+- **Non-HTTP(S) schemes** -- `blob:`, `data:`, and other non-HTTP URLs are not eligible.
+- **Browser resource limits** -- Chrome limits the number of concurrent prerenders (typically 2 for `moderate`/`conservative` eagerness, 10 for `immediate`/`eager`). Excess rules are queued or dropped.
+
+<Callout type="warn">
+  Prerendered pages run JavaScript in a hidden context. Any code that assumes it
+  is running in a visible, user-activated tab may behave unexpectedly. Check
+  `document.prerendering` (returns `true` while prerendered) and listen for the
+  `prerenderingchange` event to defer visibility-dependent logic like analytics,
+  animations, or permission prompts.
+</Callout>
+
+### Speculation Rules HTTP Header
+
+As an alternative to inline `<script>` tags, you can deliver speculation rules via an HTTP response header. This is useful for CDN-level injection or when you do not control the HTML body:
+
+```
+Speculation-Rules: "/rules/speculation.json"
+```
+
+The header value is a URL pointing to a JSON file with the same format as the inline rules. The URL must be same-origin. Multiple headers can be specified, and they are combined with any inline rules.
+
+### Browser Support
+
+<Callout type="warn">
+  The Speculation Rules API is Chromium-only. Chrome 109+ supports `prefetch`
+  rules. Chrome 121+ supports `prerender` rules and document rules. Firefox and
+  Safari do not implement this API and have no announced plans to do so.
+</Callout>
+
+This is, by design, a progressive enhancement. Browsers that do not recognize `<script type="speculationrules">` ignore the tag entirely -- no errors, no fallback needed. Your pages work normally without speculation; users on Chrome get the performance benefit. There is no polyfill and no need for one.
+
+---
+
+## Code Examples
+
+### 1. Basic List-Based Prefetch and Prerender
+
+```json
+{
+  "prefetch": [
+    {
+      "source": "list",
+      "urls": ["/search", "/categories"],
+      "eagerness": "immediate"
+    }
+  ],
+  "prerender": [
+    {
+      "source": "list",
+      "urls": ["/checkout"],
+      "eagerness": "conservative"
+    }
+  ]
+}
+```
+
+This rule prefetches `/search` and `/categories` immediately on page load (low cost -- just the document fetch) and prerenders `/checkout` only when the user presses down on a link to it (high confidence before committing the CPU/memory cost of a full render).
+
+### 2. Document Rules -- Prerender Links in the Main Content Area
+
+```json
+{
+  "prerender": [
+    {
+      "source": "document",
+      "where": {
+        "and": [
+          { "selector_matches": "#main-content a[href]" },
+          { "not": { "href_matches": "/api/*" } },
+          { "not": { "selector_matches": ".no-prerender" } }
+        ]
+      },
+      "eagerness": "moderate"
+    }
+  ]
+}
+```
+
+This automatically prerenders any link inside `#main-content` when the user hovers for 200ms, excluding API routes and links explicitly marked with `.no-prerender`. The `source: "document"` approach avoids hardcoding URLs and works with dynamically rendered content.
+
+### 3. Next.js Integration -- Adding Speculation Rules via a Component
+
+```tsx
+// components/SpeculationRules.tsx
+// Renders a speculation rules script tag.
+// Placed in the root layout so every page benefits from document-level rules.
+// The dangerouslySetInnerHTML approach is necessary because React escapes
+// JSON content inside <script> tags by default.
+
+interface SpeculationRule {
+  source: "list" | "document";
+  urls?: string[];
+  where?: Record<string, unknown>;
+  eagerness?: "immediate" | "eager" | "moderate" | "conservative";
+}
+
+interface SpeculationRulesConfig {
+  prefetch?: SpeculationRule[];
+  prerender?: SpeculationRule[];
+}
+
+export function SpeculationRules({ rules }: { rules: SpeculationRulesConfig }) {
+  return (
+    <script
+      type="speculationrules"
+      dangerouslySetInnerHTML={{ __html: JSON.stringify(rules) }}
+    />
+  );
+}
+```
+
+```tsx
+// app/layout.tsx
+import { SpeculationRules } from "@/components/SpeculationRules";
+import type { ReactNode } from "react";
+
+export default function RootLayout({ children }: { children: ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        {children}
+
+        {/* Prerender any in-page link on moderate eagerness.
+            This covers all same-origin <a> tags across the entire site.
+            Excluded: external links (handled automatically since speculation
+            rules only match same-origin by default) and API routes. */}
+        <SpeculationRules
+          rules={{
+            prerender: [
+              {
+                source: "document",
+                where: {
+                  and: [
+                    { href_matches: "/*" },
+                    { not: { href_matches: "/api/*" } },
+                  ],
+                },
+                eagerness: "moderate",
+              },
+            ],
+          }}
+        />
+      </body>
+    </html>
+  );
+}
+```
+
+### 4. Measuring Prerender Activation with `PerformanceNavigationTiming`
+
+```ts
+// utils/measure-activation.ts
+// Detects whether the current page was prerendered and logs the activation
+// timing. activationStart is 0 for normal navigations and > 0 for
+// prerendered pages (it records when the hidden prerender became visible).
+
+function reportPrerenderMetrics() {
+  const navEntry = performance.getEntriesByType(
+    "navigation",
+  )[0] as PerformanceNavigationTiming;
+
+  // activationStart > 0 means this page was prerendered before activation
+  if (navEntry.activationStart > 0) {
+    // The "perceived" LCP is measured from activation, not from navigation start
+    const perceivedLCP = getLCPTime() - navEntry.activationStart;
+    const perceivedLoad = navEntry.loadEventEnd - navEntry.activationStart;
+
+    console.log("Page was prerendered", {
+      activationStart: navEntry.activationStart,
+      // Time between prerender initiation and user actually navigating
+      prerenderDuration: navEntry.activationStart - navEntry.startTime,
+      perceivedLCP,
+      perceivedLoad,
+    });
+
+    // Send to analytics -- tag as prerendered so you can segment metrics
+    sendToAnalytics({
+      type: "prerender-activation",
+      activationStart: navEntry.activationStart,
+      perceivedLCP,
+    });
+  }
+}
+
+function getLCPTime(): number {
+  // Retrieve the last LCP candidate from the performance timeline
+  const lcpEntries = performance.getEntriesByType("largest-contentful-paint");
+  if (lcpEntries.length === 0) return 0;
+  return lcpEntries[lcpEntries.length - 1].startTime;
+}
+
+// Also useful: listen for prerenderingchange to know when activation occurs
+if (document.prerendering) {
+  document.addEventListener("prerenderingchange", () => {
+    // Page just became visible -- safe to start analytics, animations,
+    // and any logic that requires user visibility
+    reportPrerenderMetrics();
+  });
+} else {
+  // Normal navigation or already activated
+  reportPrerenderMetrics();
+}
+```
+
+---
+
+## Real-World Use Case
+
+**E-commerce product listing to product detail page.** A product listing page displays 20-40 product cards. Each card links to a product detail page that is relatively heavy: hero image, reviews, recommendations, and structured data. Without speculation, clicking a product takes 800ms-1.5s to load on a typical connection.
+
+With document rules set to `moderate` eagerness targeting `a[href^="/products/"]`, the browser begins prerendering the product detail page after the user hovers over a card for 200ms. By the time the click arrives (typically 300-500ms after hover starts), the prerender is either complete or nearly so. The navigation activates instantly -- the user sees the product detail page with zero perceived latency. On a product listing page with 30 links, the browser only prerenders the one or two the user hovers over, keeping memory usage reasonable.
+
+**Blog index to article page.** A blog index lists 10-15 article summaries. Article pages are content-heavy but structurally simple (mostly text and images). Using `prefetch` with `moderate` eagerness for all article links keeps the cost low (just the HTML document, not subresources), and the Time to First Byte on navigation drops to near zero. For the top 2-3 featured articles, `prerender` with `immediate` eagerness provides instant transitions for the most likely navigation targets.
+
+---
+
+## Common Mistakes / Gotchas
+
+**1. Over-eager prerendering wastes resources and degrades the current page.** Setting `eagerness: "immediate"` on 20+ prerender rules forces the browser to create multiple hidden pages simultaneously, consuming hundreds of megabytes of memory and competing for main-thread time. The browser caps concurrent prerenders, but even hitting the cap means you are burning resources on speculations that may never activate. Use `moderate` or `conservative` for document rules and reserve `immediate` for one or two high-confidence targets.
+
+**2. Analytics double-counting on prerendered pages.** If your analytics script fires on `DOMContentLoaded` or page load, it will fire during the prerender -- before the user has actually navigated. This inflates page view counts. Check `document.prerendering` before sending analytics events, and defer them until the `prerenderingchange` event fires. The `web-vitals` library handles this correctly, but custom analytics setups often do not.
+
+**3. Cross-origin prerender is not supported.** Speculation rules only prerender same-origin URLs. If your product links go to a different subdomain or external domain, prerender rules will be silently ignored. Cross-origin prefetch is possible but requires the target to respond with a `Supports-Loading-Mode: credentialed-prerender` header, which most third-party sites do not set. Always verify that your target URLs are same-origin before relying on prerender.
+
+**4. Assuming speculation rules are a guarantee.** The browser treats speculation rules as hints, not commands. It may decline to speculate due to memory pressure, Data Saver mode, slow connections, or exceeding the concurrent speculation limit. Never build user-facing features that depend on prerendering having occurred -- it is a performance optimization, not a functional requirement.
+
+**5. Forgetting to handle `document.prerendering` state in application code.** Code that measures viewport visibility (IntersectionObserver for lazy loading or impression tracking), requests geolocation or camera permissions, or starts playing media will behave incorrectly in a prerendered page. Gate these operations behind a `document.prerendering` check or defer them to the `prerenderingchange` event. Similarly, `setTimeout` and `setInterval` callbacks fire during prerender -- if they update UI or trigger side effects, those will happen before the user sees the page.
+
+**6. Not segmenting performance metrics for prerendered navigations.** A prerendered page will report extremely fast LCP and load times because the work happened before activation. If you do not segment these metrics separately (using `activationStart > 0`), your aggregate performance data will be skewed optimistically, masking real performance issues for users on browsers that do not support speculation rules.
+
+---
+
+## Summary
+
+The Speculation Rules API replaces the legacy `<link rel="prefetch">` and `<link rel="prerender">` hints with a declarative JSON format embedded in `<script type="speculationrules">` or delivered via the `Speculation-Rules` HTTP header. It supports two actions -- prefetch (fetch the document response only) and prerender (create a full hidden page with JS execution, DOM construction, and paint) -- with four eagerness levels controlling when speculation triggers: `immediate` on parse, `eager` (same as immediate for now), `moderate` on 200ms hover or pointerdown, and `conservative` on pointerdown/touchstart only. Document rules with `where` clauses and `href_matches` patterns enable automatic speculation for links matching CSS selectors without hardcoding URLs. The API is Chromium-only (Chrome 109+ for prefetch, 121+ for prerender) and functions as a progressive enhancement that browsers without support silently ignore. Prerendered pages must handle the `document.prerendering` state to avoid double-counting analytics, triggering permission prompts, or skewing performance metrics -- use `activationStart` from `PerformanceNavigationTiming` to correctly measure perceived load times.
+
+---
+
+## Interview Questions
+
+**Q1. What is the difference between prefetch and prerender in the Speculation Rules API, and when would you choose one over the other?**
+
+Prefetch fetches only the target document's HTTP response and stores it -- no JavaScript executes, no DOM is built, no subresources are loaded. The cost is a single network request plus the response body in memory. Prerender goes further: the browser creates a hidden top-level browsing context, loads the URL, executes all JavaScript, constructs the DOM, fetches subresources, runs layout, and paints. The result is a fully rendered page held in memory that activates instantly on navigation. You choose prefetch when the target page is cheap to render client-side but expensive to fetch (long TTFB), or when you have many potential targets and cannot afford the memory cost of prerendering each one. You choose prerender when the target page is render-heavy (complex JS, many subresources, large layout) and you have high confidence the user will navigate to it -- the cost is significant (tens of megabytes of memory, real CPU time) but the payoff is zero-latency navigation.
+
+**Q2. How do eagerness levels work, and what is the default for list rules vs document rules?**
+
+There are four eagerness levels: `immediate` triggers speculation as soon as the browser parses the rules; `eager` currently behaves identically to `immediate` but is reserved for future browser heuristics; `moderate` triggers on hover for 200ms or on `pointerdown`, whichever comes first; `conservative` triggers only on `pointerdown` or `touchstart`. For `source: "list"` rules, the default is `immediate` -- the browser assumes you listed those URLs because you are confident they will be needed. For `source: "document"` rules, the default is `conservative` -- since the browser is matching links dynamically, it waits for a strong user intent signal before committing resources. In practice, `moderate` is the best default for most document rules because a 200ms hover is a reliable signal of navigation intent that balances resource cost against latency savings.
+
+**Q3. How should analytics and performance measurement code handle prerendered pages?**
+
+Prerendered pages execute JavaScript before the user navigates to them. Any analytics code that fires on `DOMContentLoaded`, `load`, or script initialization will record a page view during the prerender phase, inflating metrics. The solution is to check `document.prerendering` -- if `true`, defer all analytics until the `prerenderingchange` event fires, which indicates the page has been activated and is now visible to the user. For performance metrics, `PerformanceNavigationTiming.activationStart` returns a nonzero timestamp for prerendered navigations. All user-perceived metrics (LCP, FCP, load time) should be calculated relative to `activationStart` rather than `navigationStart` to reflect what the user actually experienced. Without this segmentation, aggregate performance data will be artificially optimistic because prerendered navigations report near-zero load times.
+
+**Q4. What are the restrictions on which pages can be prerendered, and what happens when a restricted page is targeted?**
+
+Several conditions prevent prerendering: cross-origin URLs (prerender is same-origin only by default), pages with `Cache-Control: no-store` (the response cannot be cached for activation), pages that trigger synchronous browser prompts (`window.alert`, `window.confirm`, `window.prompt`, HTTP 401/407 authentication), and pages whose documents register `unload` or `beforeunload` event handlers. Non-HTTP schemes (`blob:`, `data:`) are also excluded. When a rule targets a restricted page, the browser silently skips or aborts the prerender -- there is no error thrown, no console warning in most cases, and the user simply gets a normal navigation. This is why speculation rules must always be treated as an optimization hint, never as a guarantee. Developers should verify their target pages are eligible by checking Chrome DevTools' "Speculative Loading" tab in the Application panel.
+
+**Q5. How does the Speculation Rules API interact with the browser's resource constraints, and what limits does Chrome impose?**
+
+Chrome limits concurrent speculations to prevent excessive resource usage. For `immediate` and `eager` eagerness, the limit is approximately 10 concurrent prerenders. For `moderate` and `conservative`, it is 2 concurrent prerenders. Prefetch limits are higher since the resource cost is lower. When limits are reached, additional speculation rules are queued and executed when a slot opens (e.g., when a prerendered page is activated or discarded). The browser also considers device memory, whether Data Saver mode is enabled, and current memory pressure. Under memory pressure, the browser may discard existing prerenders to free resources. This means the order in which rules appear matters -- earlier rules are more likely to be speculated on. For list-based rules with `immediate` eagerness, this means putting the highest-confidence URL first in the array.
+
+**Q6. Explain how `source: "document"` rules with `where` clauses work and why they are preferred over list-based rules for most applications.**
+
+Document rules instruct the browser to scan the current page's DOM for `<a>` elements matching specified conditions, rather than requiring an explicit list of URLs. The `where` clause supports `selector_matches` (CSS selectors tested against the anchor element), `href_matches` (URL patterns tested against the link's href using URLPattern syntax), and logical combinators (`and`, `or`, `not`). For example, `{ "and": [{ "selector_matches": "nav a" }, { "not": { "href_matches": "/admin/*" } }] }` targets all navigation links except admin routes. Document rules are preferred because they are declarative and resilient to content changes -- when new links are added to the DOM (e.g., via client-side rendering or infinite scroll), matching rules apply automatically without code changes. List-based rules require you to know every target URL at render time, which is brittle in dynamic applications. Document rules combined with `moderate` eagerness provide an optimal balance: speculation is scoped to links the user actually interacts with, targeting is driven by CSS selectors that follow the same patterns as your styles, and no build-time URL generation is needed.

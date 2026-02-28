@@ -24,3 +24,13 @@ The section leads with the three metrics, then the biggest real-world offender (
 **Performance Budgets** — Setting enforceable limits on bundle size, metric values, and third-party script weight — and integrating those limits into CI so regressions are caught before deploy.
 
 **Lighthouse CI Integration** — Running Lighthouse audits automatically on every PR, defining score thresholds, and failing builds that regress on performance or accessibility.
+
+**IntersectionObserver Internals** — How the browser efficiently detects element visibility without polling. The observer callback, threshold arrays, `rootMargin` for preloading, the internal intersection algorithm, and common patterns: lazy loading, infinite scroll, analytics viewport tracking.
+
+**MutationObserver Cost** — Observing DOM changes synchronously via microtask-queued callbacks. Configuration options (`childList`, `attributes`, `subtree`, `characterData`), performance implications of broad observation scopes, batching mutations, and when MutationObserver is the right tool vs when ResizeObserver or IntersectionObserver is more appropriate.
+
+**PerformanceObserver API** — The unified interface for collecting performance entries: `resource`, `navigation`, `longtask`, `paint`, `largest-contentful-paint`, `layout-shift`, `event`. Buffered entries for late observers, entry types and their fields, and building a lightweight RUM pipeline from PerformanceObserver data.
+
+**Long Tasks API** — Detecting main-thread tasks exceeding 50ms that block user interaction. `PerformanceObserver` with `type: "longtask"`, attribution to scripts and iframes, correlation with INP, and the transition to Long Animation Frames (LoAF) for more granular attribution.
+
+**Speculation Rules API** — The modern replacement for `<link rel="prefetch">` and the deprecated `<link rel="prerender">`. The `<script type="speculationrules">` JSON format with `prefetch` and `prerender` arrays, `source: "list"` for explicit URLs and `source: "document"` with CSS selector matching. Eagerness levels (`immediate`, `eager`, `moderate`, `conservative`), prerender restrictions (cross-origin, `no-store`, auth prompts), measuring activation with `PerformanceNavigationTiming.activationStart`, and the Chromium-only browser support status.

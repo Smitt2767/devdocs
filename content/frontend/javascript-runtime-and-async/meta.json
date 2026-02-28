@@ -7,6 +7,7 @@
     "promise-combinators-error-propagation",
     "async-await-error-handling",
     "abort-controller-streaming-fetch",
-    "concurrency-vs-parallelism"
+    "concurrency-vs-parallelism",
+    "web-workers-vs-service-workers"
   ]
 }

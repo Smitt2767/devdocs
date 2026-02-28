@@ -1,6 +1,6 @@
 ---
 title: Overview
-description: Patterns and mechanisms for structuring the UI layer — from RSC composition and Suspense to compound components, headless patterns, portal layering, Shadow DOM, edge rendering, and micro-frontend orchestration.
+description: Patterns and mechanisms for structuring the UI layer — from RSC composition and Suspense to compound components, headless patterns, and portal layering.
 ---
 
 ## Component & UI Architecture
@@ -22,9 +22,3 @@ The section moves from the most foundational model (React Server Components) thr
 **Headless UI Pattern** — Separating interaction logic, keyboard navigation, accessibility, and positioning entirely from markup. The prop getter pattern. Building a fully accessible combobox with complete keyboard interaction model. Floating UI for viewport-aware popup positioning. When to choose headless over compound components.
 
 **Portal & Layering Architecture** — How `createPortal` escapes DOM containment while preserving the React tree. Stacking contexts and why `z-index: 9999` fails. A named z-index CSS custom property scale. `isolation: isolate` for self-contained component layering. Focus trap implementation. The `inert` attribute for modal backgrounds. Backdrop-click detection.
-
-**Shadow DOM** — Native browser-level style and DOM encapsulation. `<slot>` for content projection. `::part()` for exposing internal elements to external CSS. `adoptedStyleSheets` for efficient shared stylesheets. Declarative Shadow DOM for SSR-compatible shadow roots. CSS custom properties as the theming API across the boundary.
-
-**Edge Rendering** — The WinterCG runtime API surface, what's available and what isn't. Next.js middleware (always edge) vs edge route handlers (`export const runtime = 'edge'`). Streaming from the edge. `stale-while-revalidate` for ISR-style freshness. JWT verification with Web Crypto. When edge rendering beats static generation or Node.js SSR.
-
-**Micro-frontend Orchestration** — Build-time vs server-side vs client-side (Module Federation) composition. The `remoteEntry.js` manifest and runtime module resolution. Singleton shared dependencies and the multiple-React-instances problem. Cross-remote communication via custom event bus (not shared stores). TypeScript remote module declarations. Platform contracts for version coordination. Integration testing across team boundaries.

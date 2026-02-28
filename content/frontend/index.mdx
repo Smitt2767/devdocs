@@ -7,7 +7,7 @@ description: A structured reference of frontend engineering concepts — coverin
 
 This section is a curated, in-depth reference for frontend engineering. Each article goes beyond surface-level explanations — the goal is to understand _why_ things work the way they do, not just how to copy a pattern.
 
-Topics are organized into 16 categories in a deliberate order — from the JavaScript engine at the foundation, through the rendering pipeline and component layer, out to delivery and architecture. Reading front-to-back is a complete walkthrough. Use the sidebar to jump to any topic.
+Topics are organized into 14 categories in a deliberate order — from the JavaScript engine at the foundation, through the rendering pipeline and component layer, out to delivery and architecture. Reading front-to-back is a complete walkthrough. Use the sidebar to jump to any topic.
 
 ---
 
@@ -15,7 +15,7 @@ Topics are organized into 16 categories in a deliberate order — from the JavaS
 
 Covers the JavaScript engine and async execution model that everything else builds on.
 
-Topics include: the event loop (macrotasks vs microtasks), task starvation and scheduler priorities, promise combinators and error propagation, async/await and error handling, AbortController and streaming fetch, and concurrency vs parallelism.
+Topics include: the event loop (macrotasks vs microtasks), task starvation and scheduler priorities, promise combinators and error propagation, async/await and error handling, AbortController and streaming fetch, concurrency vs parallelism, and Web Workers vs Service Workers.
 
 ---
 
@@ -23,7 +23,7 @@ Topics include: the event loop (macrotasks vs microtasks), task starvation and s
 
 Covers how browsers turn HTML, CSS, and JavaScript into pixels — and how React's rendering model maps onto that pipeline.
 
-Topics include: the critical rendering path, render-blocking resources, paint vs composite vs layout, browser compositing layers, hydration, hydration strategies, streaming SSR, SSR vs SSG vs ISR, the RSC rendering model, concurrent rendering, fiber architecture, the reconciliation algorithm, render waterfalls, the View Transitions API, and image and font optimization.
+Topics include: the critical rendering path, render-blocking resources, paint vs composite vs layout, browser compositing layers, hydration, hydration strategies, streaming SSR, SSR vs SSG vs ISR, the RSC rendering model, concurrent rendering, fiber architecture, the reconciliation algorithm, render waterfalls, the View Transitions API, image and font optimization, and React 19 and the React Compiler.
 
 ---
 
@@ -31,7 +31,7 @@ Topics include: the critical rendering path, render-blocking resources, paint vs
 
 Covers CSS at the systems level — not syntax, but architecture and performance.
 
-Topics include: CSS architecture trade-offs, CSS containment, layout thrashing, animation performance, theming and design tokens, and responsive design strategies.
+Topics include: CSS architecture trade-offs, CSS containment, container queries, layout thrashing, animation performance, theming and design tokens, responsive design strategies, and scroll-driven animations.
 
 ---
 
@@ -39,7 +39,7 @@ Topics include: CSS architecture trade-offs, CSS containment, layout thrashing, 
 
 Covers how to structure the UI layer at a component and system level.
 
-Topics include: React Server Components, Suspense boundaries, error boundaries, compound components, the headless UI pattern, portal and layering architecture, Shadow DOM, edge rendering, and micro-frontend orchestration.
+Topics include: React Server Components, Suspense boundaries, error boundaries, compound components, the headless UI pattern, and portal and layering architecture.
 
 ---
 
@@ -55,7 +55,7 @@ Topics include: derived state vs redundant state, immutable data patterns, memoi
 
 Covers how code gets from your editor to the browser — and how to make that process faster and leaner.
 
-Topics include: tree shaking internals, code splitting strategies, bundle analysis and dependency auditing, preload / prefetch / preconnect / priority hints, module federation, and monorepo tooling.
+Topics include: tree shaking internals, code splitting strategies, bundle analysis and dependency auditing, preload / prefetch / preconnect / priority hints, and monorepo tooling.
 
 ---
 
@@ -63,7 +63,7 @@ Topics include: tree shaking internals, code splitting strategies, bundle analys
 
 Covers caching at every layer — HTTP, CDN, service worker, and client-side storage.
 
-Topics include: HTTP caching strategies, cache invalidation strategies, CDN cache purging, service worker lifecycle traps, IndexedDB, and offline conflict resolution.
+Topics include: HTTP caching strategies, cache invalidation strategies, CDN cache purging, service worker lifecycle traps, and IndexedDB.
 
 ---
 
@@ -71,7 +71,7 @@ Topics include: HTTP caching strategies, cache invalidation strategies, CDN cach
 
 Covers the network layer between your frontend and the server.
 
-Topics include: HTTP/3 and QUIC, CORS and preflight, SameSite cookie modes, authentication flows, API paradigms (REST, GraphQL, tRPC), WebSockets vs SSE vs long polling, and client-side rate limiting.
+Topics include: HTTP/3 and QUIC, CORS and preflight, SameSite cookie modes, authentication flows, API paradigms (REST, GraphQL, tRPC), WebSockets vs SSE vs long polling, client-side rate limiting, and the Navigation API.
 
 ---
 
@@ -85,17 +85,9 @@ Topics include: CSRF vs XSS mitigation, Content Security Policy, Trusted Types, 
 
 ## Performance & Core Web Vitals
 
-Covers measurable, user-impacting performance — from individual metrics to CI enforcement.
+Covers measurable, user-impacting performance — from individual metrics to browser observation APIs and CI enforcement.
 
-Topics include: Largest Contentful Paint, Cumulative Layout Shift, Interaction to Next Paint, third-party script management, RUM vs synthetic monitoring, performance budgets, and Lighthouse CI integration.
-
----
-
-## Browser Observation APIs
-
-Covers the browser APIs used to observe DOM changes, visibility, and performance — without polling.
-
-Topics include: IntersectionObserver internals, MutationObserver cost, the PerformanceObserver API, and the Long Tasks API.
+Topics include: Largest Contentful Paint, Cumulative Layout Shift, Interaction to Next Paint, third-party script management, RUM vs synthetic monitoring, performance budgets, Lighthouse CI integration, IntersectionObserver internals, MutationObserver cost, the PerformanceObserver API, the Long Tasks API, and the Speculation Rules API.
 
 ---
 
@@ -107,19 +99,11 @@ Topics include: garbage collection timing, browser memory leak detection, detach
 
 ---
 
-## Concurrency & Workers
-
-Covers how to move work off the main thread using browser worker primitives.
-
-Topics include: Web Workers vs Service Workers.
-
----
-
 ## Accessibility
 
 Covers building UIs that work for all users — including the underlying browser and AT mechanics.
 
-Topics include: the accessibility tree, ARIA live regions internals, focus management in SPAs, keyboard navigation patterns, pointer events, and color contrast and reduced motion.
+Topics include: the accessibility tree, ARIA live regions internals, focus management in SPAs, keyboard navigation patterns, and color contrast and reduced motion.
 
 ---
 

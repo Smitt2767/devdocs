@@ -16,6 +16,7 @@
     "reconciliation-algorithm",
     "render-waterfalls",
     "view-transitions-api",
-    "image-and-font-optimization"
+    "image-and-font-optimization",
+    "react-19-and-react-compiler"
   ]
 }

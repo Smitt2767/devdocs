@@ -7,9 +7,6 @@
     "error-boundaries",
     "compound-components",
     "headless-ui-pattern",
-    "portal-and-layering-architecture",
-    "shadow-dom",
-    "edge-rendering",
-    "micro-frontend-orchestration"
+    "portal-and-layering-architecture"
   ]
 }

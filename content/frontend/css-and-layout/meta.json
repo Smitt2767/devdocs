@@ -4,9 +4,11 @@
     "index",
     "css-architecture-tradeoffs",
     "css-containment",
+    "container-queries",
     "layout-thrashing",
     "animation-performance",
     "theming-and-design-tokens",
-    "responsive-design-strategies"
+    "responsive-design-strategies",
+    "scroll-driven-animations"
   ]
 }
