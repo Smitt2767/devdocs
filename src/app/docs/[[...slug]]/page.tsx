@@ -9,6 +9,8 @@ import { notFound } from "next/navigation";
 import { getMDXComponents } from "@/mdx-components";
 import type { Metadata } from "next";
 import { LLMCopyButton } from "@/components/ai/page-actions";
+import { findNeighbour } from "fumadocs-core/page-tree";
+import { DocsNavigationProvider } from "@/components/contexts/docs-navigation";
 
 export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
   const params = await props.params;
@@ -16,6 +18,7 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
   if (!page) notFound();
 
   const MDX = page.data.body;
+  const neighbours = findNeighbour(source.getPageTree(), page.url);
 
   return (
     <DocsPage toc={page.data.toc} full={page.data.full}>
@@ -26,9 +29,22 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
       <div className="flex flex-row gap-2 items-center border-b border-border pb-6">
         <LLMCopyButton markdownUrl={`${page.url}.mdx`} />
       </div>
-      <DocsBody>
-        <MDX components={getMDXComponents()} />
-      </DocsBody>
+      <DocsNavigationProvider
+        previous={
+          neighbours.previous
+            ? { name: String(neighbours.previous.name), url: neighbours.previous.url }
+            : undefined
+        }
+        next={
+          neighbours.next
+            ? { name: String(neighbours.next.name), url: neighbours.next.url }
+            : undefined
+        }
+      >
+        <DocsBody>
+          <MDX components={getMDXComponents()} />
+        </DocsBody>
+      </DocsNavigationProvider>
     </DocsPage>
   );
 }
