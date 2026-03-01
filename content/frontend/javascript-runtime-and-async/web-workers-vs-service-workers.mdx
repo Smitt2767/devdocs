@@ -8,6 +8,11 @@ description: How Web Workers enable off-main-thread computation via structured c
   title="Web Workers vs Service Workers"
 />
 
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/javascript-runtime-and-async/web-workers-vs-service-workers.png"
+  alt="Web Workers vs Service Workers overview"
+/>
+
 ## Overview
 
 JavaScript runs on a single thread. Every function call, every DOM mutation, every layout calculation, and every paint operation competes for time on that one thread. When a long task exceeds the browser's 50ms budget (the threshold Chrome uses for Interaction to Next Paint scoring), the UI becomes unresponsive — clicks don't register, animations stutter, and input feels laggy. The main thread is the bottleneck for everything users perceive as "fast" or "slow."
