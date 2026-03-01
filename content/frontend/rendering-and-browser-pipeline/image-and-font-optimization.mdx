@@ -3,6 +3,11 @@ title: Image & Font Optimization
 description: How next/image and next/font eliminate the two most common causes of LCP and CLS regressions — format conversion, srcset mechanics, fetchpriority, font self-hosting, and size-adjusted fallbacks.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/rendering-and-browser-pipeline/image-and-font-optimization.m4a"
+  title="Image & Font Optimization"
+/>
+
 ## Overview
 
 Images and fonts are consistently the two asset categories most responsible for poor Core Web Vitals scores in production. Unoptimized images delay LCP. Fonts that load late cause cumulative layout shift. Both problems are entirely preventable — Next.js ships purpose-built solutions for each — but developers routinely misconfigure them, bypass them, or apply them correctly without understanding _why_, leading to regressions they can't diagnose.

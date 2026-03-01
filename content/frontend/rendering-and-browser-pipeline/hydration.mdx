@@ -3,6 +3,11 @@ title: Hydration
 description: How React attaches to server-rendered HTML, what hydration mismatches are and why they happen, the CPU cost of hydration, and how to structure components to minimize it.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/rendering-and-browser-pipeline/hydration.m4a"
+  title="Hydration"
+/>
+
 ## Overview
 
 **Hydration** is the process by which React takes static HTML rendered on the server and makes it interactive on the client. The server sends a fully-formed HTML document — users see content immediately, before any JavaScript executes. React then downloads, parses, and executes on the client, walks the server-rendered DOM, and attaches event listeners and internal state to the existing nodes.
