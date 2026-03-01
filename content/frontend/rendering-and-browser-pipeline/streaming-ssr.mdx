@@ -3,6 +3,11 @@ title: Streaming SSR
 description: How React 18 streams HTML to the browser in chunks using Suspense, how the server-to-client swap mechanism works under the hood, and how to structure components for maximum streaming benefit.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/rendering-and-browser-pipeline/streaming-ssr.m4a"
+  title="Streaming SSR"
+/>
+
 ## Overview
 
 Traditional SSR has an all-or-nothing problem: the server must finish building the entire HTML document before it can send the first byte to the browser. If one data fetch takes 800ms, every user waits 800ms looking at a blank screen — even if 90% of the page was ready in 50ms.

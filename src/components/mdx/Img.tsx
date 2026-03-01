@@ -22,7 +22,7 @@ export function Img({ src, alt, caption }: ImgProps) {
         alt={alt}
         width={1200}
         height={630}
-        className={`w-full rounded-lg border border-border transition-all duration-300 ease-in ${
+        className={`w-full bg-surface rounded-lg border border-border transition-all duration-300 ease-in ${
           loaded ? "blur-none" : "blur-2xl"
         }`}
         placeholder="blur"
