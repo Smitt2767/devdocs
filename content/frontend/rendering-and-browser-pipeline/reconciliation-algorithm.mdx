@@ -8,6 +8,11 @@ description: How React diffs old and new fiber trees to compute the minimal set 
   title="Reconciliation Algorithm"
 />
 
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/rendering-and-browser-pipeline/reconciliation-algorithm.png"
+  alt="Reconciliation Algorithm overview"
+/>
+
 ## Overview
 
 When state or props change, React doesn't immediately reach into the DOM and start mutating. Instead it re-runs your component functions, produces a new virtual representation of the UI, compares it against the previous one, and surgically applies only the differences to the real DOM.

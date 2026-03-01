@@ -8,6 +8,11 @@ description: React's internal reconciliation engine — fiber nodes, double buff
   title="Fiber Architecture"
 />
 
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/rendering-and-browser-pipeline/fiber-architecture.png"
+  alt="Fiber Architecture overview"
+/>
+
 ## Overview
 
 React Fiber is the internal reconciliation engine that has powered React since version 16. Before Fiber, React used a recursive stack-based reconciler that was entirely synchronous — once it started rendering a component tree, it ran to completion with no way to stop. On large trees this froze the main thread and dropped frames.
@@ -492,6 +497,11 @@ Swapping component types resets all state — but it's implicit and surprising. 
   key={isEditing ? "edit" : "view"}
   mode={isEditing ? "edit" : "view"}
 />;
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/rendering-and-browser-pipeline/fiber-architecture.png"
+  alt="Fiber Architecture overview"
+/>
 ```
 
 **4. Ignoring StrictMode double-invocations instead of fixing them.**

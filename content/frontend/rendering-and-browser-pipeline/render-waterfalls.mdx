@@ -8,6 +8,11 @@ description: How render waterfalls form in server and client React, the N+1 requ
   title="Render Waterfalls"
 />
 
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/rendering-and-browser-pipeline/render-waterfalls.png"
+  alt="Render Waterfalls overview"
+/>
+
 ## Overview
 
 A render waterfall is what happens when data fetching or rendering is chained sequentially — each step waiting for the previous one before starting. Instead of fetching three independent resources in 200ms (the time of the slowest), you wait 600ms because each request blocks the next.

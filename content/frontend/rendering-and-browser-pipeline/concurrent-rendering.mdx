@@ -8,6 +8,11 @@ description: How React's concurrent rendering model works — priority lanes, ti
   title="Concurrent Rendering"
 />
 
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/rendering-and-browser-pipeline/concurrent-rendering.png"
+  alt="Concurrent Rendering overview"
+/>
+
 ## Overview
 
 Before React 18, rendering was synchronous and blocking. Once React started rendering a component tree, it ran to completion before the browser could do anything else — including responding to user input. On slow devices or with complex trees, this produced visibly frozen UIs: a user types in a search box, the filter computation takes 200ms, and every keystroke feels laggy because the input can't update until the render finishes.
