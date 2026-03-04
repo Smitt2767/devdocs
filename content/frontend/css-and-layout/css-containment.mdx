@@ -3,6 +3,15 @@ title: CSS Containment
 description: How the CSS contain property and content-visibility let you tell the browser a subtree is independent — reducing layout recalculation scope, isolating paint, and skipping off-screen rendering entirely.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/css-and-layout/css-containment.m4a"
+  title="CSS Containment"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/css-and-layout/css-containment.png"
+  alt="CSS Containment overview"
+/>
 ## Overview
 
 By default the browser treats the entire DOM as one interconnected system. A size change in a deeply nested element can invalidate layout for the entire document — the browser doesn't know whether the change might affect sibling or ancestor element geometry until it recalculates. On large, complex pages this is the source of slow interactions and dropped frames.

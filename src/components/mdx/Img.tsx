@@ -9,31 +9,25 @@ const BLUR_DATA_URL =
 type ImgProps = {
   src: string;
   alt: string;
-  caption?: string;
 };
 
-export function Img({ src, alt, caption }: ImgProps) {
+export function Img({ src, alt }: ImgProps) {
   const [loaded, setLoaded] = useState(false);
 
   return (
-    <figure className="my-6 overflow-hidden rounded-lg">
+    <figure className="my-6 relative aspect-video bg-surface rounded-lg overflow-hidden">
       <NextImage
+        fill
         src={src}
         alt={alt}
-        width={1200}
-        height={630}
-        className={`w-full bg-surface rounded-lg border border-border transition-all duration-300 ease-in ${
+        className={`transition-all duration-300 ease-in object-cover object-center ${
           loaded ? "blur-none" : "blur-2xl"
         }`}
         placeholder="blur"
         blurDataURL={BLUR_DATA_URL}
         onLoad={() => setLoaded(true)}
+        sizes="(max-width: 768px) 100vw, 800px"
       />
-      {caption && (
-        <figcaption className="mt-2 text-center text-sm text-muted">
-          {caption}
-        </figcaption>
-      )}
     </figure>
   );
 }
