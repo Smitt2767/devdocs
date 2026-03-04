@@ -8,6 +8,11 @@ description: How browsers split pages into GPU-accelerated compositor layers, wh
   title="Browser Compositing Layers"
 />
 
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/rendering-and-browser-pipeline/browser-compositing-layers.png"
+  alt="Browser Compositing Layers overview"
+/>
+
 ## Overview
 
 When the browser paints a page, it doesn't always draw everything onto one flat surface. It splits parts of the page into independent **compositing layers** — separate GPU textures that can be moved, faded, and transformed without touching the pixels inside them.
