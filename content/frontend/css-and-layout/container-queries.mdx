@@ -3,6 +3,15 @@ title: Container Queries
 description: How CSS container queries decouple component responsiveness from the viewport — enabling truly reusable components that adapt their layout based on the size of their nearest containment context rather than the browser window.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/css-and-layout/container-queries.m4a"
+  title="Container Queries"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/css-and-layout/container-queries.png"
+  alt="Container Queries overview"
+/>
 ## Overview
 
 Media queries have been the foundation of responsive web design since 2012, but they operate on a fundamental assumption: the viewport is the relevant size context. This assumption breaks down the moment a component appears in multiple layout contexts — a card component in a three-column grid behaves differently from the same card in a sidebar, yet both share the same viewport width. The result is that components written with media queries are not truly portable; they encode assumptions about where they will be placed.

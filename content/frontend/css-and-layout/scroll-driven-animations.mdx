@@ -3,6 +3,15 @@ title: Scroll-Driven Animations
 description: How the CSS scroll-driven animations specification replaces JavaScript scroll listeners and IntersectionObserver for animation purposes, linking CSS animations to scroll progress or element visibility with compositor-thread performance and no main-thread involvement.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/css-and-layout/scroll-driven-animations.m4a"
+  title="Scroll-Driven Animations"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/css-and-layout/scroll-driven-animations.png"
+  alt="Scroll-Driven Animations overview"
+/>
 ## Overview
 
 Before scroll-driven animations, linking visual effects to scroll position required JavaScript — either `scroll` event listeners with `requestAnimationFrame` throttling, or `IntersectionObserver` for visibility-triggered transitions. Both approaches run on the main thread: the JS callback reads scroll position, computes progress, and writes style changes, creating a frame of latency between the scroll input and the visual update. On busy pages this latency compounds into visible jank.
