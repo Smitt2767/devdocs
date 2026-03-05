@@ -3,6 +3,11 @@ title: Memoization Pitfalls
 description: When useMemo, useCallback, and React.memo help versus when they silently break due to stale closures or unstable dependencies — and how React 19's useEffectEvent and the React Compiler change the picture.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/state-management-and-data-patterns/memoization-pitfalls.m4a"
+  title="Memoization Pitfalls"
+/>
+
 ## Overview
 
 Memoization in React caches computed values or function references so React skips expensive recalculations on re-renders. Used correctly, it reduces unnecessary work. Used incorrectly, it introduces stale closure bugs that silently operate on outdated data, wastes memory on cache entries that never help, and sometimes makes rendering _slower_ due to dependency comparison overhead.

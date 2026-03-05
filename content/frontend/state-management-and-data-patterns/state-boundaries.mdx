@@ -3,6 +3,11 @@ title: State Boundaries
 description: How to decide what lives in local state, server state, or global client state — and the patterns that prevent global stores from becoming re-render bottlenecks.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/state-management-and-data-patterns/state-boundaries.m4a"
+  title="State Boundaries"
+/>
+
 ## Overview
 
 Every piece of state has a natural home. Put state in the wrong home and you get stale data (server state in a global store), unnecessary re-renders (high-frequency updates in Context), prop-drilling (local state hoisted too high), or an unmaintainable global store (everything in Zustand because it was easy).

@@ -3,6 +3,11 @@ title: Immutable Data Patterns
 description: How structural sharing makes immutable updates efficient, why referential equality drives React's rendering model, Immer for deep updates, and Immer middleware for Zustand.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/state-management-and-data-patterns/immutable-data-patterns.m4a"
+  title="Immutable Data Patterns"
+/>
+
 ## Overview
 
 Immutability means never modifying data in place — instead producing a new value whenever something changes. In JavaScript and React this matters because React's rendering model, memoization hooks, and every serious state library use referential equality (`===`) to detect changes. If you mutate data in place, the reference stays the same and React sees no change — re-renders you needed don't happen. If you produce new objects, React can do a fast reference check instead of a deep scan.

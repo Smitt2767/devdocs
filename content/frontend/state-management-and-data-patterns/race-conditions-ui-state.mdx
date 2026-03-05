@@ -3,6 +3,11 @@ title: Race Conditions in UI State
 description: How async operations resolving out of order corrupt displayed state, and the three patterns that prevent it — AbortController, ignore flags, and sequence counters — plus how TanStack Query eliminates this class of bug automatically.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/state-management-and-data-patterns/race-conditions-ui-state.m4a"
+  title="Race Conditions in UI State"
+/>
+
 ## Overview
 
 A race condition in UI state happens when two or more async operations are in-flight simultaneously and the order in which they complete — not the order in which they were triggered — determines what your UI shows. The result is stale data overwriting fresh data, loading spinners that never resolve, or UI flickering between states.
