@@ -3,6 +3,16 @@ title: Suspense Boundaries
 description: How React Suspense boundaries declaratively handle async loading states, how they coordinate with streaming SSR, the use() hook for Client Components, and how to prevent fetch waterfalls with parallel Suspense trees.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/component-and-ui-architecture/suspense-boundaries.m4a"
+  title="Suspense Boundaries"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/component-and-ui-architecture/suspense-boundaries.png"
+  alt="Suspense Boundaries overview"
+/>
+
 ## Overview
 
 A Suspense boundary catches its subtree while it's "not ready yet" and renders a fallback in its place. When the suspended content resolves — whether that's a lazy-loaded component, an async Server Component, or a deferred promise — React swaps the fallback for the real UI.
