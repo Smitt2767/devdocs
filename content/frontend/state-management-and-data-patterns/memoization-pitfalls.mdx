@@ -8,6 +8,11 @@ description: When useMemo, useCallback, and React.memo help versus when they sil
   title="Memoization Pitfalls"
 />
 
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/state-management-and-data-patterns/memoization-pitfalls.png"
+  alt="Memoization Pitfalls overview"
+/>
+
 ## Overview
 
 Memoization in React caches computed values or function references so React skips expensive recalculations on re-renders. Used correctly, it reduces unnecessary work. Used incorrectly, it introduces stale closure bugs that silently operate on outdated data, wastes memory on cache entries that never help, and sometimes makes rendering _slower_ due to dependency comparison overhead.

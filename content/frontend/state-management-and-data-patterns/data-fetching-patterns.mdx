@@ -8,6 +8,11 @@ description: The mental models behind TanStack Query and SWR — cache keys, ded
   title="Data Fetching Patterns"
 />
 
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/state-management-and-data-patterns/data-fetching-patterns.png"
+  alt="Data Fetching Patterns overview"
+/>
+
 ## Overview
 
 Client-side data fetching is not just `fetch()` inside `useEffect`. The moment you care about loading states, caching, deduplication, background refresh, optimistic updates, and cache invalidation — you are building a client-side cache. TanStack Query and SWR exist because that cache is hard to build correctly, and teams kept rebuilding it badly.

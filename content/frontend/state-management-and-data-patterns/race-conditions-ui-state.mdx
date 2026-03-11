@@ -8,6 +8,11 @@ description: How async operations resolving out of order corrupt displayed state
   title="Race Conditions in UI State"
 />
 
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/state-management-and-data-patterns/race-conditions-ui-state.png"
+  alt="Race Conditions in UI State overview"
+/>
+
 ## Overview
 
 A race condition in UI state happens when two or more async operations are in-flight simultaneously and the order in which they complete — not the order in which they were triggered — determines what your UI shows. The result is stale data overwriting fresh data, loading spinners that never resolve, or UI flickering between states.
