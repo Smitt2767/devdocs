@@ -3,6 +3,16 @@ title: CDN Cache Purging
 description: How CDNs cache at the edge, URL/tag/wildcard purging strategies, Cloudflare and Fastly APIs, origin shields and request coalescing for stampede prevention, Vercel Edge Network specifics, and tying purge calls to your deploy pipeline.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/caching-and-storage/cdn-cache-purging.m4a"
+  title="CDN Cache Purging"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/caching-and-storage/cdn-cache-purging.png"
+  alt="CDN Cache Purging overview"
+/>
+
 ## Overview
 
 A CDN caches your responses — HTML, JSON, images, scripts — across globally distributed edge nodes. When a user requests a resource, the CDN serves it from the nearest edge instead of forwarding to your origin. Latency drops from hundreds of milliseconds to single-digit milliseconds.

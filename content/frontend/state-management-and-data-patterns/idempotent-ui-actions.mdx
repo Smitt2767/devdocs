@@ -3,6 +3,16 @@ title: Idempotent UI Actions
 description: How to design UI actions that produce the same result regardless of how many times they fire — client-side guards, server-side idempotency keys, React Strict Mode as an idempotency test, and why both layers are required.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/state-management-and-data-patterns/idempotent-ui-actions.m4a"
+  title="Idempotent UI Actions"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/state-management-and-data-patterns/idempotent-ui-actions.png"
+  alt="Idempotent UI Actions overview"
+/>
+
 ## Overview
 
 An idempotent action produces the same outcome when triggered multiple times as when triggered once. In UI development this matters because users double-click buttons, networks retry requests, React Strict Mode invokes effects twice in development, and optimistic updates can race with server responses.

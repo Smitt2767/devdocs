@@ -3,6 +3,16 @@ title: Error Boundaries
 description: How React Error Boundaries isolate render-phase failures to a subtree, the Next.js error.tsx and global-error.tsx file conventions, error.digest for server error tracing, and what error boundaries cannot catch.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/component-and-ui-architecture/error-boundaries.m4a"
+  title="Error Boundaries"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/component-and-ui-architecture/error-boundaries.png"
+  alt="Error Boundaries overview"
+/>
+
 ## Overview
 
 An error boundary is a React component that catches JavaScript errors thrown during rendering in its subtree and renders a fallback UI instead of crashing the entire application. Without boundaries, a single component throwing an unhandled error propagates up to the root and crashes the whole page.

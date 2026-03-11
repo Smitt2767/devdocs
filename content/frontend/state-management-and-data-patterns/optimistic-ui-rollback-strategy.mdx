@@ -3,6 +3,16 @@ title: Optimistic UI & Rollback
 description: Showing immediate feedback before server confirmation — useOptimistic for Server Actions, TanStack Query onMutate/onError/onSettled for client mutations, concurrent mutation handling, and rollback for drag-and-drop interactions.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/state-management-and-data-patterns/optimistic-ui-rollback-strategy.m4a"
+  title="Optimistic UI & Rollback"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/state-management-and-data-patterns/optimistic-ui-rollback-strategy.png"
+  alt="Optimistic UI & Rollback overview"
+/>
+
 ## Overview
 
 Optimistic UI is the practice of updating the interface immediately on user interaction — before the server confirms the change. If the server succeeds, the optimistic update becomes permanent. If the server fails, you roll back to the last confirmed state and surface the error.
