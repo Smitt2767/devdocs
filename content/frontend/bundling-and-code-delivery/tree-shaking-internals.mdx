@@ -3,6 +3,16 @@ title: Tree Shaking Internals
 description: How bundlers use static analysis of ES module imports to eliminate dead code, what prevents tree shaking, the PURE annotation, Turbopack vs Webpack differences, and how to verify it's working.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/bundling-and-code-delivery/tree-shaking-internals.m4a"
+  title="Tree Shaking Internals"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/bundling-and-code-delivery/tree-shaking-internals.png"
+  alt="Tree Shaking Internals overview"
+/>
+
 ## Overview
 
 Tree shaking is the process by which a bundler statically analyzes your import/export graph and removes any exported code that is never imported anywhere in your application. The result is a smaller bundle — sometimes dramatically smaller — because unused utilities, components, and library exports never make it to production.
