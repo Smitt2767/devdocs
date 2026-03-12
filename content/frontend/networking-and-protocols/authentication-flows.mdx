@@ -3,6 +3,16 @@ title: Authentication Flows
 description: OAuth 2.0 Authorization Code Flow with PKCE, JWT structure and storage tradeoffs, session cookies, refresh token rotation with reuse detection, silent refresh, and Auth.js v5 integration in Next.js App Router.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/networking-and-protocols/authentication-flows.m4a"
+  title="Authentication Flows"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/networking-and-protocols/authentication-flows.png"
+  alt="Authentication Flows overview"
+/>
+
 ## Overview
 
 Authentication is the process of verifying who a user is. Three patterns dominate web applications: **OAuth 2.0** (delegating login to Google, GitHub, etc.), **JWTs** (stateless, self-contained tokens), and **session cookies** (server-managed state). In practice, most applications combine all three — OAuth for the login handshake, a session cookie for the web app, and JWTs for API access.

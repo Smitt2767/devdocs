@@ -3,6 +3,16 @@ title: WebSockets vs SSE vs Long Polling
 description: How the three real-time communication strategies work at the protocol level — the WebSocket upgrade handshake and frame format, SSE's text/event-stream spec with Last-Event-ID reconnection, long polling's hold-and-release cycle, binary WebSocket data, exponential backoff, scalability tradeoffs, and a decision framework for choosing correctly.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/networking-and-protocols/websockets-vs-sse-vs-long-polling.m4a"
+  title="WebSockets vs SSE vs Long Polling"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/networking-and-protocols/websockets-vs-sse-vs-long-polling.png"
+  alt="WebSockets vs SSE vs Long Polling overview"
+/>
+
 ## Overview
 
 When you need data to flow between server and client in real time — chat messages, live scores, stock tickers, AI token streaming, progress bars — you have three primary tools: **WebSockets**, **Server-Sent Events (SSE)**, and **Long Polling**. They solve the same surface-level problem but with very different tradeoffs around complexity, directionality, infrastructure compatibility, and scalability.

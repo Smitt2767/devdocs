@@ -3,6 +3,16 @@ title: HTTP/3 & QUIC
 description: How HTTP/3 eliminates transport-layer head-of-line blocking by running over QUIC — 0-RTT session resumption, connection migration, BBR congestion control, HTTPS DNS SVCB records, UDP firewall fallback, and how to verify the protocol in production.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/networking-and-protocols/http3-and-quic.m4a"
+  title="HTTP/3 & QUIC"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/networking-and-protocols/http3-and-quic.png"
+  alt="HTTP/3 & QUIC overview"
+/>
+
 ## Overview
 
 HTTP/3 is the third major version of HTTP. Unlike HTTP/1.1 and HTTP/2 — both of which run over TCP — HTTP/3 runs over **QUIC**, a transport protocol built on UDP. This shift resolves fundamental TCP limitations that hurt web performance: head-of-line blocking at the transport layer, slow connection setup, and poor behavior on lossy mobile networks.
