@@ -3,6 +3,11 @@ title: Cumulative Layout Shift
 description: A guide to understanding, measuring, and eliminating unexpected layout shifts that hurt user experience and Core Web Vitals scores.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/performance-and-core-web-vitals/cumulative-layout-shift.m4a"
+  title="Cumulative Layout Shift"
+/>
+
 ## Overview
 
 Cumulative Layout Shift (CLS) is a Core Web Vitals metric that measures how much visible content unexpectedly moves during page load. A low CLS score means your layout is stable — elements appear where users expect them and stay there. A high CLS score means things are jumping around, causing users to misclick, lose their reading position, or feel like the page is broken.
@@ -18,7 +23,6 @@ CLS = layout shift score = impact fraction × distance fraction
 Every unexpected shift during the page's lifespan accumulates into your total CLS score.
 
 ---
-
 ## How It Works
 
 The browser assigns a **layout shift score** each time a visible element moves without user interaction. Two factors determine the score:
@@ -37,7 +41,6 @@ A shift is only penalized if it's _unexpected_ — meaning it wasn't triggered b
 </Callout>
 
 ---
-
 ## Code Examples
 
 ### 1. Reserve Space for Images with `width` and `height`
@@ -94,7 +97,6 @@ export function ProductCard({
 ```
 
 ---
-
 ### 2. Reserve Space for Dynamic / Async Content
 
 When content loads asynchronously (e.g., from an API), the surrounding layout shifts as new elements appear. Use skeleton placeholders or fixed-height containers to hold space.
@@ -148,7 +150,6 @@ export function UserProfile({ userId }: { userId: string }) {
 ```
 
 ---
-
 ### 3. Avoid Late-Injected Banners and Ads
 
 Cookie banners, notification bars, and ad slots that appear _above existing content_ are major CLS sources. Either render them server-side (so they're in the initial HTML) or position them so they don't push other content.
@@ -177,7 +178,6 @@ export function CookieBanner({ show }: { show: boolean }) {
 ```
 
 ---
-
 ### 4. Stabilize Web Fonts with `font-display: optional` or `swap`
 
 Fonts that load late cause the browser to re-render text with new metrics, shifting surrounding elements.
@@ -214,7 +214,6 @@ export default function RootLayout({
 </Callout>
 
 ---
-
 ## Real-World Use Case
 
 On an e-commerce product listing page, you render a grid of product cards. Each card contains an image fetched from a CDN, a product name, and a price. Without explicit image dimensions, every image that loads causes the cards below to jump down the page. A user about to click "Add to Cart" clicks the wrong product because the layout shifted at the last moment.
@@ -222,7 +221,6 @@ On an e-commerce product listing page, you render a grid of product cards. Each 
 Fix it by adding `width` and `height` to every product image and wrapping them in an `aspect-ratio` container. Combine this with Next.js `<Image>` and `fill` to get responsive images with zero layout shift out of the box.
 
 ---
-
 ## Common Mistakes / Gotchas
 
 **1. Forgetting that CLS applies after load too**
@@ -245,7 +243,6 @@ Third-party scripts (analytics, A/B testing, ads) often inject DOM nodes after t
 </Callout>
 
 ---
-
 ## Summary
 
 CLS measures unexpected layout instability throughout a page's entire lifespan, not just during the initial load. The most common causes are unsized images, late-injected UI elements, and dynamically loaded content that displaces existing content. You can eliminate most CLS by reserving exact space for images with `width`/`height` attributes or `aspect-ratio` containers, using skeleton loaders that match real content dimensions, and positioning banners with `fixed` or `sticky` CSS rather than injecting them into document flow. Next.js `<Image>` and `next/font` handle the two biggest CLS sources automatically when used correctly. Always validate your CLS score with real field data, since lab tools like Lighthouse only capture a fraction of what real users experience.

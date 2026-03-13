@@ -3,6 +3,11 @@ title: PerformanceObserver API
 description: The unified API for subscribing to browser performance entries — navigation timing, resource timing, paint timing, long tasks, layout shift, LCP, and Core Web Vitals. buffered flag, takeRecords(), entry type reference, and reporting patterns.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/performance-and-core-web-vitals/performance-observer-api.m4a"
+  title="PerformanceObserver API"
+/>
+
 ## Overview
 
 `PerformanceObserver` lets you subscribe to browser performance entries asynchronously — without polling the `performance` timeline. It's the foundation of how `web-vitals`, Lighthouse, and every real-user monitoring tool collects metrics.
@@ -10,7 +15,6 @@ description: The unified API for subscribing to browser performance entries — 
 Instead of calling `performance.getEntriesByType("resource")` on a timer, you register an observer with the types you care about and receive entries as a push notification when the browser records them.
 
 ---
-
 ## How It Works
 
 The browser continuously records performance entries into a timeline buffer. `PerformanceObserver` taps into that stream by registering a callback tied to one or more entry types.
@@ -45,7 +49,6 @@ By default, a new `PerformanceObserver` only receives entries recorded _after_ i
 **Important caveat:** `buffered: true` is only supported when observing a single entry type. When observing multiple types simultaneously via `{ entryTypes: ["longtask", "resource"] }`, `buffered: true` is silently ignored.
 
 ---
-
 ## Code Examples
 
 ### Observing Core Web Vitals Manually
@@ -111,7 +114,6 @@ clsObserver.observe({ type: "layout-shift", buffered: true });
 ```
 
 ---
-
 ### Observing Resource Timing
 
 ```ts
@@ -141,7 +143,6 @@ resourceObserver.observe({ type: "resource" });
 ```
 
 ---
-
 ### Custom Timing with `performance.mark()` and `performance.measure()`
 
 User Timing marks let you instrument your own code and receive the measurements through `PerformanceObserver`:
@@ -186,7 +187,6 @@ measureObserver.observe({ type: "measure", buffered: true });
 ```
 
 ---
-
 ### `takeRecords()` — Synchronous Flush
 
 `takeRecords()` synchronously extracts and clears any pending entries from the observer's buffer that haven't been delivered to the callback yet:
@@ -216,7 +216,6 @@ function processEntries(entries: PerformanceEntry[]) {
 ```
 
 ---
-
 ### Complete Web Vitals Reporting with `web-vitals`
 
 For production RUM, use the `web-vitals` library — it wraps `PerformanceObserver` with correct handling for LCP finalization, CLS session windows, and INP outlier removal:
@@ -284,7 +283,6 @@ export default function RootLayout({
 ```
 
 ---
-
 ### Observing Navigation Timing
 
 ```ts
@@ -313,7 +311,6 @@ navObserver.observe({ type: "navigation", buffered: true });
 ```
 
 ---
-
 ## Real-World Use Case
 
 **SaaS dashboard with custom performance budgets.** You want to alert when any individual API call takes more than 1 second or when any script exceeds 200KB. Using `PerformanceObserver` with type `"resource"`, you observe all network requests and send budget violations to Datadog:
@@ -337,7 +334,6 @@ budgetObserver.observe({ type: "resource" });
 ```
 
 ---
-
 ## Common Mistakes / Gotchas
 
 **1. Forgetting `buffered: true` for metrics that may have fired before your observer.** LCP and CLS candidates are often recorded during the initial parse and paint — before any JavaScript runs. Without `buffered: true`, your observer misses them entirely.
@@ -351,13 +347,11 @@ budgetObserver.observe({ type: "resource" });
 **5. Reporting LCP before the user interacts.** LCP is updated until the user first interacts — new, larger elements may qualify after initial paint. The final value should be reported only after the first interaction or page unload, which is what `web-vitals`'s `onLCP` handles correctly.
 
 ---
-
 ## Summary
 
 `PerformanceObserver` is the unified API for subscribing to browser performance entries — from network timing and paint metrics to layout shifts and long tasks. Use `observe({ type: "...", buffered: true })` for each entry type that may have fired before your observer; note that `buffered` is silently ignored with the multi-type `entryTypes` form. Call `takeRecords()` before `disconnect()` to flush pending entries synchronously. For Core Web Vitals, prefer the `web-vitals` library over manual observers — it handles LCP finalization, CLS session windowing, and INP outlier logic correctly. Always report via `navigator.sendBeacon` so metrics survive page unload. Use `performance.mark()` and `performance.measure()` with a `"measure"` observer to instrument your own code.
 
 ---
-
 ## Interview Questions
 
 **Q1. What is the difference between `observe({ type: "..." })` and `observe({ entryTypes: [...] })` in `PerformanceObserver`?**

@@ -3,6 +3,11 @@ title: IntersectionObserver Internals
 description: How the browser detects element visibility against a viewport or ancestor — thresholds, root margins, entry data, lazy loading, infinite scroll, analytics impression tracking, disconnect vs unobserve, and the observation loop internals.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/performance-and-core-web-vitals/intersection-observer-internals.m4a"
+  title="IntersectionObserver Internals"
+/>
+
 ## Overview
 
 `IntersectionObserver` lets you detect when an element enters or exits a visible area — typically the viewport, but optionally any scrollable ancestor. It replaces fragile scroll-event-based visibility checks that forced synchronous layout reads on every scroll tick.
@@ -10,7 +15,6 @@ description: How the browser detects element visibility against a viewport or an
 Instead of asking "is this element visible right now?" on every scroll event, you declare what you want to observe, and the browser tells you asynchronously when that condition changes.
 
 ---
-
 ## How It Works
 
 The browser maintains an intersection loop tied to its rendering pipeline — not to JavaScript's event loop. This distinction matters: intersection callbacks run **after layout and paint**, during the browser's idle processing window, so they never force synchronous layout.
@@ -52,7 +56,6 @@ On each rendering frame:
 </Callout>
 
 ---
-
 ## Code Examples
 
 ### Lazy Image Loading
@@ -110,7 +113,6 @@ export function LazyImage({
 ```
 
 ---
-
 ### `unobserve()` vs `disconnect()` — The Correct Choice
 
 ```ts
@@ -136,7 +138,6 @@ observer.observe(cardA); // observer is live again
 Use `unobserve(el)` inside the callback when you only want to observe each element once (lazy loading, entrance animations). Use `disconnect()` in cleanup/unmount to prevent memory leaks.
 
 ---
-
 ### Observing Multiple Elements with One Observer
 
 ```tsx
@@ -189,7 +190,6 @@ export function AnimatedList({
 ```
 
 ---
-
 ### Analytics Impression Tracking
 
 For impression analytics, you need to know when a user actually _sees_ an ad or content unit — not just that it loaded. The standard definition is at least 50% of the element visible for at least 1 second:
@@ -261,7 +261,6 @@ export function AdUnit({ adId }: { adId: string }) {
 ```
 
 ---
-
 ### Infinite Scroll
 
 ```tsx
@@ -323,7 +322,6 @@ async function fetchNextPage(offset: number): Promise<string[]> {
 ```
 
 ---
-
 ### Scrollable Container Root (Non-Viewport)
 
 When your scrollable list is inside a container — not the window — set `root` explicitly:
@@ -372,13 +370,11 @@ export function VirtualizedPane() {
 ```
 
 ---
-
 ## Real-World Use Case
 
 A content-heavy dashboard with 40+ chart components — each fetching its own data. Without `IntersectionObserver`, all 40 charts fetch data on mount, hammering the API and inflating TTI. With a `rootMargin: "300px"` observer on each chart, data fetching is deferred until the chart is about to scroll into view. The user experiences no loading state because data arrives before the chart is visible. Used by Notion, Linear, and Vercel's dashboard for exactly this reason.
 
 ---
-
 ## Common Mistakes / Gotchas
 
 **1. Creating a new observer per element inside a loop.** One observer watches many elements. Creating `N` observers for `N` elements is wasteful and harder to clean up.
@@ -392,13 +388,11 @@ A content-heavy dashboard with 40+ chart components — each fetching its own da
 **5. SSR guard missing.** `IntersectionObserver` is not available in Node.js or Web Workers. Guard with `typeof IntersectionObserver !== 'undefined'` when code runs during SSR.
 
 ---
-
 ## Summary
 
 `IntersectionObserver` replaces scroll-event polling with an asynchronous, browser-native visibility detection system. Callbacks fire after layout and paint — never in the middle of a scroll tick — so they're layout-thrash-free by design. One observer instance can track many elements efficiently via `entry.target` in the callback. Use `unobserve(el)` to stop watching a single element while keeping the observer active; use `disconnect()` on unmount to prevent leaks. The `rootMargin` option enables pre-loading patterns, and `threshold` arrays enable progressive visibility tracking for impression analytics. Always set `overflow` on non-viewport root elements for `rootMargin` to behave correctly.
 
 ---
-
 ## Interview Questions
 
 **Q1. How does `IntersectionObserver` avoid layout thrashing compared to scroll-event-based visibility checks?**

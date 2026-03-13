@@ -3,6 +3,11 @@ title: Largest Contentful Paint
 description: A guide to understanding, measuring, and optimizing the Largest Contentful Paint (LCP) Core Web Vital in modern web applications.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/performance-and-core-web-vitals/largest-contentful-paint.m4a"
+  title="Largest Contentful Paint"
+/>
+
 ## Overview
 
 Largest Contentful Paint (LCP) measures how long it takes for the largest visible content element on the page to render within the viewport. It's one of Google's Core Web Vitals and directly correlates with how fast a page _feels_ to a user.
@@ -21,7 +26,6 @@ The "largest element" is typically a hero image, a large block of text, a video 
 </Callout>
 
 ---
-
 ## How It Works
 
 The browser's rendering pipeline emits `largest-contentful-paint` performance entries via the PerformanceObserver API as it paints increasingly large elements. Once the user scrolls, clicks, or presses a key, the browser stops recording new candidates and locks in the final LCP value.
@@ -36,7 +40,6 @@ LCP is affected by four main delay categories:
 Optimizing LCP means attacking each of these delays in sequence. A fast server means nothing if the LCP image is discovered late in a render-blocking stylesheet chain.
 
 ---
-
 ## Code Examples
 
 ### 1. Measuring LCP in the Browser
@@ -62,7 +65,6 @@ observer.observe({ type: "largest-contentful-paint", buffered: true });
 </Callout>
 
 ---
-
 ### 2. Optimizing the LCP Image in Next.js (App Router)
 
 The most common LCP element is a hero image. Use Next.js `<Image>` with `priority` to preload it immediately.
@@ -100,7 +102,6 @@ export default function HomePage() {
 </Callout>
 
 ---
-
 ### 3. Avoiding a Late-Discovered LCP Image
 
 When a background image is set via CSS, the browser can't discover it until the stylesheet is parsed and the element is rendered. This significantly delays LCP.
@@ -128,7 +129,6 @@ export default function HeroBanner() {
 ```
 
 ---
-
 ### 4. Improving TTFB with Next.js Streaming
 
 If your page is server-rendered and the LCP element depends on a slow data fetch, streaming lets the browser receive and start rendering the shell (including preload hints) before all data is ready.
@@ -176,7 +176,6 @@ export function HeroBanner() {
 ```
 
 ---
-
 ### 5. Adding a Fetch Priority Hint for Images Outside Next.js `<Image>`
 
 When you can't use Next.js `<Image>` (e.g., in a third-party embed or a plain `<img>` tag), use the `fetchpriority` attribute.
@@ -194,7 +193,6 @@ When you can't use Next.js `<Image>` (e.g., in a third-party embed or a plain `<
 ```
 
 ---
-
 ## Real-World Use Case
 
 **E-commerce product listing page:**
@@ -204,7 +202,6 @@ An online store's category page has a large promotional banner at the top. Witho
 After switching to an `<Image priority>` component, the image is preloaded in the `<head>` before any JavaScript or CSS executes. Combined with server-side rendering via the App Router, the page delivers HTML with the preload hint in the first TCP packet. LCP drops to 1.9s.
 
 ---
-
 ## Common Mistakes / Gotchas
 
 **1. Not marking the LCP image as `priority`**
@@ -255,7 +252,6 @@ onLCP((metric) => {
 ```
 
 ---
-
 ## Summary
 
 LCP measures how quickly the largest above-the-fold element becomes visible to users and is a key signal for perceived load performance. The four levers to pull are TTFB, resource discovery timing, resource download speed, and render delay. In Next.js App Router applications, the highest-impact fix is almost always adding `priority` to the hero `<Image>` component, combined with streaming to unblock the LCP element from slow data dependencies. Always validate with real-user data using the `PerformanceObserver` API or the `web-vitals` library — Lighthouse scores alone can be misleading.

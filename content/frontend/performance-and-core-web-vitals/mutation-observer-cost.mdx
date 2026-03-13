@@ -3,6 +3,11 @@ title: MutationObserver Cost
 description: How MutationObserver works as a microtask, its performance cost at different observation scopes, characterData and attribute tracking, attributeFilter for targeted observation, takeRecords() for synchronous flushing, MutationObserver vs ResizeObserver, and patterns for React integration.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/performance-and-core-web-vitals/mutation-observer-cost.m4a"
+  title="MutationObserver Cost"
+/>
+
 ## Overview
 
 `MutationObserver` lets you watch for changes to the DOM — added nodes, removed nodes, attribute changes, and text content updates. It's the modern replacement for the deprecated `MutationEvents` API and is widely used in frameworks, analytics tools, and custom component libraries.
@@ -10,7 +15,6 @@ description: How MutationObserver works as a microtask, its performance cost at 
 The problem is that it's easy to misuse. Observing too broadly, reacting too eagerly, or forgetting to disconnect observers quietly drains rendering performance in large, dynamic UIs.
 
 ---
-
 ## How It Works
 
 When you create a `MutationObserver`, you provide a callback and configuration describing what to watch. The browser queues `MutationRecord` objects during DOM operations and flushes them to your callback **as a microtask** — after the current task completes but before the next macrotask (like `setTimeout`).
@@ -48,7 +52,6 @@ The cost scales with how broadly you observe:
 3. **Observer leaks** — failing to call `.disconnect()` keeps the observer alive indefinitely.
 
 ---
-
 ## Code Examples
 
 ### Basic Observer — Scoped and Intentional
@@ -82,7 +85,6 @@ function cleanup() {
 ```
 
 ---
-
 ### Tracking Attribute Changes with `attributeFilter`
 
 Without `attributeFilter`, any attribute change on any observed node fires the callback. Filter to only the attributes you care about:
@@ -115,7 +117,6 @@ button?.observe &&
 ```
 
 ---
-
 ### Tracking Text Content Changes with `characterData`
 
 ```ts
@@ -151,7 +152,6 @@ editableDiv?.childNodes.forEach((node) => {
 </Callout>
 
 ---
-
 ### `takeRecords()` — Synchronous Flush
 
 `takeRecords()` synchronously extracts any queued records from the observer's internal buffer and returns them — clearing the queue. The callback will not fire for those records.
@@ -188,7 +188,6 @@ function processRecords(records: MutationRecord[]) {
 ```
 
 ---
-
 ### Expensive vs Efficient Pattern
 
 ```ts
@@ -228,7 +227,6 @@ notifList &&
 ```
 
 ---
-
 ### React Integration
 
 ```tsx
@@ -275,7 +273,6 @@ export function CommentFeed() {
 </Callout>
 
 ---
-
 ### MutationObserver vs ResizeObserver
 
 A common mistake is using `MutationObserver` to detect when an element's size changes. Use `ResizeObserver` instead:
@@ -317,7 +314,6 @@ ro.disconnect();
 | Scroll position           | `IntersectionObserver` with `rootMargin` |
 
 ---
-
 ## Real-World Use Case
 
 In a **live chat application**, new messages arrive via WebSocket and are injected into the DOM by a third-party widget you don't control. You need to detect new messages to update a notification badge — without polling and without modifying the widget's source.
@@ -346,7 +342,6 @@ chatContainer &&
 ```
 
 ---
-
 ## Common Mistakes / Gotchas
 
 **1. Forgetting to disconnect.** Observers run for the page's lifetime. In SPAs with route transitions, disconnected-but-alive observers accumulate across page navigations. Always disconnect in `useEffect` return or equivalent teardown.
@@ -360,13 +355,11 @@ chatContainer &&
 **5. Using `MutationObserver` to detect element size changes.** It doesn't observe layout dimensions. Use `ResizeObserver` for that.
 
 ---
-
 ## Summary
 
 `MutationObserver` fires asynchronously as a microtask after DOM mutations — never synchronously. Performance cost scales with observation scope: `subtree: true` on a top-level element is dramatically more expensive than a scoped shallow observer. Always disconnect in cleanup functions. Use `attributeFilter` to restrict attribute observation to only the attributes you need; use `characterData` with `characterDataOldValue` for text-tracking use cases. Call `takeRecords()` to synchronously flush pending records before operations that depend on current mutation state. Use `ResizeObserver` for size changes and `IntersectionObserver` for visibility — `MutationObserver` is for DOM structural and attribute mutations only. In React, prefer state-driven approaches over observing your own component's DOM.
 
 ---
-
 ## Interview Questions
 
 **Q1. How does `MutationObserver` deliver its callbacks relative to the JavaScript task queue?**
