@@ -3,6 +3,16 @@ title: Content Security Policy
 description: Browser-enforced allowlists that restrict which scripts, styles, and resources can load — per-request nonces, hash-based CSP, strict-dynamic, frame-ancestors, base-uri, SRI for CDN scripts, Trusted Types integration, and a CSP migration workflow.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/security/content-security-policy.m4a"
+  title="Content Security Policy"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/security/content-security-policy.png"
+  alt="Content Security Policy overview"
+/>
+
 ## Overview
 
 Content Security Policy (CSP) is an HTTP response header that tells the browser which resources it is allowed to load and execute on a given page. It's the most effective defence against XSS after it has bypassed input validation and output encoding — because even if a malicious script tag is injected into your HTML, the browser won't execute it if it doesn't come from an approved source.

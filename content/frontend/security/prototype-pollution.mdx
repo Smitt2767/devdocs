@@ -3,6 +3,16 @@ title: Prototype Pollution
 description: How prototype pollution injects properties onto Object.prototype through deep-merge, query string parsers, and JSON.parse — guarded merge with a denylist, structuredClone as a safe copy, JSON.parse reviver for key filtering, qs parser fix, Object.hasOwn vs hasOwnProperty, and real CVEs.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/security/prototype-pollution.m4a"
+  title="Prototype Pollution"
+/>
+
+<Img
+  src="https://frontcore.t3.storage.dev/Images/frontend/security/prototype-pollution.png"
+  alt="Prototype Pollution overview"
+/>
+
 ## Overview
 
 Prototype pollution is a JavaScript vulnerability where an attacker injects properties onto `Object.prototype` — the base object that nearly every JavaScript object inherits from. Once a property is on `Object.prototype`, it appears on every plain object in the process, including objects used for access control, configuration, and routing logic.
