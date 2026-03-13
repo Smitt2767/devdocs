@@ -3,6 +3,12 @@ title: Garbage Collection Timing
 description: How V8's generational garbage collector works — young-generation scavenging, old-generation mark-sweep-compact, incremental marking, concurrent GC, Oilpan for DOM nodes, FinalizationRegistry for post-GC hooks, and how GC pauses manifest as jank in performance profiles.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/memory-and-garbage-collection/garbage-collection-timing.m4a"
+  title="Garbage Collection Timing"
+/>
+
+
 ## Overview
 
 JavaScript is a garbage-collected language — you don't manually free memory. The engine automatically reclaims memory that is no longer reachable. But "automatic" doesn't mean "invisible" — GC pauses can cause jank, slow response times, and unpredictable latency spikes in both browser and Node.js applications.

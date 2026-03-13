@@ -3,6 +3,12 @@ title: Detached DOM Nodes
 description: What detached DOM nodes are, how they accumulate in SPAs, the six patterns that create them — module-level variables, event listener closures, uncleaned React effects, observer callbacks, Map-keyed caches, and subtree retention — and how to find and fix each one.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/memory-and-garbage-collection/detached-dom-nodes.m4a"
+  title="Detached DOM Nodes"
+/>
+
+
 ## Overview
 
 A detached DOM node is a node that has been removed from the document tree but is still referenced in JavaScript memory. Because something holds a reference to it, the garbage collector cannot free it — causing a memory leak.

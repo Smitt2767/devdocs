@@ -3,6 +3,12 @@ title: Memory Profiling
 description: A practical walkthrough of Chrome DevTools memory tooling — Heap Snapshot (Summary vs Comparison vs Containment vs Dominators), Allocation Timeline, Allocation Sampling, the Retainer tree, shallow vs retained size, performance.measureUserAgentSpecificMemory(), and a step-by-step debugging workflow.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/memory-and-garbage-collection/memory-profiling-chrome-devtools.m4a"
+  title="Memory Profiling"
+/>
+
+
 ## Overview
 
 Memory profiling is the process of measuring how your application allocates and retains memory over time. JavaScript's GC handles most memory management automatically — but it can only free memory that is no longer referenced. When objects are unintentionally kept alive, your app grows in memory usage, causing slowdowns or crashes.
