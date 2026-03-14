@@ -7,6 +7,10 @@ import { SpeedInsights } from "@vercel/speed-insights/next";
 import { colors } from "@/lib/colors";
 import { cn } from "@/lib/cn";
 import { env } from "@/env";
+import { source } from "@/lib/source";
+import type { PodcastTrack } from "@/lib/podcast-types";
+import { GlobalPodcastProvider } from "@/components/podcasts/GlobalPodcastProvider";
+import { getFrontendSections } from "@/lib/getFrontendSections";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -36,7 +40,29 @@ export const viewport: Viewport = {
   themeColor: colors.brand,
 };
 
-export default function Layout({ children }: LayoutProps<"/">) {
+export default async function Layout({ children }: LayoutProps<"/">) {
+  const sections = await getFrontendSections();
+  const sectionLabels = Object.fromEntries(sections.map((s) => [s.slug, s.label]));
+
+  const podcastTracks: PodcastTrack[] = source
+    .getPages()
+    .filter((p) => !!p.data.audio)
+    .map((p) => {
+      const category = p.slugs[1] ?? "general";
+      const rawTitle = p.data.title;
+      const title =
+        rawTitle === "Overview" && sectionLabels[category]
+          ? `${sectionLabels[category]} — Overview`
+          : rawTitle;
+      return {
+        id: p.url,
+        src: p.data.audio!,
+        title,
+        description: p.data.description ?? "",
+        url: p.url,
+        category,
+      };
+    });
   return (
     <html
       lang="en"
@@ -54,7 +80,9 @@ export default function Layout({ children }: LayoutProps<"/">) {
               <SpeedInsights />
             </>
           )}
-          {children}
+          <GlobalPodcastProvider tracks={podcastTracks}>
+            {children}
+          </GlobalPodcastProvider>
         </RootProvider>
       </body>
     </html>
