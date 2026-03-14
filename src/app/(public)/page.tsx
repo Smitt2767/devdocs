@@ -54,18 +54,22 @@ export default async function HomePage() {
           personal reference built to understand browser internals, rendering
           pipelines, and system-level thinking — not just copy patterns.
         </p>
-        <Link
-          href="/podcasts"
-          className="mt-5 inline-flex items-center gap-2 border border-border rounded px-3.5 py-1.5 text-[10px] text-subtle tracking-[0.15em] uppercase hover:text-foreground hover:border-foreground/30 transition-all duration-200 group cursor-pointer"
-        >
-          Listen to all episodes
-          <span
-            aria-hidden="true"
-            className="group-hover:translate-x-0.5 transition-transform"
+        <div className="mt-5 inline-flex rounded p-px bg-linear-to-r from-[#7c6dff] to-[#b8afff]">
+          <Link
+            href="/podcasts"
+            className="inline-flex items-center gap-2 rounded bg-[#121212] px-3.5 py-1.5 text-xs tracking-[0.15em] uppercase transition-all duration-200 group cursor-pointer"
           >
-            →
-          </span>
-        </Link>
+            <span className="bg-[linear-gradient(to_right,#7c6dff,#b8afff)] bg-clip-text text-transparent">
+              Listen to all episodes
+            </span>
+            <span
+              aria-hidden="true"
+              className="bg-[linear-gradient(to_right,#7c6dff,#b8afff)] bg-clip-text text-transparent transition-transform duration-200 group-hover:translate-x-1"
+            >
+              →
+            </span>
+          </Link>
+        </div>
       </section>
 
       <div className="border-t border-border mb-12" />
