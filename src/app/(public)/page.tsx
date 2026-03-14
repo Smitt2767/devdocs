@@ -62,12 +62,6 @@ export default async function HomePage() {
             <span className="bg-[linear-gradient(to_right,#7c6dff,#b8afff)] bg-clip-text text-transparent">
               Listen to all episodes
             </span>
-            <span
-              aria-hidden="true"
-              className="bg-[linear-gradient(to_right,#7c6dff,#b8afff)] bg-clip-text text-transparent transition-transform duration-200 group-hover:translate-x-1"
-            >
-              →
-            </span>
           </Link>
         </div>
       </section>
