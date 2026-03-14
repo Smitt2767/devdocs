@@ -12,6 +12,11 @@ import { SkipBack, SkipForward, Heart, X } from "lucide-react";
 import Link from "next/link";
 import type { PodcastTrack } from "@/lib/podcast-types";
 import { useGlobalPodcast } from "./GlobalPodcastProvider";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 export function StickyPlayer() {
   const player = useAudioPlayer<PodcastTrack>();
@@ -78,16 +83,25 @@ export function StickyPlayer() {
 
         {/* Row 2: Playback controls + progress */}
         <div className="flex items-center gap-2">
-          <button
-            disabled={!prev || isLoading}
-            onClick={() =>
-              prev && player.play({ id: prev.id, src: prev.src, data: prev })
-            }
-            aria-label="Previous track"
-            className="shrink-0 text-subtle hover:text-foreground transition-colors disabled:opacity-30 cursor-pointer"
-          >
-            <SkipBack className="size-4" />
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                disabled={!prev || isLoading}
+                onClick={() =>
+                  prev && player.play({ id: prev.id, src: prev.src, data: prev })
+                }
+                aria-label="Previous track"
+                className="shrink-0 text-subtle hover:text-foreground transition-colors disabled:opacity-30 cursor-pointer"
+              >
+                <SkipBack className="size-4" />
+              </button>
+            </TooltipTrigger>
+            {prev && (
+              <TooltipContent side="top">
+                {prev.title}
+              </TooltipContent>
+            )}
+          </Tooltip>
           <button
             disabled={isLoading}
             onClick={() => skip(-15)}
@@ -109,16 +123,25 @@ export function StickyPlayer() {
           >
             +15
           </button>
-          <button
-            disabled={!next || isLoading}
-            onClick={() =>
-              next && player.play({ id: next.id, src: next.src, data: next })
-            }
-            aria-label="Next track"
-            className="shrink-0 text-subtle hover:text-foreground transition-colors disabled:opacity-30 cursor-pointer"
-          >
-            <SkipForward className="size-4" />
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                disabled={!next || isLoading}
+                onClick={() =>
+                  next && player.play({ id: next.id, src: next.src, data: next })
+                }
+                aria-label="Next track"
+                className="shrink-0 text-subtle hover:text-foreground transition-colors disabled:opacity-30 cursor-pointer"
+              >
+                <SkipForward className="size-4" />
+              </button>
+            </TooltipTrigger>
+            {next && (
+              <TooltipContent side="top">
+                {next.title}
+              </TooltipContent>
+            )}
+          </Tooltip>
           <AudioPlayerProgress className="flex-1 cursor-pointer" />
         </div>
       </div>

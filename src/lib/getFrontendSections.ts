@@ -5,6 +5,7 @@ export type Section = {
   slug: string;
   label: string;
   count: number;
+  pageOrder: string[]; // slugs in meta.json order, "index" = section overview
 };
 
 type MetaJson = {
@@ -51,6 +52,7 @@ export async function getFrontendSections(): Promise<Section[]> {
       slug: folderName,
       label: folderMeta.title,
       count,
+      pageOrder: folderMeta.pages,
     });
   }
 
