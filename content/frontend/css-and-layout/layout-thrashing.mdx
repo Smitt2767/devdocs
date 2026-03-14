@@ -1,17 +1,10 @@
 ---
 title: Layout Thrashing
 description: Why alternating DOM reads and writes forces synchronous reflows, how to identify thrashing with DevTools, and how to eliminate it with read-write batching, requestAnimationFrame, and ResizeObserver.
+audio: "https://frontcore.t3.storage.dev/audios/frontend/css-and-layout/layout-thrashing.m4a"
+image: "https://frontcore.t3.storage.dev/Images/frontend/css-and-layout/layout-thrashing.png"
 ---
 
-<Audio
-  src="https://frontcore.t3.storage.dev/audios/frontend/css-and-layout/layout-thrashing.m4a"
-  title="Layout Thrashing"
-/>
-
-<Img
-  src="https://frontcore.t3.storage.dev/Images/frontend/css-and-layout/layout-thrashing.png"
-  alt="Layout Thrashing overview"
-/>
 ## Overview
 
 Layout thrashing is what happens when JavaScript repeatedly forces the browser to recalculate layout within a single frame. Every time you read a geometric property after writing to the DOM, the browser must synchronously flush all pending style changes and recompute layout to give you an accurate value. Do this in a loop and you've created a pattern where the browser spends the entire frame recalculating layout — with nothing left for painting or responding to user input.
