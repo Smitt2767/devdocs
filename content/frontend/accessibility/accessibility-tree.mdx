@@ -3,6 +3,12 @@ title: Accessibility Tree
 description: How the browser builds a parallel accessibility tree from the DOM — element mapping, pruning rules, accessible name computation order, role and state propagation, live region registration, and how to inspect and fix the tree in DevTools.
 ---
 
+<Audio
+  src="https://frontcore.t3.storage.dev/audios/frontend/accessibility/accessibility-tree.m4a"
+  title="Accessibility Tree"
+/>
+
+
 ## Overview
 
 Every time a browser parses HTML it builds two parallel structures: the DOM tree you already know, and a second structure called the **accessibility tree**. Screen readers, voice-control software, and other assistive technologies (AT) never read the DOM directly — they query this second tree through a platform-level API (MSAA/UIA on Windows, AX API on macOS, ATK/AT-SPI on Linux).
