@@ -1,7 +1,5 @@
 import defaultMdxComponents from "fumadocs-ui/mdx";
 import type { MDXComponents } from "mdx/types";
-import { Img } from "@/components/mdx/Img";
-import { Audio } from "@/components/mdx/Audio";
 
 export function getMDXComponents(components?: MDXComponents): MDXComponents {
   return {
@@ -32,9 +30,6 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
         {children}
       </td>
     ),
-
-    Img,
-    Audio,
 
     ...components,
   };

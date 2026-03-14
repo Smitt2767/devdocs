@@ -1,6 +1,7 @@
 ---
 title: Long Tasks API
 description: Detecting tasks that block the main thread for more than 50ms — PerformanceObserver with buffered, attribution with TaskAttributionTiming, User Timing correlation, scheduler.postTask() for breaking up work, navigator.scheduling.isInputPending(), and the Long Animation Frames (LoAF) successor API.
+audio: "https://frontcore.t3.storage.dev/audios/frontend/performance-and-core-web-vitals/long-tasks-api.m4a"
 ---
 
 ## Overview
@@ -10,7 +11,6 @@ The Long Tasks API exposes JavaScript tasks that block the main thread for longe
 Any task over 50ms is "long" because the human eye perceives delays above that threshold as lag. The Long Tasks API surfaces these tasks so you can measure, attribute, and eliminate them.
 
 ---
-
 ## How It Works
 
 The browser's main thread handles JavaScript execution, style calculation, layout, painting, and user input. When a single task monopolizes it for more than 50ms, incoming input events queue up and the page feels unresponsive.
@@ -31,7 +31,6 @@ The observer fires asynchronously _after_ the long task completes — it never i
 </Callout>
 
 ---
-
 ## Long Animation Frames (LoAF) — The Successor API
 
 The Long Tasks API has a successor: **Long Animation Frames (LoAF)**, entry type `"long-animation-frame"`. Available in Chrome 123+ and shipping in other browsers.
@@ -66,7 +65,6 @@ if (PerformanceObserver.supportedEntryTypes.includes("long-animation-frame")) {
 Use LoAF when available. Fall back to Long Tasks for wider browser support.
 
 ---
-
 ## Code Examples
 
 ### Basic Long Tasks Observer
@@ -126,7 +124,6 @@ export function LongTaskReporter() {
 ```
 
 ---
-
 ### Correlating Long Tasks with Your Own Code Using `performance.mark()`
 
 `attribution` often points to "window" with no useful URL. Bracket your own functions with marks to correlate long tasks with specific operations:
@@ -184,7 +181,6 @@ measureObserver.observe({ type: "measure", buffered: true });
 ```
 
 ---
-
 ### Breaking Up Long Tasks with `scheduler.postTask()`
 
 The Scheduler API (Chrome 94+, Firefox 116+) lets you break work into chunks with explicit priority and yield between them:
@@ -235,7 +231,6 @@ if ("scheduler" in globalThis && "postTask" in (globalThis as any).scheduler) {
 ```
 
 ---
-
 ### `navigator.scheduling.isInputPending()` — Cooperative Yielding
 
 `isInputPending()` lets you check if there are pending input events before yielding — avoiding unnecessary yields when the user isn't interacting:
@@ -265,7 +260,6 @@ async function processLargeDataset(items: string[]) {
 ```
 
 ---
-
 ### Deferred Non-Critical Work with `requestIdleCallback`
 
 Don't run analytics or prefetch logic synchronously in click handlers:
@@ -290,7 +284,6 @@ document.getElementById("add-to-cart")?.addEventListener("click", () => {
 ```
 
 ---
-
 ### In a Next.js Route Handler Filter
 
 ```tsx
@@ -327,7 +320,6 @@ export function ProductFilter({ products }: { products: Product[] }) {
 ```
 
 ---
-
 ## Real-World Use Case
 
 **E-commerce product listing with client-side filtering.** 500+ products. Every filter change runs a synchronous sort-and-filter that takes 180ms on mid-range Android — a long task on every keystroke, INP of 650ms (poor).
@@ -337,7 +329,6 @@ Diagnosis with Long Tasks API: observer fires after every keystroke with `durati
 Fix: wrap in `startTransition` (React marks filter update as interruptible), split into `processInBatches` with `yieldToMain()` between batches, move the sort algorithm to a Web Worker for the heaviest cases. INP drops to 80ms (good). Long Tasks API confirmed the fix: no tasks over 50ms during filter interaction.
 
 ---
-
 ## Common Mistakes / Gotchas
 
 **1. Forgetting `buffered: true`.** Long tasks that fire during initial load (parsing, hydration) are missed if you register the observer after React mounts. Always pass `{ type: "longtask", buffered: true }`.
@@ -351,13 +342,11 @@ Fix: wrap in `startTransition` (React marks filter update as interruptible), spl
 **5. Not considering LoAF (Long Animation Frames) in newer browsers.** The `"long-animation-frame"` entry type provides richer attribution including the specific script, source position, and invocation type. Feature-detect and use LoAF when available: `PerformanceObserver.supportedEntryTypes.includes("long-animation-frame")`.
 
 ---
-
 ## Summary
 
 The Long Tasks API detects main-thread tasks over 50ms via `PerformanceObserver({ type: "longtask", buffered: true })`. Each entry provides duration, start time, and partial attribution. Pair with `performance.mark()` to identify your own code as the source. Break long tasks into chunks using `yieldToMain()`, `scheduler.postTask()`, React's `startTransition`, or `requestIdleCallback` for non-critical work. Use `navigator.scheduling.isInputPending()` to yield cooperatively only when the user is actively interacting. In Chrome 123+, prefer the `"long-animation-frame"` (LoAF) entry type for richer script attribution. Keep observer callbacks lightweight — defer analytics processing to idle time. Long Tasks data is the INP debugging signal; the DevTools profiler is the root-cause tool.
 
 ---
-
 ## Interview Questions
 
 **Q1. What is a long task, why does it cause poor INP, and at what threshold does the Long Tasks API report one?**

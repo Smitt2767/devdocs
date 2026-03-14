@@ -1,6 +1,7 @@
 ---
 title: RUM vs Synthetic Monitoring
 description: A practical guide to understanding the differences between Real User Monitoring and Synthetic Monitoring, when to use each, and how to implement both in modern web applications.
+audio: "https://frontcore.t3.storage.dev/audios/frontend/performance-and-core-web-vitals/rum-vs-synthetic-monitoring.m4a"
 ---
 
 ## Overview
@@ -13,7 +14,6 @@ When measuring web performance, you have two fundamentally different approaches:
 Think of it this way: RUM is like reading customer reviews after a restaurant opens. Synthetic monitoring is like sending a food critic on a scheduled visit every hour.
 
 ---
-
 ## How It Works
 
 ### Real User Monitoring (RUM)
@@ -48,7 +48,6 @@ Synthetic monitoring is ideal for:
 - Monitoring third-party scripts and APIs
 
 ---
-
 ## Code Examples
 
 ### RUM: Capturing Core Web Vitals with `web-vitals`
@@ -157,7 +156,6 @@ export async function POST(request: NextRequest) {
 ```
 
 ---
-
 ### Synthetic Monitoring: Playwright Performance Script
 
 Install Playwright:
@@ -219,7 +217,6 @@ npx playwright test tests/synthetic/
 </Callout>
 
 ---
-
 ## Real-World Use Case
 
 **Scenario: E-commerce checkout flow**
@@ -233,7 +230,6 @@ They use RUM segmentation to confirm the issue is device + geography specific, t
 **The lesson**: RUM surfaces _that_ a problem exists and _who_ it affects. Synthetic monitoring lets you reproduce and validate the fix.
 
 ---
-
 ## Common Mistakes / Gotchas
 
 **1. Treating synthetic scores as ground truth for user experience**
@@ -264,7 +260,6 @@ Averages hide slow outliers. A mean LCP of 1.5s sounds great until you see that 
 Lighthouse in CI tells you about a single, synthetic, controlled page load. It gives you zero information about your actual users' devices, network conditions, geographic distribution, or session behavior. RUM and synthetic monitoring are complements, not substitutes.
 
 ---
-
 ## Summary
 
 RUM and synthetic monitoring solve different problems and work best when used together. RUM captures what real users are experiencing across the full distribution of devices, networks, and geographies — it's essential for understanding actual user impact. Synthetic monitoring provides reproducible, controlled tests that catch regressions early in CI and enable reliable alerting on uptime and performance budgets. Use the `web-vitals` library to implement RUM in Next.js App Router with a simple client component and a Route Handler endpoint. Use Playwright (or a managed service like Checkly) for synthetic tests that cover your critical user journeys — not just the homepage. Always analyze RUM data at the 75th percentile or higher, and filter out bot traffic to keep your data clean.

@@ -1,6 +1,7 @@
 ---
 title: Third-Party Script Management
 description: How analytics, chat widgets, and A/B testing scripts degrade INP and LCP — and how to load, audit, and contain their impact using next/script and facade patterns.
+audio: "https://frontcore.t3.storage.dev/audios/frontend/performance-and-core-web-vitals/third-party-script-management.m4a"
 ---
 
 ## Overview
@@ -12,7 +13,6 @@ The problem isn't that third-party scripts are inherently bad. It's that they ex
 This article covers how to audit what you're loading, how to load it correctly with `next/script`, how to contain the damage with facade patterns, and how to detect regressions before users do.
 
 ---
-
 ## How It Works
 
 ### Why third-party scripts hurt performance
@@ -40,7 +40,6 @@ Next.js provides three loading strategies that control when a third-party script
 The default for a raw `<Script>` tag without a strategy is `afterInteractive`. `lazyOnload` is almost always the right choice for anything that isn't needed for the first interaction.
 
 ---
-
 ## Code Examples
 
 ### 1. Loading third-party scripts with `next/script`
@@ -92,7 +91,6 @@ export default function RootLayout({ children }: { children: ReactNode }) {
 ```
 
 ---
-
 ### 2. Auditing third-party impact with `PerformanceObserver`
 
 Before you can fix a problem, you need to know which scripts are causing it. This observer logs long tasks and their attribution — which script or frame is responsible.
@@ -152,7 +150,6 @@ export function DevAudit() {
 ```
 
 ---
-
 ### 3. Measuring third-party script weight with `next/bundle-analyzer` and `Resource Timing`
 
 Track which third-party domains are loading resources and how large they are:
@@ -188,7 +185,6 @@ export function logThirdPartyResources() {
 ```
 
 ---
-
 ### 4. Facade pattern — defer heavy widgets until user interaction
 
 A facade is a lightweight placeholder that looks like the real widget but loads the actual third-party script only when the user interacts with it. This is the single highest-impact optimization for chat widgets, video embeds, and map components.
@@ -319,7 +315,6 @@ export function YouTubeFacade({ videoId, title }: YouTubeFacadeProps) {
 ```
 
 ---
-
 ### 5. Monitoring third-party regressions in CI
 
 Add third-party resource weight to your Lighthouse CI budget so vendor updates that bloat their scripts fail your build:
@@ -355,7 +350,6 @@ export default {
 ```
 
 ---
-
 ## Real-World Use Case
 
 An e-commerce checkout page has: Google Analytics, a Hotjar session recorder, a Zendesk chat widget, a TrustPilot reviews widget, and a Klaviyo email capture popup. Each was added over 18 months by different teams. Collectively they add 1.2MB of JavaScript and push INP on mid-range Android devices to 650ms — well into the "poor" range.
@@ -371,7 +365,6 @@ The remediation:
 Result: INP drops from 650ms to 180ms. The Zendesk script is now loaded by fewer than 8% of users — the ones who actually click the chat button.
 
 ---
-
 ## Common Mistakes / Gotchas
 
 **1. Using `beforeInteractive` for analytics**
@@ -403,7 +396,6 @@ The default strategy is `afterInteractive`, which is reasonable — but being ex
 Lab tools (Lighthouse) run without third-party cookies and in controlled conditions — some scripts don't fully initialize in a headless Chrome environment. Field data from real users (via `useReportWebVitals`) is the only reliable signal for third-party impact. A script that looks fine in Lighthouse can crush INP for users in a specific geography where the CDN is slow.
 
 ---
-
 ## Summary
 
 Third-party scripts compete for the same main thread as your application — every millisecond they spend parsing, compiling, and executing is a millisecond the browser cannot respond to user input. Load scripts with `next/script` using the minimum strategy needed: `beforeInteractive` only for scripts that must precede hydration, `afterInteractive` for tag managers and analytics, `lazyOnload` for chat widgets and low-priority tools. Use the facade pattern to eliminate the cost of heavy widgets entirely until the user explicitly requests them. Audit script weight with Resource Timing and long task attribution in staging, enforce limits in Lighthouse CI to catch vendor-side regressions, and monitor field INP via `useReportWebVitals` to catch what lab tools miss.

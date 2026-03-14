@@ -1,6 +1,7 @@
 ---
 title: Interaction to Next Paint
 description: A guide to understanding, measuring, and optimizing Interaction to Next Paint (INP), the Core Web Vital that measures runtime responsiveness.
+audio: "https://frontcore.t3.storage.dev/audios/frontend/performance-and-core-web-vitals/interaction-to-next-paint.m4a"
 ---
 
 ## Overview
@@ -18,7 +19,6 @@ Where FID only measured the delay before the browser _started_ processing an int
 INP matters because a page that loads fast but feels sluggish when clicked will still rank poorly in Google Search and frustrate users.
 
 ---
-
 ## How It Works
 
 Every time a user interacts with the page, the browser goes through three phases:
@@ -42,7 +42,6 @@ User clicks button
 The main thread is the bottleneck. Long tasks (>50ms) block event handlers from starting, which inflates input delay.
 
 ---
-
 ## Code Examples
 
 ### Diagnosing INP with PerformanceObserver
@@ -190,7 +189,6 @@ export default function ProductPage({ params }: { params: { id: string } }) {
 ```
 
 ---
-
 ## Real-World Use Case
 
 **E-commerce product filter page**
@@ -206,7 +204,6 @@ A user lands on a category page and immediately clicks a price filter. The page 
 Result: INP drops to ~90ms.
 
 ---
-
 ## Common Mistakes / Gotchas
 
 **1. Confusing INP with FID or LCP**
@@ -244,7 +241,6 @@ Chrome DevTools' Performance panel shows interaction timing in lab conditions, b
 If a user clicks before the page has fully hydrated (`loadState: "loading"`), input delay can be enormous. Use `attribution.loadState` from `web-vitals` to identify this and prioritize hydrating interactive elements earlier.
 
 ---
-
 ## Summary
 
 INP measures the full visual response time of user interactions — input delay, processing time, and presentation delay combined. It replaced FID as a Core Web Vital in 2024 and uses the worst interaction across the page's lifetime as its score. The main causes of poor INP are long tasks blocking the main thread, heavy hydration in JavaScript-heavy frameworks, and expensive style/layout operations triggered by event handlers. Fix strategies include breaking up long tasks with `scheduler.yield()`, deferring non-critical work with `requestIdleCallback`, using Web Workers for CPU-heavy logic, and minimizing client-side JavaScript through Server Components. Always validate INP improvements with real-user monitoring, not just lab tooling.

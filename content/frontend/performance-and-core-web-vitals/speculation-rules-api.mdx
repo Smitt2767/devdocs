@@ -1,6 +1,7 @@
 ---
 title: Speculation Rules API
 description: A declarative JSON-based API that enables browsers to prefetch or fully prerender future navigations ahead of time, replacing legacy link-rel-prefetch with fine-grained eagerness controls and CSS-selector-based document rules for near-instant page transitions.
+audio: "https://frontcore.t3.storage.dev/audios/frontend/performance-and-core-web-vitals/speculation-rules-api.m4a"
 ---
 
 ## Overview
@@ -12,7 +13,6 @@ This API replaces the older `<link rel="prefetch">` and `<link rel="prerender">`
 The performance impact is significant. A prerendered page activates with near-zero navigation latency -- the user sees the target page essentially instantly, because all the work (DNS, TLS, HTTP fetch, HTML parse, JS execution, layout, paint) already happened in the background. For prefetch-only speculations, the savings are smaller but still meaningful: the browser skips the network round-trip for the document, reducing Time to First Byte on navigation.
 
 ---
-
 ## How It Works
 
 ### Prefetch vs Prerender
@@ -128,7 +128,6 @@ The header value is a URL pointing to a JSON file with the same format as the in
 This is, by design, a progressive enhancement. Browsers that do not recognize `<script type="speculationrules">` ignore the tag entirely -- no errors, no fallback needed. Your pages work normally without speculation; users on Chrome get the performance benefit. There is no polyfill and no need for one.
 
 ---
-
 ## Code Examples
 
 ### 1. Basic List-Based Prefetch and Prerender
@@ -301,7 +300,6 @@ if (document.prerendering) {
 ```
 
 ---
-
 ## Real-World Use Case
 
 **E-commerce product listing to product detail page.** A product listing page displays 20-40 product cards. Each card links to a product detail page that is relatively heavy: hero image, reviews, recommendations, and structured data. Without speculation, clicking a product takes 800ms-1.5s to load on a typical connection.
@@ -311,7 +309,6 @@ With document rules set to `moderate` eagerness targeting `a[href^="/products/"]
 **Blog index to article page.** A blog index lists 10-15 article summaries. Article pages are content-heavy but structurally simple (mostly text and images). Using `prefetch` with `moderate` eagerness for all article links keeps the cost low (just the HTML document, not subresources), and the Time to First Byte on navigation drops to near zero. For the top 2-3 featured articles, `prerender` with `immediate` eagerness provides instant transitions for the most likely navigation targets.
 
 ---
-
 ## Common Mistakes / Gotchas
 
 **1. Over-eager prerendering wastes resources and degrades the current page.** Setting `eagerness: "immediate"` on 20+ prerender rules forces the browser to create multiple hidden pages simultaneously, consuming hundreds of megabytes of memory and competing for main-thread time. The browser caps concurrent prerenders, but even hitting the cap means you are burning resources on speculations that may never activate. Use `moderate` or `conservative` for document rules and reserve `immediate` for one or two high-confidence targets.
@@ -327,13 +324,11 @@ With document rules set to `moderate` eagerness targeting `a[href^="/products/"]
 **6. Not segmenting performance metrics for prerendered navigations.** A prerendered page will report extremely fast LCP and load times because the work happened before activation. If you do not segment these metrics separately (using `activationStart > 0`), your aggregate performance data will be skewed optimistically, masking real performance issues for users on browsers that do not support speculation rules.
 
 ---
-
 ## Summary
 
 The Speculation Rules API replaces the legacy `<link rel="prefetch">` and `<link rel="prerender">` hints with a declarative JSON format embedded in `<script type="speculationrules">` or delivered via the `Speculation-Rules` HTTP header. It supports two actions -- prefetch (fetch the document response only) and prerender (create a full hidden page with JS execution, DOM construction, and paint) -- with four eagerness levels controlling when speculation triggers: `immediate` on parse, `eager` (same as immediate for now), `moderate` on 200ms hover or pointerdown, and `conservative` on pointerdown/touchstart only. Document rules with `where` clauses and `href_matches` patterns enable automatic speculation for links matching CSS selectors without hardcoding URLs. The API is Chromium-only (Chrome 109+ for prefetch, 121+ for prerender) and functions as a progressive enhancement that browsers without support silently ignore. Prerendered pages must handle the `document.prerendering` state to avoid double-counting analytics, triggering permission prompts, or skewing performance metrics -- use `activationStart` from `PerformanceNavigationTiming` to correctly measure perceived load times.
 
 ---
-
 ## Interview Questions
 
 **Q1. What is the difference between prefetch and prerender in the Speculation Rules API, and when would you choose one over the other?**

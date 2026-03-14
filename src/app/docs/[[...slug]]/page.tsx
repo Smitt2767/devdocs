@@ -11,6 +11,8 @@ import type { Metadata } from "next";
 import { LLMCopyButton } from "@/components/ai/page-actions";
 import { findNeighbour } from "fumadocs-core/page-tree";
 import { DocsNavigationProvider } from "@/components/contexts/docs-navigation";
+import { Audio } from "@/components/mdx/Audio";
+import { Img } from "@/components/mdx/Img";
 
 export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
   const params = await props.params;
@@ -42,6 +44,12 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
         }
       >
         <DocsBody>
+          {page.data.audio && (
+            <Audio src={page.data.audio} title={page.data.title} />
+          )}
+          {page.data.image && (
+            <Img src={page.data.image} alt={page.data.title} />
+          )}
           <MDX components={getMDXComponents()} />
         </DocsBody>
       </DocsNavigationProvider>

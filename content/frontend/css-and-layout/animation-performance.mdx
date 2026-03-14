@@ -1,17 +1,10 @@
 ---
 title: Animation Performance
 description: How the browser's compositor thread enables jank-free animations with transform and opacity, why other properties cause layout or paint, how to use the Web Animations API, and how to handle reduced-motion preferences.
+audio: "https://frontcore.t3.storage.dev/audios/frontend/css-and-layout/animation-performance.m4a"
+image: "https://frontcore.t3.storage.dev/Images/frontend/css-and-layout/animation-performance.png"
 ---
 
-<Audio
-  src="https://frontcore.t3.storage.dev/audios/frontend/css-and-layout/animation-performance.m4a"
-  title="Animation Performance"
-/>
-
-<Img
-  src="https://frontcore.t3.storage.dev/Images/frontend/css-and-layout/animation-performance.png"
-  alt="Animation Performance overview"
-/>
 ## Overview
 
 A smooth animation requires the browser to produce a new frame every ~16ms (60fps). Every frame, the browser runs some combination of layout, paint, and composite. Animations that only trigger the composite phase run entirely on the GPU compositor thread — independently of the main JavaScript thread — and stay smooth even when JavaScript is busy. Animations that trigger layout or paint run on the main thread and compete directly with your JavaScript for frame time.

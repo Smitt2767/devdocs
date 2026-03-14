@@ -423,12 +423,12 @@ const PlayButton = ({
     >
       {playing ? (
         <PauseIcon
-          className={cn("size-4", loading && "opacity-0")}
+          className={cn("size-4 fill-current", loading && "opacity-0")}
           aria-hidden="true"
         />
       ) : (
         <PlayIcon
-          className={cn("size-4", loading && "opacity-0")}
+          className={cn("size-4 fill-current", loading && "opacity-0")}
           aria-hidden="true"
         />
       )}
